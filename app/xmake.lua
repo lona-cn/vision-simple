@@ -1,0 +1,1 @@
+includes(path.join(os.scriptdir(),"source","xmake.lua"))
