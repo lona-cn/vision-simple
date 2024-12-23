@@ -8,7 +8,7 @@ set_license("MIT")
 add_configs("dml", { description = "Enable MicroSoft DirectML Support", default = true, readonly = true })
 add_configs("shared", { description = "Forced Shared Library", default = true, readonly = true })
 add_configs("runtimes", { description = "Forced MD", default = "MT", readonly = true })
-
+add_deps("directml",{system = false})
 if is_plat("windows") then
     if is_arch("x64") then
         set_urls("https://github.com/microsoft/onnxruntime/releases/download/v$(version)/Microsoft.ML.OnnxRuntime.DirectML.$(version).nupkg")
@@ -23,7 +23,6 @@ on_download(function(package, opt)
     local sourcedir = opt.sourcedir
     local packagefile = path.filename(url)
     packagefile = string.gsub(packagefile, "nupkg", "zip")
-    print("file:" .. packagefile)
     local sourcehash = package:sourcehash(opt.url_alias)
 
     local cached = true

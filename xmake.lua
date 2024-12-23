@@ -1,5 +1,5 @@
 set_xmakever("2.9.4")
-set_project("gpa")
+set_project("vision-simple")
 
 -- language version
 set_languages("c23", "c++23")
@@ -16,7 +16,7 @@ if is_mode("release") then
 elseif is_mode("releasedbg") then
     set_optimize("none")
     set_runtimes("MDd")
-    add_defines("GPA_DEBUG")
+    add_defines("VISION_SIMPLE_DEBUG")
     set_symbols("debug")
     set_warnings("all")
     --set_warnings("all", "error")

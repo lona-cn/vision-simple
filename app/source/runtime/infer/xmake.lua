@@ -2,6 +2,7 @@ target("infer")
 set_kind("static")
 set_group("runtime")
 -- deps
+local packages = {"openmp","onnxruntime","opencv","magic_enum"}
 for _, v in ipairs(packages) do
     add_packages(v, { public = false })
 end
@@ -14,7 +15,7 @@ add_headerfiles("private/*.hpp", { install = false })
 add_includedirs(os.scriptdir(), { public = true })
 add_includedirs("private", { public = false })
 --links
-add_syslinks("User32", "dxgi", "opengl32")
+add_syslinks("User32", "dxgi")
 target_end()
 --tests
 for _,file in ipairs(os.files("test/test_*.cpp")) do
@@ -29,14 +30,14 @@ for _,file in ipairs(os.files("test/test_*.cpp")) do
 	add_deps("infer")
 	add_files(path.join("test",name..".cpp"))
 	add_tests("default")
-	after_build(function(target)
+	after_build(function(target) 
 		local t_pkgs = target:get("packages")
 		for _,pkg_name in ipairs(t_pkgs) do
 			local pkg = target:pkg(pkg_name)
 			os.cp(pkg:installdir().."/bin/*.dll",target:targetdir().."/")
 			os.cp(pkg:installdir().."/lib/*.dll",target:targetdir().."/")
 		end
-		os.cp("$(scriptdir)/test/res/",target:targetdir().."/")
+		os.cp("$(projectdir)/app/source/programs/demo/assets/",target:targetdir().."/")
 	end)
 	target_end()
 end

@@ -1,5 +1,6 @@
 target("demo")
 set_kind("binary")
+set_group("programs")
 add_ldflags("/subsystem:console")
 add_files("demo/*.cpp")
 add_headerfiles("demo/*.h")
