@@ -7,7 +7,9 @@
 #include <vector>
 #include <opencv2/opencv.hpp>
 #include <immintrin.h>
-
+#ifdef _WIN32
+#include "DXInfo.hpp"
+#endif
 
 #ifndef VISION_NUM_CVT_THREADS
 // 数据类型转换线程数，多线程同时会调用F16C提高速度

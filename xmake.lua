@@ -1,4 +1,4 @@
-set_xmakever("2.9.4")
+set_xmakever("2.9.7")
 set_project("vision-simple")
 
 -- language version
