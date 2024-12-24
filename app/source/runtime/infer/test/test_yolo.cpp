@@ -85,6 +85,55 @@ public:
     }
 };
 
+class FPSCounter
+{
+    // 使用高精度时钟计算时间
+    std::chrono::time_point<std::chrono::high_resolution_clock> startTime{std::chrono::high_resolution_clock::now()};
+    int frameCount{0}; // 当前计算时间窗口内的帧数
+    double fps{0.0}; // 当前FPS值
+    double timeWindow{1.0}; // 每次计算的时间窗口（秒）
+
+public:
+    // 更新帧数并计算FPS
+    void update()
+    {
+        frameCount++; // 增加当前窗口内的帧数
+
+        // 当前时间
+        auto now = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = now - startTime;
+
+        // 如果当前时间窗口已过
+        if (elapsed.count() >= timeWindow)
+        {
+            // 计算过去 timeWindow 秒内的平均 FPS
+            fps = frameCount / elapsed.count();
+
+            // 重置时间和帧数
+            startTime = now; // 更新起始时间
+            frameCount = 0; // 重置帧数
+        }
+    }
+
+    // 获取当前FPS
+    double getFPS() const
+    {
+        return fps;
+    }
+
+    // 在图像上显示FPS信息
+    void display(cv::Mat& frame)
+    {
+        std::string fpsText = "Infer FPS: " + std::to_string(static_cast<int>(fps));
+
+        // 确保窗口大小足够显示文字
+        if (frame.rows > 30 && frame.cols > 100)
+        {
+            cv::putText(frame, fpsText, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
+        }
+    }
+};
+
 void drawYOLOResults(cv::Mat& image, const std::vector<YOLOResult>& results)
 {
     for (const auto& result : results)
@@ -112,6 +161,8 @@ void drawYOLOResults(cv::Mat& image, const std::vector<YOLOResult>& results)
     }
 }
 
+using Finally = std::unique_ptr<char, std::function<void(void*)>>;
+
 int main(int argc, char* argv[])
 {
     auto data = ReadAll("assets/hd2-yolo11n-fp16.onnx");
@@ -130,23 +181,26 @@ int main(int argc, char* argv[])
     // cv::waitKey(0);
     auto video = cv::VideoCapture("assets/hd2.avi");
     DoubleBuffer buf;
-    std::atomic_bool exit_flag = false;
+    std::atomic_bool exit_flag{false};
     std::jthread t{
         [&]
         {
-            std::unique_ptr<char, std::function<void(void*)>> finally{
-                reinterpret_cast<char*>(1), [&](void*)
+            Finally finally{
+                reinterpret_cast<char*>(42), [&](void*)
                 {
                     exit_flag.store(true);
                 }
             };
-            while (video.grab())
+            FPSCounter fps_counter{};
+            while (!exit_flag.load() && video.grab())
             {
                 buf.write([&](cv::Mat& buf_image)
                 {
-                    video.read(buf_image);
+                    video.retrieve(buf_image);
                     auto result = infer_yolo->get()->Run(buf_image, 0.625);
                     drawYOLOResults(buf_image, result->results);
+                    fps_counter.update();
+                    fps_counter.display(buf_image);
                 });
             }
         }
@@ -154,7 +208,10 @@ int main(int argc, char* argv[])
     while (!exit_flag.load())
     {
         cv::imshow("YOLO Detection", buf.read());
-        cv::waitKey(1);
+        if (cv::waitKey(1) == 27)
+        {
+            exit_flag.store(true);
+        }
     }
     return 0;
 }
