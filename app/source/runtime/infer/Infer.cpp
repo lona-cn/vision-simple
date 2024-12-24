@@ -4,6 +4,9 @@
 #include <onnxruntime_float16.h>
 #include <onnxruntime_session_options_config_keys.h>
 #include <onnxruntime_run_options_config_keys.h>
+#ifdef VISION_SIMPLE_WITH_DML
+#include <dml_provider_factory.h>
+#endif
 #include <magic_enum.hpp>
 #include <memory>
 #include <numeric>
@@ -192,6 +195,53 @@ namespace vision_simple
             return YOLOFrameResult{std::move(nmsed_detections)};
         }
 
+        YOLOFrameResult v10(
+            std::span<const float> infer_output,
+            float confidence_threshold,
+            int img_width, int img_height,
+            int orig_width, int orig_height) const
+        {
+            std::vector<YOLOResult> detections;
+            const int num_detections = infer_output.size() / 6;
+
+            // Calculate scale and padding factors
+            float width_scale = img_width / (float)orig_width;
+            float height_scale = img_height / (float)orig_height;
+            int new_width = static_cast<int>(orig_width * width_scale);
+            int new_height = static_cast<int>(orig_height * height_scale);
+            int pad_x = (img_width - new_width) / 2;
+            int pad_y = (img_height - new_height) / 2;
+
+            detections.reserve(num_detections);
+            for (int i = 0; i < num_detections; ++i)
+            {
+                float left = infer_output[i * 6 + 0];
+                float top = infer_output[i * 6 + 1];
+                float right = infer_output[i * 6 + 2];
+                float bottom = infer_output[i * 6 + 3];
+                float confidence = infer_output[i * 6 + 4];
+                int class_id = static_cast<int>(infer_output[i * 6 + 5]);
+
+                if (confidence >= confidence_threshold)
+                {
+                    // Remove padding and rescale to original image dimensions
+                    left = (left - pad_x) / width_scale;
+                    top = (top - pad_y) / height_scale;
+                    right = (right - pad_x) / width_scale;
+                    bottom = (bottom - pad_y) / height_scale;
+
+                    int x = static_cast<int>(left);
+                    int y = static_cast<int>(top);
+                    int width = static_cast<int>(right - left);
+                    int height = static_cast<int>(bottom - top);
+                    detections.emplace_back(class_id, cv::Rect(x, y, width, height), confidence,
+                                            this->class_names_[class_id]);
+                }
+            }
+            auto nmsed_detections = ApplyNMS(detections, 0.3f);
+            return YOLOFrameResult{nmsed_detections};
+        }
+
         FilterResult operator ()(
             std::span<const float> infer_output,
             float confidence_threshold,
@@ -200,23 +250,16 @@ namespace vision_simple
         {
             if (version_ == YOLOVersion::kV10)
             {
-                //TODO implement v10
-                return std::unexpected(InferError{
-                    InferErrorCode::kParameterError,
-                    std::format("not implement yet: {}", magic_enum::enum_name(version_))
-                });
+                return v10(infer_output, confidence_threshold, img_width, img_height, orig_width, orig_height);
             }
-            else if (version_ == YOLOVersion::kV11)
+            if (version_ == YOLOVersion::kV11)
             {
                 return v11(infer_output, confidence_threshold, img_width, img_height, orig_width, orig_height);
             }
-            else
-            {
-                return std::unexpected(InferError{
-                    InferErrorCode::kParameterError,
-                    std::format("unsupported version: {}", magic_enum::enum_name(version_))
-                });
-            }
+            return std::unexpected(InferError{
+                InferErrorCode::kParameterError,
+                std::format("unsupported version: {}", magic_enum::enum_name(version_))
+            });
         }
     };
 
@@ -279,13 +322,13 @@ namespace vision_simple
             cvtColor(preprocess_image, preprocess_image, cv::COLOR_BGR2RGB);
             //chw2hwc
             split(preprocess_image, channels);
-            // cv::merge(channels, preprocess_image);
-            const auto num_pixels = input_size_.width * input_size_.height;
+            const size_t num_pixels = input_size_.width * input_size_.height;
+            auto preprocess_image_ptr = preprocess_image.ptr<float>();
 #pragma omp parallel for num_threads(3)
             for (int c = 0; c < 3; ++c)
             {
                 const auto src = channels[c].data;
-                auto dst = preprocess_image.ptr<float>() + num_pixels * c;
+                auto dst = preprocess_image_ptr + num_pixels * c;
                 std::memcpy(dst, src, num_pixels * sizeof(float));
             }
             return preprocess_image;
@@ -395,11 +438,12 @@ namespace vision_simple
     namespace
     {
         using InferYOLOFactory = std::function<InferYOLO::CreateResult(
-            InferContext& context, std::span<uint8_t> data, YOLOVersion version)>;
+            InferContext& context, std::span<uint8_t> data, YOLOVersion version, size_t device_id)>;
+
         std::map<InferFramework, InferYOLOFactory> infer_yolo_factories{
             std::make_pair(InferFramework::kONNXRUNTIME,
                            [](InferContext& context, std::span<uint8_t> data,
-                              YOLOVersion version)-> InferYOLO::CreateResult
+                              YOLOVersion version, size_t device_id)-> InferYOLO::CreateResult
                            {
                                auto& ort_ctx = dynamic_cast<InferContextONNXRuntime&>(context);
                                auto& env = ort_ctx.env();
@@ -415,19 +459,7 @@ namespace vision_simple
                                                               "0");
                                if (context.execution_provider() == InferEP::kDML)
                                {
-                                   session_options.SetInterOpNumThreads(1);
-                                   session_options.SetIntraOpNumThreads(1);
-                                   session_options.SetLogSeverityLevel(ORT_LOGGING_LEVEL_VERBOSE);
-                                   session_options.SetExecutionMode(ORT_SEQUENTIAL);
-                                   session_options.DisableMemPattern();
-                                   session_options.AddConfigEntry(kOrtSessionOptionsDisableCPUEPFallback, "1");
-
-                                   // const OrtDmlApi* dml_api = nullptr;
-                                   // Ort::GetApi().GetExecutionProviderApi("DML",ORT_API_VERSION,
-                                   // reinterpret_cast<const void**>(&
-                                   // dml_api));
-                                   // dml_api->SessionOptionsAppendExecutionProvider_DML(
-                                   // session_options, device_.id);
+#ifndef VISION_SIMPLE_WITH_DML
                                    return std::unexpected{
                                        InferError{
                                            InferErrorCode::kRuntimeError,
@@ -435,6 +467,20 @@ namespace vision_simple
                                                        magic_enum::enum_name(context.execution_provider()))
                                        }
                                    };
+#else
+                                   session_options.SetInterOpNumThreads(1);
+                                   session_options.SetIntraOpNumThreads(1);
+                                   // session_options.SetLogSeverityLevel(ORT_LOGGING_LEVEL_VERBOSE);
+                                   session_options.SetExecutionMode(ORT_SEQUENTIAL);
+                                   session_options.DisableMemPattern();
+                                   session_options.AddConfigEntry(kOrtSessionOptionsDisableCPUEPFallback, "1");
+                                   const OrtDmlApi* dml_api = nullptr;
+                                   Ort::GetApi().GetExecutionProviderApi("DML",ORT_API_VERSION,
+                                                                         reinterpret_cast<const void**>(&
+                                                                             dml_api));
+                                   dml_api->SessionOptionsAppendExecutionProvider_DML(
+                                       session_options, static_cast<int>(device_id));
+#endif
                                }
                                try
                                {
@@ -488,11 +534,11 @@ namespace vision_simple
     }
 
     InferYOLO::CreateResult InferYOLO::Create(InferContext& context, std::span<uint8_t> data,
-                                              YOLOVersion version) noexcept
+                                              YOLOVersion version, size_t device_id) noexcept
     {
         try
         {
-            return infer_yolo_factories.at(context.framework())(context, data, version);
+            return infer_yolo_factories.at(context.framework())(context, data, version, device_id);
         }
         catch (std::exception& _)
         {

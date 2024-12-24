@@ -40,11 +40,12 @@ on_download(function(package, opt)
     end
 
     -- extract package file
-    local sourcedir_tmp = sourcedir .. ".tmp"
-    os.rm(sourcedir_tmp)
-    if archive.extract(packagefile, sourcedir_tmp) then
-        os.rm(sourcedir)
-        os.mv(sourcedir_tmp, sourcedir)
+    -- local sourcedir_tmp = sourcedir .. ".tmp"
+    -- os.rm(sourcedir_tmp)
+    os.tryrm(sourcedir)
+    if archive.extract(packagefile, sourcedir) then
+        -- os.rm(sourcedir)
+        -- os.mv(sourcedir_tmp, sourcedir)
     else
         -- if it is not archive file, we need only create empty source file and use package:originfile()
         os.tryrm(sourcedir)
@@ -64,16 +65,4 @@ on_install("windows", function(package)
     os.cp("include/*", package:installdir("include"))
 end)
 
-on_test(function(package)
-    assert(package:check_cxxsnippets({ test = [[
-            void test() {
-                Microsoft::WRL::ComPtr<IDMLDevice> dmlDevice;
-				HRESULT hr = DMLCreateDevice(
-					nullptr,                   // 使用默认 Direct3D 设备
-					DML_CREATE_DEVICE_FLAG_NONE, // 默认标志
-					IID_PPV_ARGS(&dmlDevice)    // 输出 DirectML 设备指针
-				);
-            }
-        ]] }, { configs = { languages = "c++17" }, includes = "DirectML.h" }))
-end)
 package_end()

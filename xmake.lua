@@ -6,12 +6,13 @@ set_languages("c23", "c++23")
 -- compiler float mode
 set_fpmodels("fast")
 -- basic
+--add_vectorexts("sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2", "f16c", "avx", "avx2")
+add_vectorexts("all")
 if is_mode("release") then
     set_optimize("fastest")
     set_runtimes("MT")
     set_strip("all")
     set_warnings("none")
-    add_vectorexts("sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2", "f16c", "avx", "avx2")
     set_symbols("hidden")
 elseif is_mode("releasedbg") then
     set_optimize("none")

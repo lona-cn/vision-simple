@@ -70,8 +70,12 @@ void drawYOLOResults(cv::Mat& image, const std::vector<YOLOResult>& results)
 
 int main(int argc, char* argv[])
 {
-    auto data = ReadAll("assets/hd2-yolo11n-fp32.onnx");
+    auto data = ReadAll("assets/hd2-yolo11n-fp16.onnx");
+#ifdef VISION_SIMPLE_WITH_DML
+    auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
+#else
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCPU);
+#endif
     auto infer_yolo = InferYOLO::Create(**ctx, data->span(), YOLOVersion::kV11);
     auto image = cv::imread("assets/hd2.png");
     auto result = infer_yolo->get()->Run(image, 0.625);
