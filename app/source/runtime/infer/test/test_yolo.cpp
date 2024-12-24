@@ -80,5 +80,13 @@ int main(int argc, char* argv[])
     cv::resizeWindow("YOLO Detection", 1720, 720); // 设置窗口大小
     cv::imshow("YOLO Detection", image);
     cv::waitKey(0);
+    auto video = cv::VideoCapture("assets/hd2.avi");
+    while (video.read(image))
+    {
+        result = infer_yolo->get()->Run(image, 0.625);
+        drawYOLOResults(image, result->results);
+        cv::imshow("YOLO Detection", image);
+        cv::waitKey(1);
+    }
     return 0;
 }
