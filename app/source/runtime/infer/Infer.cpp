@@ -149,22 +149,25 @@ namespace vision_simple
             int img_width, int img_height,
             int orig_width, int orig_height) const
         {
+            const float* infer_output_ptr = infer_output.data();
             std::vector<YOLOResult> detections{0};
+            // TODO:自适应预分配
+            detections.reserve(256);
             const size_t num_features = shapes_[1];
             const size_t num_detections = shapes_[2];
             const int num_classes = static_cast<int>(num_features) - 4;
-            for (size_t d = 0; d < num_detections; ++d)
+            for (int64_t d = 0; d < num_detections; ++d)
             {
-                const float cx = infer_output[0 * num_detections + d];
-                const float cy = infer_output[1 * num_detections + d];
-                const float ow = infer_output[2 * num_detections + d];
-                const float oh = infer_output[3 * num_detections + d];
+                const float cx = infer_output_ptr[0 * num_detections + d];
+                const float cy = infer_output_ptr[1 * num_detections + d];
+                const float ow = infer_output_ptr[2 * num_detections + d];
+                const float oh = infer_output_ptr[3 * num_detections + d];
                 int object_class_id = 0;
-                float object_confidence = infer_output[4 * num_detections + d];
+                float object_confidence = infer_output_ptr[4 * num_detections + d];
                 // Find the class with the highest confidence
                 for (int class_id = 1; class_id < num_classes; ++class_id)
                 {
-                    float class_confidence = infer_output[(4 + class_id) * num_detections + d];
+                    float class_confidence = infer_output_ptr[(4 + class_id) * num_detections + d];
                     if (class_confidence > object_confidence)
                     {
                         object_confidence = class_confidence;
@@ -201,7 +204,8 @@ namespace vision_simple
             int img_width, int img_height,
             int orig_width, int orig_height) const
         {
-            std::vector<YOLOResult> detections;
+            std::vector<YOLOResult> detections{0};
+            detections.reserve(256);
             const int num_detections = infer_output.size() / 6;
 
             // Calculate scale and padding factors
@@ -211,8 +215,6 @@ namespace vision_simple
             int new_height = static_cast<int>(orig_height * height_scale);
             int pad_x = (img_width - new_width) / 2;
             int pad_y = (img_height - new_height) / 2;
-
-            detections.reserve(num_detections);
             for (int i = 0; i < num_detections; ++i)
             {
                 float left = infer_output[i * 6 + 0];
@@ -285,9 +287,8 @@ namespace vision_simple
                        const Size& target_size,
                        const Scalar& color = cv::Scalar(0, 0, 0))
         {
-            float scale = std::min(
-                static_cast<float>(target_size.width) / static_cast<float>(src.cols),
-                static_cast<float>(target_size.height) / static_cast<float>(src.rows));
+            float scale = std::min(static_cast<float>(target_size.width) / static_cast<float>(src.cols),
+                                   static_cast<float>(target_size.height) / static_cast<float>(src.rows));
             int new_width = static_cast<int>(static_cast<float>(src.cols) * scale);
             int new_height = static_cast<int>(static_cast<float>(src.rows) * scale);
             resize(src, letterbox_resized_image,
@@ -313,13 +314,9 @@ namespace vision_simple
 
         Mat& PreProcess(const Mat& image) noexcept
         {
-            if (preprocess_image.cols != image.rows || preprocess_image.rows != image.cols)
-            {
-                preprocess_image = Mat::zeros(image.rows, image.cols,CV_32F);
-            }
             auto& dst_image = Letterbox(image, input_size_);
             dst_image.convertTo(preprocess_image, CV_32F, 1.0 / 255);
-            cvtColor(preprocess_image, preprocess_image, cv::COLOR_BGR2RGB);
+            // cvtColor(preprocess_image, preprocess_image, cv::COLOR_BGR2RGB);
             //chw2hwc
             split(preprocess_image, channels);
             const size_t num_pixels = input_size_.width * input_size_.height;
@@ -327,7 +324,8 @@ namespace vision_simple
 #pragma omp parallel for num_threads(3)
             for (int c = 0; c < 3; ++c)
             {
-                const auto src = channels[c].data;
+                int channel_mapper[3] = {2, 1, 0};
+                const auto src = channels[channel_mapper[c]].data;
                 auto dst = preprocess_image_ptr + num_pixels * c;
                 std::memcpy(dst, src, num_pixels * sizeof(float));
             }
@@ -379,6 +377,10 @@ namespace vision_simple
         RunResult Run(const Mat& image, float confidence_threshold) noexcept override
         {
             //PreProcess
+            if (image.rows == 0 || image.cols == 0)
+                return std::unexpected(InferError{
+                    InferErrorCode::kParameterError, "image is empty"
+                });
             Mat& hwc = PreProcess(image);
             auto hwc_ptr = hwc.ptr<float>();
             auto hwc_size = hwc.channels() * hwc.cols * hwc.rows;

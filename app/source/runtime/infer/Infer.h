@@ -120,12 +120,13 @@ namespace vision_simple
         {
             constexpr int step = 8; // 每批次处理8个元素
             const auto size = from.size();
+            const float* from_ptr = from.data();
 
             // 主体并行处理部分
 #pragma omp parallel for num_threads(VISION_NUM_CVT_THREADS)
             for (int i = 0; i < static_cast<int>(size / step) * step; i += step)
             {
-                __m256 float32_vec = _mm256_loadu_ps(&from[i]); // 加载8个float
+                __m256 float32_vec = _mm256_loadu_ps(&from_ptr[i]); // 加载8个float
                 __m128i float16_vec = _mm256_cvtps_ph(float32_vec,
                                                       _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
                 _mm_storeu_si128(reinterpret_cast<__m128i*>(&output[i]), float16_vec); // 存储8个Float16
@@ -141,7 +142,7 @@ namespace vision_simple
                 alignas(16) uint16_t temp_output[step] = {};
 
                 // 拷贝剩余元素
-                std::copy_n(from.begin() + offset, remaining, temp_input);
+                std::copy_n(&from_ptr[offset], remaining, temp_input);
 
                 // 转换剩余元素
                 __m256 float32_vec = _mm256_loadu_ps(temp_input);
@@ -159,12 +160,13 @@ namespace vision_simple
         {
             constexpr int step = 8; // 每批次处理8个元素
             const auto size = from.size();
+            const Ort::Float16_t* from_ptr = from.data();
 
             // 主体并行处理部分
 #pragma omp parallel for num_threads(VISION_NUM_CVT_THREADS)
             for (int i = 0; i < static_cast<int>(size / step) * step; i += step)
             {
-                __m128i float16_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&from[i])); // 加载8个Float16
+                __m128i float16_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&from_ptr[i])); // 加载8个Float16
                 __m256 float32_vec = _mm256_cvtph_ps(float16_vec); // 转换为Float32
                 _mm256_storeu_ps(&output[i], float32_vec); // 存储结果
             }
@@ -179,7 +181,7 @@ namespace vision_simple
                 alignas(32) float temp_output[step] = {};
 
                 // 拷贝剩余元素
-                std::copy_n(reinterpret_cast<const uint16_t*>(&from[offset]), remaining, temp_input);
+                std::copy_n(reinterpret_cast<const uint16_t*>(&from_ptr[offset]), remaining, temp_input);
 
                 // 转换剩余元素
                 __m128i float16_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(temp_input));
@@ -219,5 +221,11 @@ namespace vision_simple
                           std::span(reinterpret_cast<uint8_t*>(data.data()), data.size_bytes()),
                           version, device_id);
         }
+    };
+
+    //--------OCR--------
+    // struct 
+    class InferOCR
+    {
     };
 }
