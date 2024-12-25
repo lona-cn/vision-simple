@@ -1,3 +1,4 @@
+#include <filesystem>
 #include <fstream>
 #include <semaphore>
 #include <Infer.h>
@@ -28,6 +29,7 @@ std::expected<DataBuffer<uint8_t>, InferError> ReadAll(
             std::format("unable to open file '{}'", path)
         });
     }
+    const auto fs_size = std::filesystem::file_size(path);
     const size_t size = ifs.tellg();
     if (size <= 0)
     {
@@ -234,12 +236,15 @@ using Finally = std::unique_ptr<char, std::function<void(void*)>>;
 
 int main(int argc, char* argv[])
 {
+    std::cout << "Read Model" << std::endl;
     auto data = ReadAll("assets/hd2-yolo11n-fp16.onnx");
+    std::cout << "Create Infer Context" << std::endl;
 #ifdef VISION_SIMPLE_WITH_DML
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
 #else
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCPU);
 #endif
+    std::cout << "Create Infer Instance" << std::endl;
     auto infer_yolo = InferYOLO::Create(**ctx, data->span(), YOLOVersion::kV11);
     const char* WINDIW_TITLE = "YOLO Detection";
     cv::namedWindow(WINDIW_TITLE, cv::WINDOW_NORMAL); // 支持调整大小
@@ -261,6 +266,7 @@ int main(int argc, char* argv[])
                 }
             };
             auto video = cv::VideoCapture("assets/hd2.avi");
+            std::cout << "Video Decoding thread running" << std::endl;
             while (!exit_flag.load() && video.grab())
             {
                 cv::Mat img;
@@ -299,7 +305,9 @@ int main(int argc, char* argv[])
         if (!show_img_opt)continue;
         auto& frame = *show_img_opt;
         if (!frame.empty())
+        {
             cv::imshow(WINDIW_TITLE, frame);
+        }
         if (cv::waitKey(1) == 27)
         {
             exit_flag.store(true);
