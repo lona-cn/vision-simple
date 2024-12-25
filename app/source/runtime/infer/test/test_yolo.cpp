@@ -1,5 +1,7 @@
 #include <fstream>
+#include <semaphore>
 #include <Infer.h>
+#include <shared_mutex>
 
 using namespace vision_simple;
 
@@ -46,42 +48,109 @@ class DoubleBuffer
 private:
     cv::Mat buffer[2]; // 双缓冲区
     int currentIndex = 0; // 当前缓冲区索引
-    bool newDataAvailable = false; // 数据更新标志
-    std::mutex mtx; // 互斥锁
-    std::condition_variable dataReady; // 条件变量
+    std::shared_mutex mtx; // 互斥锁
 
 public:
     // 写入数据，支持自定义处理函数
-    void write(std::function<void(cv::Mat&)> processFrame)
+    void Write(const std::function<void(cv::Mat&)>& process_frame)
     {
-        std::unique_lock<std::mutex> lock(mtx);
-
         // 在备用缓冲区上执行自定义操作
-        processFrame(buffer[1 - currentIndex]); // 用户定义的操作
-
-        // 标记新数据可用
-        newDataAvailable = true;
-
-        // 通知消费者
-        dataReady.notify_one();
+        process_frame(BackFrame()); // 用户定义的操作
+        // 交换缓冲区
+        std::unique_lock lock{mtx};
+        currentIndex = 1 - currentIndex;
     }
 
-    // 读取数据
-    cv::Mat& read()
+    cv::Mat& FrontFrame()
     {
-        std::unique_lock<std::mutex> lock(mtx);
-
-        // 等待新数据
-        dataReady.wait(lock, [this]() { return newDataAvailable; });
-
-        // 切换到新缓冲区
-        currentIndex = 1 - currentIndex;
-
-        // 重置标志位
-        newDataAvailable = false;
-
-        // 返回缓冲区引用
+        std::shared_lock lock{mtx};
         return buffer[currentIndex];
+    }
+
+    cv::Mat& BackFrame()
+    {
+        std::shared_lock lock{mtx};
+        return buffer[1 - currentIndex];
+    }
+};
+
+template <typename T, size_t QUEUE_SIZE = 10>
+class SafeQueue
+{
+    std::queue<T> queue_; // 队列存储
+    std::counting_semaphore<QUEUE_SIZE> emptySlots_{QUEUE_SIZE}; // 空槽数，初始值为 QUEUE_SIZE
+    std::counting_semaphore<QUEUE_SIZE> filledSlots_{0}; // 已用槽数，初始值为 0
+    mutable std::shared_mutex mtx_; // 线程安全的互斥锁
+
+public:
+    SafeQueue() = default;
+
+    // **1. PopFrontFor：超时等待并取出队首元素**
+    template <class Rep, typename Period>
+    std::optional<T> PopFrontFor(std::chrono::duration<Rep, Period> duration)
+    {
+        try
+        {
+            // 等待 filledSlots 信号量（已用槽数）减少，超时则返回空
+            if (!filledSlots_.try_acquire_for(duration))
+                return std::nullopt;
+        }
+        catch (const std::system_error& _)
+        {
+            return std::nullopt; // 出错返回
+        }
+
+        // 从队列中取元素
+        std::unique_lock lock{mtx_};
+        if (queue_.empty()) // 再次检查空队列情况
+        {
+            filledSlots_.release(); // 恢复信号量
+            return std::nullopt;
+        }
+        auto item = std::move(queue_.front());
+        queue_.pop();
+
+        // 增加空槽数信号量
+        emptySlots_.release();
+        return item;
+    }
+
+    // **2. PushBack：向队尾添加元素，受信号量控制**
+    template <class Rep, typename Period>
+    bool PushBack(T&& item, T& out, std::chrono::duration<Rep, Period> duration)
+    {
+        try
+        {
+            // 等待空槽，如果没有空槽则阻塞，避免超过容量
+            if (!emptySlots_.try_acquire_for(duration))return false;
+        }
+        catch (const std::system_error& _)
+        {
+            return false; // 操作失败
+        }
+
+        // 加入队列
+        {
+            std::unique_lock lock{mtx_};
+            queue_.emplace(std::move(item));
+        }
+
+        // 增加已用槽数信号量
+        filledSlots_.release();
+        return true;
+    }
+
+    // **3. 获取队列大小**
+    size_t Size() const
+    {
+        std::shared_lock lock{mtx_};
+        return queue_.size();
+    }
+
+    // **4. 判断队列是否为空**
+    bool IsEmpty() const
+    {
+        return Size() == 0;
     }
 };
 
@@ -172,17 +241,17 @@ int main(int argc, char* argv[])
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCPU);
 #endif
     auto infer_yolo = InferYOLO::Create(**ctx, data->span(), YOLOVersion::kV11);
-    cv::namedWindow("YOLO Detection", cv::WINDOW_NORMAL); // 支持调整大小
-    cv::resizeWindow("YOLO Detection", 1720, 720); // 设置窗口大小
+    const char* WINDIW_TITLE = "YOLO Detection";
+    cv::namedWindow(WINDIW_TITLE, cv::WINDOW_NORMAL); // 支持调整大小
+    cv::resizeWindow(WINDIW_TITLE, 1720, 720); // 设置窗口大小
     // auto image = cv::imread("assets/hd2.png");
     // auto result = infer_yolo->get()->Run(image, 0.625);
     // drawYOLOResults(image, result->results);
     // cv::imshow("YOLO Detection", image);
     // cv::waitKey(0);
-    auto video = cv::VideoCapture("assets/hd2.avi");
-    DoubleBuffer buf;
+    SafeQueue<cv::Mat> decode_queue, show_queue;
     std::atomic_bool exit_flag{false};
-    std::jthread t{
+    std::jthread video_thread{
         [&]
         {
             Finally finally{
@@ -191,23 +260,46 @@ int main(int argc, char* argv[])
                     exit_flag.store(true);
                 }
             };
-            FPSCounter fps_counter{};
+            auto video = cv::VideoCapture("assets/hd2.avi");
             while (!exit_flag.load() && video.grab())
             {
-                buf.write([&](cv::Mat& buf_image)
+                cv::Mat img;
+                video.retrieve(img);
+                // auto rect = cv::getWindowImageRect(WINDIW_TITLE);
+                // cv::resize(img, img, rect.size());
+                while (!exit_flag.load() && !decode_queue.PushBack(std::move(img), img, std::chrono::milliseconds(10)))
                 {
-                    video.retrieve(buf_image);
-                    auto result = infer_yolo->get()->Run(buf_image, 0.625);
-                    drawYOLOResults(buf_image, result->results);
-                    fps_counter.update();
-                    fps_counter.display(buf_image);
-                });
+                }
+            }
+        }
+    };
+    //TODO: multithread+reoredered frame
+    std::jthread infer_thread{
+        [&]
+        {
+            FPSCounter fps_counter{};
+            while (!exit_flag.load())
+            {
+                auto front_frame_opt = decode_queue.PopFrontFor(std::chrono::milliseconds(10));
+                if (!front_frame_opt)continue;
+                auto result = infer_yolo->get()->Run(*front_frame_opt, 0.225f);
+                drawYOLOResults(*front_frame_opt, result->results);
+                fps_counter.update();
+                fps_counter.display(*front_frame_opt);
+                auto img = *std::move(front_frame_opt);
+                while (!exit_flag.load() && !show_queue.PushBack(std::move(img), img, std::chrono::milliseconds(10)))
+                {
+                }
             }
         }
     };
     while (!exit_flag.load())
     {
-        cv::imshow("YOLO Detection", buf.read());
+        auto show_img_opt = show_queue.PopFrontFor(std::chrono::milliseconds(10));
+        if (!show_img_opt)continue;
+        auto& frame = *show_img_opt;
+        if (!frame.empty())
+            cv::imshow(WINDIW_TITLE, frame);
         if (cv::waitKey(1) == 27)
         {
             exit_flag.store(true);
