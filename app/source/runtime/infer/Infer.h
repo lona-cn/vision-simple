@@ -90,25 +90,6 @@ namespace vision_simple
         static CreateResult Create(InferFramework framework, InferEP ep) noexcept;
     };
 
-    enum class YOLOVersion:uint8_t
-    {
-        kVCustom = 0,
-        kV10 = 10,
-        kV11,
-    };
-
-    struct YOLOResult
-    {
-        int32_t class_id;
-        cv::Rect bbox;
-        float confidence;
-        std::string_view class_name;
-    };
-
-    struct YOLOFrameResult
-    {
-        std::vector<YOLOResult> results;
-    };
 
     class Cvt
     {
@@ -195,6 +176,27 @@ namespace vision_simple
     };
 
 
+    //--------YOLO--------
+    enum class YOLOVersion:uint8_t
+    {
+        kVCustom = 0,
+        kV10 = 10,
+        kV11,
+    };
+
+    struct YOLOResult
+    {
+        int32_t class_id;
+        cv::Rect bbox;
+        float confidence;
+        std::string_view class_name;
+    };
+
+    struct YOLOFrameResult
+    {
+        std::vector<YOLOResult> results;
+    };
+
     class InferYOLO
     {
     public:
@@ -224,8 +226,49 @@ namespace vision_simple
     };
 
     //--------OCR--------
-    // struct 
+    enum class OCRModelType:uint8_t
+    {
+        kPPOCRv3 = 0,
+        kPPOCRv4,
+        kEasyOCR
+    };
+
+    struct OCRResult
+    {
+        cv::Rect2i rect;
+        float confidence;
+        std::string line;
+    };
+
+    struct OCRFrameResult
+    {
+        std::vector<OCRResult> results;
+    };
+
     class InferOCR
     {
+    public:
+        using CreateResult = InferResult<std::unique_ptr<InferOCR>>;
+        using RunResult = InferResult<OCRFrameResult>;
+        InferOCR() = default;
+        virtual ~InferOCR() = default;
+        InferOCR(const InferOCR&) = delete;
+        InferOCR(InferOCR&&) = default;
+        InferOCR& operator=(const InferOCR&) = delete;
+        InferOCR& operator=(InferOCR&&) = default;
+        virtual OCRModelType model_type() =0;
+        virtual RunResult Run(const cv::Mat& image, float confidence_threshold) noexcept = 0;
+        static CreateResult Create(InferContext& context, std::span<uint8_t> data, OCRModelType model_type,
+                                   size_t device_id = 0) noexcept;
+
+        template <typename T>
+            requires std::is_arithmetic_v<T>
+        static CreateResult Create(InferContext& context, std::span<T> data, OCRModelType model_type,
+                                   size_t device_id = 0) noexcept
+        {
+            return Create(context,
+                          std::span(reinterpret_cast<uint8_t*>(data.data()), data.size_bytes()),
+                          model_type, device_id);
+        }
     };
 }
