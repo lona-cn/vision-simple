@@ -14,15 +14,11 @@ a simple cross-platform inference engine,support `YOLOv10~11`, `PaddleOCR`/`Easy
 |ONNXRuntime|Y|
 |TVM|N|
 ### execution providers
-|EP|status|
-|-|-|
-|CPU|Y|
-|DirectML|Y|
-|CUDA|N|
-|TensorRT|N|
-|Vulkan|N|
-|OpenGL|N|
-|OpenCL|N|
+|platform|CPU|DirectML|CUDA|TensorRT|Vulkan|OpenGL|OpenCL|
+|-|-|-|-|-|-|-|-|
+|windows|Y|Y|Y|N|N|N|N|
+|linux|Y|N|Y|N|N|N|N|
+|WSL|Y|N|Y|N|N|N|N|
 ## demo
 ### yolo(HellDivers2)
 <center>vision-simple</center>

@@ -10,13 +10,13 @@ namespace vision_simple
     {
         YOLOVersion version_;
         std::vector<std::string> class_names_;
-        std::vector<long long> shapes_;
+        std::vector<int64_t> shapes_;
 
     public:
         using FilterResult = InferResult<YOLOFrameResult>;
 
         explicit YOLOFilter(YOLOVersion version, std::vector<std::string> class_names,
-                            std::vector<long long> shapes);
+                            std::vector<int64_t> shapes);
 
         YOLOVersion version() const noexcept;
 
