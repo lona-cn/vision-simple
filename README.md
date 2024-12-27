@@ -1,5 +1,46 @@
 # vision-simple
-a simple cross-platform inference engine,support `YOLOv10~11`, `PaddleOCR`/`EasyOCR` using `ONNXRuntime`/`TVM` with multiple exectuion providers.
+vision-simple is a C++23 library that provides a high-performance inference server for `YOLOv10`, `YOLOv11`, `PaddleOCR`, and `EasyOCR` with built-in HTTP API support. It supports multiple Execution Providers, including `DirectML` `CUDA` `TensorRT`, enabling flexible hardware acceleration. Designed for cross-platform deployment, it runs seamlessly on both Windows and Linux.
+
+
+### A Simple Example of YOLOv11 Using DirectML
+`test_yolo.cpp`
+```cpp
+#include <Infer.h>
+#include <opencv2/opencv.hpp>
+
+using namespace vision_simple;
+
+template <typename T>
+struct DataBuffer
+{
+    std::unique_ptr<T[]> data;
+    size_t size;
+
+    std::span<T> span()
+    {
+        return std::span{data.get(), size};
+    }
+};
+
+extern std::expected<DataBuffer<uint8_t>, InferError> ReadAll(const std::string& path);
+
+int main(int argc,char *argv[]){
+    //----read file----
+    // read fp32 onnx model
+    auto data = ReadAll("assets/hd2-yolo11n-fp32.onnx");
+    // read test image
+    auto image = cv::imread("assets/hd2.png");
+    //----create context----
+    // create inference context
+    auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
+    // create yolo inference instance
+    auto infer_yolo = InferYOLO::Create(**ctx, data->span(), YOLOVersion::kV11);
+    //----do inference----
+    auto result = infer_yolo->get()->Run(image, 0.625);
+    // do what u want
+    return 0;
+}
+```
 
 ## support list
 |type|status|
@@ -43,29 +84,18 @@ a simple cross-platform inference engine,support `YOLOv10~11`, `PaddleOCR`/`Easy
 xmake build test_yolo
 xmake run test_yolo
 ```
-### api examples
+#### linux/amd64
+* [xmake](https://xmake.io) >= 2.9.4
+* gcc-13
+* debian12/ubuntu2022
 
-### YOLOv11 with DirectML
-`test_yolo.cpp`
-```cpp
-#include <Infer.h>
-
-using namespace vision_simple;
-
-int main(int argc,char *argv[]){
-    //----read file----
-    // read fp32 onnx model
-    auto data = ReadAll("assets/hd2-yolo11n-fp32.onnx");
-    // read test image
-    auto image = cv::imread("assets/hd2.png");
-    //----create context----
-    // create inference context
-    auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
-    // create yolo inference instance
-    auto infer_yolo = InferYOLO::Create(**ctx, data->span(), YOLOVersion::kV11);
-    //----do inference----
-    auto result = infer_yolo->get()->Run(image, 0.625);
-    // do what u want
-    return 0;
-}
+```sh
+# build release
+./scripts/build-release.sh
+# test
+xmake build test_yolo
+xmake run test_yolo
 ```
+
+## docker
+not support yet.
