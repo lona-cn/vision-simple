@@ -3,7 +3,11 @@
 #include <semaphore>
 #include <Infer.h>
 #include <shared_mutex>
-
+#include <cstddef>
+#include <format>
+#include <atomic>
+#include <magic_enum.hpp>
+#include <thread>
 using namespace vision_simple;
 
 template <typename T>
@@ -241,11 +245,29 @@ int main(int argc, char* argv[])
     std::cout << "Create Infer Context" << std::endl;
 #ifdef VISION_SIMPLE_WITH_DML
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
+#elifdef VISION_SIMPLE_WITH_CUDA
+    auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCUDA);
 #else
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCPU);
 #endif
+    if (!ctx)
+    {
+        auto& error = ctx.error();
+        std::cout << std::format("Failed to create Infer Context code:{} message:{}", magic_enum::enum_name(error.code),
+                                 error.message) << std::endl;
+        return -1;
+    }
+    std::cout << std::format("framework:{} EP:{}", magic_enum::enum_name((*ctx)->framework()),
+                             magic_enum::enum_name((*ctx)->execution_provider())) << std::endl;
     std::cout << "Create Infer Instance" << std::endl;
     auto infer_yolo = InferYOLO::Create(**ctx, data->span(), YOLOVersion::kV11);
+    if (!infer_yolo)
+    {
+        auto& error = infer_yolo.error();
+        std::cout << std::format("Failed to create Infer Instance code:{} message:{}", magic_enum::enum_name(error.code),
+                                 error.message) << std::endl;
+        return -1;
+    }
     const char* WINDIW_TITLE = "YOLO Detection";
     cv::namedWindow(WINDIW_TITLE, cv::WINDOW_NORMAL); // 支持调整大小
     cv::resizeWindow(WINDIW_TITLE, 1720, 720); // 设置窗口大小

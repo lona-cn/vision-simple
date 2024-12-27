@@ -3,6 +3,10 @@
 #ifdef VISION_SIMPLE_WITH_DML
 #include <dml_provider_factory.h>
 #endif
+
+// #ifdef VISION_SIMPLE_WITH_CUDA
+// #include <cuda_provider_factory.h>
+// #endif
 #include <magic_enum.hpp>
 #include <numeric>
 #include <onnxruntime_float16.h>
@@ -59,6 +63,22 @@ namespace
                                                                          dml_api));
                                dml_api->SessionOptionsAppendExecutionProvider_DML(
                                    session_options, static_cast<int>(device_id));
+#endif
+                           }
+                           else if (context.execution_provider() == InferEP::kCUDA)
+                           {
+                               //TODO
+#ifndef VISION_SIMPLE_WITH_CUDA
+                               return std::unexpected{
+                                   InferError{
+                                       InferErrorCode::kRuntimeError,
+                                       std::format("unsupported execution_provider:{}",
+                                                   magic_enum::enum_name(context.execution_provider()))
+                                   }
+                               };
+#else
+                               OrtCUDAProviderOptions cuda_options{};
+                               session_options.AppendExecutionProvider_CUDA(cuda_options);
 #endif
                            }
                            try
@@ -119,20 +139,21 @@ InferYOLO::CreateResult InferYOLO::Create(InferContext& context, std::span<uint8
     {
         return infer_yolo_factories.at(context.framework())(context, data, version, device_id);
     }
-    catch (std::exception& _)
+    catch (std::exception& e)
     {
         return std::unexpected{
             InferError{
-                InferErrorCode::kParameterError, std::format("unsupported context:framework({}),ep({})",
+                InferErrorCode::kParameterError, std::format("unsupported context:framework({}),ep({}),with exception:{}",
                                                              magic_enum::enum_name(context.framework()),
-                                                             magic_enum::enum_name(context.execution_provider()))
+                                                             magic_enum::enum_name(context.execution_provider()),
+                                                             e.what())
             }
         };
     }
     // return std::unexpected{InferError{InferErrorCode::kUnknownError, "InferYOLO::Create"}};
 }
 
-YOLOFilter::YOLOFilter(YOLOVersion version, std::vector<std::string> class_names, std::vector<long long> shapes):
+YOLOFilter::YOLOFilter(YOLOVersion version, std::vector<std::string> class_names, std::vector<int64_t> shapes):
     version_(version),
     class_names_(std::move(class_names)),
     shapes_(std::move(shapes))
