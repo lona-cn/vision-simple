@@ -4,6 +4,8 @@
 #include <magic_enum.hpp>
 #include <opencv2/opencv.hpp>
 
+#include "VisionHelper.hpp"
+
 namespace vision_simple
 {
     class YOLOFilter
@@ -11,6 +13,12 @@ namespace vision_simple
         YOLOVersion version_;
         std::vector<std::string> class_names_;
         std::vector<int64_t> shapes_;
+
+        static cv::Rect ScaleCoords(const cv::Size& imageShape, cv::Rect coords,
+                                    const cv::Size& imageOriginalShape, bool p_Clip) noexcept;
+
+        static std::vector<YOLOResult> ApplyNMS(
+            const std::vector<YOLOResult>& detections, float iou_threshold) noexcept;
 
     public:
         using FilterResult = InferResult<YOLOFrameResult>;
@@ -20,33 +28,27 @@ namespace vision_simple
 
         YOLOVersion version() const noexcept;
 
-        static cv::Rect ScaleCoords(const cv::Size& imageShape, cv::Rect coords,
-                                    const cv::Size& imageOriginalShape, bool p_Clip);
-
-        static std::vector<YOLOResult> ApplyNMS(
-            const std::vector<YOLOResult>& detections, float iou_threshold);
-
         YOLOFrameResult v11(
             std::span<const float> infer_output,
             float confidence_threshold,
             int img_width, int img_height,
-            int orig_width, int orig_height) const;
+            int orig_width, int orig_height) const noexcept;
 
         YOLOFrameResult v10(
             std::span<const float> infer_output,
             float confidence_threshold,
             int img_width, int img_height,
-            int orig_width, int orig_height) const;
+            int orig_width, int orig_height) const noexcept;
 
         FilterResult operator ()(
             std::span<const float> infer_output,
             float confidence_threshold,
             int img_width, int img_height,
-            int orig_width, int orig_height) const;
+            int orig_width, int orig_height) const noexcept;
     };
 
 
-    class InferYOLOONNXImpl : public InferYOLO
+    class InferYOLOOrtImpl : public InferYOLO
     {
         std::unique_ptr<Ort::Session> session_;
         YOLOVersion version_;
@@ -59,23 +61,20 @@ namespace vision_simple
         Ort::Value input_value_;
         std::vector<std::string> class_names_;
 
-        cv::Mat letterbox_resized_image_, letterbox_dst_image_, preprocess_image_;
-        std::vector<cv::Mat> channels_{3};
+        VisionHelper vision_helper_;
+        cv::Mat preprocessed_image_;
         std::vector<float> output_fp32_cache_;
 
     protected:
-        cv::Mat& Letterbox(const cv::Mat& src,
-                           const cv::Size& target_size,
-                           const cv::Scalar& color = cv::Scalar(0, 0, 0));
 
         cv::Mat& PreProcess(const cv::Mat& image) noexcept;
 
     public:
-        InferYOLOONNXImpl(InferContextONNXRuntime& ort_ctx,
-                          std::unique_ptr<Ort::Session>&& session,
-                          Ort::Allocator&& allocator,
-                          YOLOVersion version,
-                          std::vector<std::string> class_names);
+        InferYOLOOrtImpl(InferContextORT& ort_ctx,
+                         std::unique_ptr<Ort::Session>&& session,
+                         Ort::Allocator&& allocator,
+                         YOLOVersion version,
+                         std::vector<std::string> class_names);
 
         YOLOVersion version() const noexcept override;
 

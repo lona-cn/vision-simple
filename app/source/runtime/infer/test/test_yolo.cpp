@@ -33,7 +33,6 @@ std::expected<DataBuffer<uint8_t>, InferError> ReadAll(
             std::format("unable to open file '{}'", path)
         });
     }
-    const auto fs_size = std::filesystem::file_size(path);
     const size_t size = ifs.tellg();
     if (size <= 0)
     {
@@ -240,13 +239,15 @@ using Finally = std::unique_ptr<char, std::function<void(void*)>>;
 
 int main(int argc, char* argv[])
 {
-    std::cout << "Read Model" << std::endl;
+    std::cout << "Load Model" << std::endl;
     auto data = ReadAll("assets/hd2-yolo11n-fp16.onnx");
     std::cout << "Create Infer Context" << std::endl;
 #ifdef VISION_SIMPLE_WITH_DML
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
 #elifdef VISION_SIMPLE_WITH_CUDA
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCUDA);
+    // #elifdef VISION_SIMPLE_WITH_TENSORRT
+    // auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kTensorRT);
 #else
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCPU);
 #endif
@@ -264,7 +265,8 @@ int main(int argc, char* argv[])
     if (!infer_yolo)
     {
         auto& error = infer_yolo.error();
-        std::cout << std::format("Failed to create Infer Instance code:{} message:{}", magic_enum::enum_name(error.code),
+        std::cout << std::format("Failed to create Infer Instance code:{} message:{}",
+                                 magic_enum::enum_name(error.code),
                                  error.message) << std::endl;
         return -1;
     }
@@ -293,9 +295,7 @@ int main(int argc, char* argv[])
             {
                 cv::Mat img;
                 video.retrieve(img);
-                // auto rect = cv::getWindowImageRect(WINDIW_TITLE);
-                // cv::resize(img, img, rect.size());
-                while (!exit_flag.load() && !decode_queue.PushBack(std::move(img), img, std::chrono::milliseconds(10)))
+                while (!exit_flag.load() && !decode_queue.PushBack(std::move(img), img, std::chrono::milliseconds(1)))
                 {
                 }
             }
@@ -308,14 +308,14 @@ int main(int argc, char* argv[])
             FPSCounter fps_counter{};
             while (!exit_flag.load())
             {
-                auto front_frame_opt = decode_queue.PopFrontFor(std::chrono::milliseconds(10));
+                auto front_frame_opt = decode_queue.PopFrontFor(std::chrono::milliseconds(1));
                 if (!front_frame_opt)continue;
-                auto result = infer_yolo->get()->Run(*front_frame_opt, 0.225f);
-                drawYOLOResults(*front_frame_opt, result->results);
-                fps_counter.update();
-                fps_counter.display(*front_frame_opt);
                 auto img = *std::move(front_frame_opt);
-                while (!exit_flag.load() && !show_queue.PushBack(std::move(img), img, std::chrono::milliseconds(10)))
+                auto result = infer_yolo->get()->Run(img, 0.225f);
+                drawYOLOResults(img, result->results);
+                fps_counter.update();
+                fps_counter.display(img);
+                while (!exit_flag.load() && !show_queue.PushBack(std::move(img), img, std::chrono::milliseconds(1)))
                 {
                 }
             }
@@ -323,9 +323,13 @@ int main(int argc, char* argv[])
     };
     while (!exit_flag.load())
     {
-        auto show_img_opt = show_queue.PopFrontFor(std::chrono::milliseconds(10));
-        if (!show_img_opt)continue;
-        auto& frame = *show_img_opt;
+        decltype(show_queue.PopFrontFor(std::chrono::milliseconds(10))) last_img_opt{std::nullopt};
+        while (auto show_img_opt = show_queue.PopFrontFor(std::chrono::milliseconds(0)))
+        {
+            last_img_opt = std::move(show_img_opt);
+        }
+        if (!last_img_opt)continue;
+        auto& frame = *last_img_opt;
         if (!frame.empty())
         {
             cv::imshow(WINDIW_TITLE, frame);
