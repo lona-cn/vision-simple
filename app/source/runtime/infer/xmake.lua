@@ -1,7 +1,7 @@
 target("infer")
 set_kind("static")
 set_group("runtime")
-add_options("with_dml","with_cuda")
+add_options("with_dml","with_cuda","with_tensorrt")
 -- deps
 local packages = {"openmp","opencv","magic_enum"}
 if has_config("with_dml") then
@@ -33,7 +33,7 @@ for _,file in ipairs(os.files("test/test_*.cpp")) do
 	set_kind("binary")
 	set_default(false)
 	set_group("runtime-tests")
-	add_options("with_dml","with_cuda")
+	add_options("with_dml","with_cuda","with_tensorrt")
 	for _, v in ipairs(packages) do
 		add_packages(v, { public = false })
 	end

@@ -28,64 +28,12 @@ namespace
                        [](InferContext& context, std::span<uint8_t> data,
                           YOLOVersion version, size_t device_id)-> InferYOLO::CreateResult
                        {
-                           auto& ort_ctx = dynamic_cast<InferContextONNXRuntime&>(context);
-                           auto& env = ort_ctx.env();
-                           Ort::SessionOptions session_options;
-                           session_options.SetGraphOptimizationLevel(
-                               GraphOptimizationLevel::ORT_ENABLE_ALL);
-                           session_options.DisableProfiling();
-                           session_options.AddConfigEntry(kOrtSessionOptionsConfigUseEnvAllocators,
-                                                          "1");
-                           session_options.AddConfigEntry(kOrtSessionOptionsConfigAllowInterOpSpinning,
-                                                          "0");
-                           session_options.AddConfigEntry(kOrtSessionOptionsConfigAllowIntraOpSpinning,
-                                                          "0");
-                           if (context.execution_provider() == InferEP::kDML)
-                           {
-#ifndef VISION_SIMPLE_WITH_DML
-                                   return std::unexpected{
-                                       InferError{
-                                           InferErrorCode::kRuntimeError,
-                                           std::format("unsupported execution_provider:{}",
-                                                       magic_enum::enum_name(context.execution_provider()))
-                                       }
-                                   };
-#else
-                               session_options.SetInterOpNumThreads(1);
-                               session_options.SetIntraOpNumThreads(1);
-                               // session_options.SetLogSeverityLevel(ORT_LOGGING_LEVEL_VERBOSE);
-                               session_options.SetExecutionMode(ORT_SEQUENTIAL);
-                               session_options.DisableMemPattern();
-                               session_options.AddConfigEntry(kOrtSessionOptionsDisableCPUEPFallback, "1");
-                               const OrtDmlApi* dml_api = nullptr;
-                               Ort::GetApi().GetExecutionProviderApi("DML",ORT_API_VERSION,
-                                                                     reinterpret_cast<const void**>(&
-                                                                         dml_api));
-                               dml_api->SessionOptionsAppendExecutionProvider_DML(
-                                   session_options, static_cast<int>(device_id));
-#endif
-                           }
-                           else if (context.execution_provider() == InferEP::kCUDA)
-                           {
-                               //TODO
-#ifndef VISION_SIMPLE_WITH_CUDA
-                               return std::unexpected{
-                                   InferError{
-                                       InferErrorCode::kRuntimeError,
-                                       std::format("unsupported execution_provider:{}",
-                                                   magic_enum::enum_name(context.execution_provider()))
-                                   }
-                               };
-#else
-                               OrtCUDAProviderOptions cuda_options{};
-                               session_options.AppendExecutionProvider_CUDA(cuda_options);
-#endif
-                           }
+                           auto& ort_ctx = dynamic_cast<InferContextORT&>(context);
                            try
                            {
-                               auto session = std::make_unique<Ort::Session>(
-                                   env, data.data(), data.size_bytes(), session_options);
-                               Ort::Allocator allocator{*session, ort_ctx.env_memory_info()};
+                               auto session_opt = ort_ctx.CreateSession(data, device_id);
+                               if (!session_opt)return std::unexpected{std::move(session_opt.error())};
+                               Ort::Allocator allocator{**session_opt, ort_ctx.env_memory_info()};
                                // read class_names_
                                auto GetClassNames = [&](
                                    const Ort::ModelMetadata& metadata)-> std::optional<std::vector<std::string>>
@@ -104,7 +52,7 @@ namespace
                                    }
                                    return std::move(class_names);
                                };
-                               auto class_names_opt = GetClassNames(session->GetModelMetadata());
+                               auto class_names_opt = GetClassNames((*session_opt)->GetModelMetadata());
                                if (!class_names_opt)
                                {
                                    return std::unexpected{
@@ -114,8 +62,8 @@ namespace
                                        }
                                    };
                                }
-                               return std::make_unique<InferYOLOONNXImpl>(
-                                   ort_ctx, std::move(session),
+                               return std::make_unique<InferYOLOOrtImpl>(
+                                   ort_ctx, std::move(*session_opt),
                                    std::move(allocator), version,
                                    std::move(*class_names_opt));
                            }
@@ -143,10 +91,11 @@ InferYOLO::CreateResult InferYOLO::Create(InferContext& context, std::span<uint8
     {
         return std::unexpected{
             InferError{
-                InferErrorCode::kParameterError, std::format("unsupported context:framework({}),ep({}),with exception:{}",
-                                                             magic_enum::enum_name(context.framework()),
-                                                             magic_enum::enum_name(context.execution_provider()),
-                                                             e.what())
+                InferErrorCode::kParameterError, std::format(
+                    "unsupported context:framework({}),ep({}),with exception:{}",
+                    magic_enum::enum_name(context.framework()),
+                    magic_enum::enum_name(context.execution_provider()),
+                    e.what())
             }
         };
     }
@@ -166,7 +115,7 @@ YOLOVersion YOLOFilter::version() const noexcept
 }
 
 cv::Rect YOLOFilter::ScaleCoords(const cv::Size& imageShape, cv::Rect coords, const cv::Size& imageOriginalShape,
-                                 bool p_Clip)
+                                 bool p_Clip) noexcept
 {
     cv::Rect result;
     float gain = std::min(
@@ -197,7 +146,7 @@ cv::Rect YOLOFilter::ScaleCoords(const cv::Size& imageShape, cv::Rect coords, co
     return result;
 }
 
-std::vector<YOLOResult> YOLOFilter::ApplyNMS(const std::vector<YOLOResult>& detections, float iou_threshold)
+std::vector<YOLOResult> YOLOFilter::ApplyNMS(const std::vector<YOLOResult>& detections, float iou_threshold) noexcept
 {
     std::vector<int> indices;
     std::vector<cv::Rect> boxes;
@@ -224,10 +173,10 @@ std::vector<YOLOResult> YOLOFilter::ApplyNMS(const std::vector<YOLOResult>& dete
 }
 
 YOLOFrameResult YOLOFilter::v11(std::span<const float> infer_output, float confidence_threshold, int img_width,
-                                int img_height, int orig_width, int orig_height) const
+                                int img_height, int orig_width, int orig_height) const noexcept
 {
     const float* infer_output_ptr = infer_output.data();
-    std::vector<YOLOResult> detections{0};
+    std::vector<YOLOResult> detections{};
     // TODO:自适应预分配
     detections.reserve(256);
     const size_t num_features = shapes_[1];
@@ -253,22 +202,17 @@ YOLOFrameResult YOLOFilter::v11(std::span<const float> infer_output, float confi
         }
         if (object_confidence > confidence_threshold)
         {
-            auto& class_name = this->class_names_[object_class_id];
-            // const int x = static_cast<int>(cx - ow * 0.5f);
-            // const int y = static_cast<int>(cy - oh * 0.5f);
-            // const int width = static_cast<int>(ow);
-            // const int height = static_cast<int>(oh);
-            const auto x = static_cast<float>(cx - ow * 0.5f);
-            const auto y = static_cast<float>(cy - oh * 0.5f);
-            const auto width = static_cast<float>(ow);
-            const auto height = static_cast<float>(oh);
+            const float x = cx - ow * 0.5f;
+            const float y = cy - oh * 0.5f;
+            const float width = ow;
+            const float height = oh;
             auto scaled_rect = cv::Rect2f(x, y, width, height);
             auto origin_rect = ScaleCoords(cv::Size2f(img_width, img_height),
                                            scaled_rect,
                                            cv::Size2f(orig_width, orig_height),
                                            true);
             detections.emplace_back(object_class_id, origin_rect, object_confidence,
-                                    class_name);
+                                    this->class_names_[object_class_id]);
         }
     }
     auto nmsed_detections = ApplyNMS(detections, 0.3f);
@@ -276,9 +220,9 @@ YOLOFrameResult YOLOFilter::v11(std::span<const float> infer_output, float confi
 }
 
 YOLOFrameResult YOLOFilter::v10(std::span<const float> infer_output, float confidence_threshold, int img_width,
-                                int img_height, int orig_width, int orig_height) const
+                                int img_height, int orig_width, int orig_height) const noexcept
 {
-    std::vector<YOLOResult> detections{0};
+    std::vector<YOLOResult> detections{};
     detections.reserve(256);
     const int num_detections = infer_output.size() / 6;
 
@@ -310,7 +254,7 @@ YOLOFrameResult YOLOFilter::v10(std::span<const float> infer_output, float confi
             int y = static_cast<int>(top);
             int width = static_cast<int>(right - left);
             int height = static_cast<int>(bottom - top);
-            detections.emplace_back(class_id, cv::Rect(x, y, width, height), confidence,
+            detections.emplace_back(class_id, cv::Rect{x, y, width, height}, confidence,
                                     this->class_names_[class_id]);
         }
     }
@@ -319,7 +263,8 @@ YOLOFrameResult YOLOFilter::v10(std::span<const float> infer_output, float confi
 }
 
 YOLOFilter::FilterResult YOLOFilter::operator()(std::span<const float> infer_output, float confidence_threshold,
-                                                int img_width, int img_height, int orig_width, int orig_height) const
+                                                int img_width, int img_height, int orig_width,
+                                                int orig_height) const noexcept
 {
     if (version_ == YOLOVersion::kV10)
     {
@@ -335,56 +280,19 @@ YOLOFilter::FilterResult YOLOFilter::operator()(std::span<const float> infer_out
     });
 }
 
-cv::Mat& InferYOLOONNXImpl::Letterbox(const cv::Mat& src, const cv::Size& target_size, const cv::Scalar& color)
+cv::Mat& InferYOLOOrtImpl::PreProcess(const cv::Mat& image) noexcept
 {
-    float scale = std::min(static_cast<float>(target_size.width) / static_cast<float>(src.cols),
-                           static_cast<float>(target_size.height) / static_cast<float>(src.rows));
-    int new_width = static_cast<int>(static_cast<float>(src.cols) * scale);
-    int new_height = static_cast<int>(static_cast<float>(src.rows) * scale);
-    resize(src, letterbox_resized_image_,
-           cv::Size(new_width, new_height));
-    if (letterbox_dst_image_.rows != target_size.height ||
-        letterbox_dst_image_.cols != target_size.width)
-    {
-        letterbox_dst_image_ = cv::Mat::zeros(target_size.height,
-                                              target_size.width,
-                                              src.type());
-    }
-    letterbox_dst_image_.setTo(color);
-    int top = (target_size.height - new_height) / 2;
-    int left = (target_size.width - new_width) / 2;
-    letterbox_resized_image_.copyTo(
-        letterbox_dst_image_(cv::Rect(left, top,
-                                      letterbox_resized_image_.cols,
-                                      letterbox_resized_image_.
-                                      rows)));
-
-    return letterbox_dst_image_;
+    auto& dst_image = vision_helper_.Letterbox(image, input_size_);
+    //TODO: 根据模型输入，自动调整type
+    vision_helper_.HWC2CHW_BGR2RGB<uint8_t>(dst_image, dst_image);
+    return dst_image;
+    // dst_image.convertTo(preprocessed_image_, CV_32F, 1.0 / 255);
+    // return preprocessed_image_;
 }
 
-cv::Mat& InferYOLOONNXImpl::PreProcess(const cv::Mat& image) noexcept
-{
-    auto& dst_image = Letterbox(image, input_size_);
-    dst_image.convertTo(preprocess_image_, CV_32F, 1.0 / 255);
-    // cvtColor(preprocess_image, preprocess_image, cv::COLOR_BGR2RGB);
-    //chw2hwc
-    split(preprocess_image_, channels_);
-    const size_t num_pixels = input_size_.width * input_size_.height;
-    auto preprocess_image_ptr = preprocess_image_.ptr<float>();
-#pragma omp parallel for num_threads(3)
-    for (int c = 0; c < 3; ++c)
-    {
-        int channel_mapper[3] = {2, 1, 0};
-        const auto src = channels_[channel_mapper[c]].data;
-        auto dst = preprocess_image_ptr + num_pixels * c;
-        std::memcpy(dst, src, num_pixels * sizeof(float));
-    }
-    return preprocess_image_;
-}
-
-InferYOLOONNXImpl::InferYOLOONNXImpl(InferContextONNXRuntime& ort_ctx, std::unique_ptr<Ort::Session>&& session,
-                                     Ort::Allocator&& allocator, YOLOVersion version,
-                                     std::vector<std::string> class_names):
+InferYOLOOrtImpl::InferYOLOOrtImpl(InferContextORT& ort_ctx, std::unique_ptr<Ort::Session>&& session,
+                                   Ort::Allocator&& allocator, YOLOVersion version,
+                                   std::vector<std::string> class_names):
     session_(std::move(session)),
     version_(version),
     filter_(version, class_names, session_->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape()),
@@ -411,34 +319,42 @@ InferYOLOONNXImpl::InferYOLOONNXImpl(InferContextONNXRuntime& ort_ctx, std::uniq
     output_value_type_ = session_->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetElementType();
 }
 
-YOLOVersion InferYOLOONNXImpl::version() const noexcept
+YOLOVersion InferYOLOOrtImpl::version() const noexcept
 {
     return version_;
 }
 
-const std::vector<std::string>& InferYOLOONNXImpl::class_names() const noexcept
+const std::vector<std::string>& InferYOLOOrtImpl::class_names() const noexcept
 {
     return class_names_;
 }
 
-InferYOLO::RunResult InferYOLOONNXImpl::Run(const cv::Mat& image, float confidence_threshold) noexcept
+InferYOLO::RunResult InferYOLOOrtImpl::Run(const cv::Mat& image, float confidence_threshold) noexcept
 {
     //PreProcess
     if (image.rows == 0 || image.cols == 0)
         return std::unexpected(InferError{
             InferErrorCode::kParameterError, "image is empty"
         });
-    cv::Mat& hwc = PreProcess(image);
-    auto hwc_ptr = hwc.ptr<float>();
-    auto hwc_size = hwc.channels() * hwc.cols * hwc.rows;
-    auto hwc_size_bytes = hwc_size * sizeof(float);
+    cv::Mat& chw = PreProcess(image);
+    // auto hwc_ptr = hwc.ptr<float>();
+    // auto hwc_size = hwc.channels() * hwc.cols * hwc.rows;
+    // auto hwc_size_bytes = hwc_size * sizeof(float);
     if (input_value_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)
     {
-        Cvt::cvt(std::span(hwc_ptr, hwc_size), input_value_.GetTensorMutableData<Ort::Float16_t>());
+        chw.convertTo(preprocessed_image_, CV_16F, 1.0 / 255);
+        std::memcpy(input_value_.GetTensorMutableData<Ort::Float16_t>(),
+                    preprocessed_image_.ptr<uint8_t>(),
+                    chw.channels() * chw.rows * chw.cols * sizeof(Ort::Float16_t));
+        // Cvt::cvt(std::span(hwc_ptr, hwc_size), input_value_.GetTensorMutableData<Ort::Float16_t>());
     }
     else if (input_value_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
     {
-        std::memcpy(input_value_.GetTensorMutableData<float>(), hwc_ptr, hwc_size_bytes);
+        chw.convertTo(preprocessed_image_, CV_32F, 1.0 / 255);
+        std::memcpy(input_value_.GetTensorMutableData<Ort::Float16_t>(),
+                    preprocessed_image_.ptr<float>(),
+                    chw.channels() * chw.rows * chw.cols * sizeof(float));
+        // std::memcpy(input_value_.GetTensorMutableData<float>(), hwc_ptr, hwc_size_bytes);
     }
     else
     {
