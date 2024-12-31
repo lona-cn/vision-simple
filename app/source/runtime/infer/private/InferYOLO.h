@@ -14,9 +14,6 @@ namespace vision_simple
         std::vector<std::string> class_names_;
         std::vector<int64_t> shapes_;
 
-        static cv::Rect ScaleCoords(const cv::Size& imageShape, cv::Rect coords,
-                                    const cv::Size& imageOriginalShape, bool p_Clip) noexcept;
-
         static std::vector<YOLOResult> ApplyNMS(
             const std::vector<YOLOResult>& detections, float iou_threshold) noexcept;
 
