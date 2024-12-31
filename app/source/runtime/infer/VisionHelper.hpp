@@ -217,5 +217,37 @@ namespace vision_simple
                 std::memcpy(dst, src, num_pixels * sizeof(T));
             }
         }
+
+        static cv::Rect ScaleCoords(const cv::Size& image_shape, cv::Rect coords, const cv::Size& image_original_shape,
+                                    bool clip) noexcept
+        {
+            cv::Rect result;
+            float gain = std::min(
+                static_cast<float>(image_shape.height) / static_cast<float>(
+                    image_original_shape.height),
+                static_cast<float>(image_shape.width) / static_cast<float>(
+                    image_original_shape.width));
+
+            int padX = static_cast<int>(std::round(
+                (image_shape.width - image_original_shape.width * gain) / 2.0f));
+            int padY = static_cast<int>(std::round(
+                (image_shape.height - image_original_shape.height * gain) / 2.0f));
+
+            result.x = static_cast<int>(std::round((coords.x - padX) / gain));
+            result.y = static_cast<int>(std::round((coords.y - padY) / gain));
+            result.width = static_cast<int>(std::round(coords.width / gain));
+            result.height = static_cast<int>(std::round(coords.height / gain));
+
+            if (clip)
+            {
+                result.x = std::clamp(result.x, 0, image_original_shape.width);
+                result.y = std::clamp(result.y, 0, image_original_shape.height);
+                result.width = std::clamp(result.width, 0,
+                                          image_original_shape.width - result.x);
+                result.height = std::clamp(result.height, 0,
+                                           image_original_shape.height - result.y);
+            }
+            return result;
+        }
     };
 }

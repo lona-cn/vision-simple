@@ -114,38 +114,6 @@ YOLOVersion YOLOFilter::version() const noexcept
     return version_;
 }
 
-cv::Rect YOLOFilter::ScaleCoords(const cv::Size& imageShape, cv::Rect coords, const cv::Size& imageOriginalShape,
-                                 bool p_Clip) noexcept
-{
-    cv::Rect result;
-    float gain = std::min(
-        static_cast<float>(imageShape.height) / static_cast<float>(
-            imageOriginalShape.height),
-        static_cast<float>(imageShape.width) / static_cast<float>(
-            imageOriginalShape.width));
-
-    int padX = static_cast<int>(std::round(
-        (imageShape.width - imageOriginalShape.width * gain) / 2.0f));
-    int padY = static_cast<int>(std::round(
-        (imageShape.height - imageOriginalShape.height * gain) / 2.0f));
-
-    result.x = static_cast<int>(std::round((coords.x - padX) / gain));
-    result.y = static_cast<int>(std::round((coords.y - padY) / gain));
-    result.width = static_cast<int>(std::round(coords.width / gain));
-    result.height = static_cast<int>(std::round(coords.height / gain));
-
-    if (p_Clip)
-    {
-        result.x = std::clamp(result.x, 0, imageOriginalShape.width);
-        result.y = std::clamp(result.y, 0, imageOriginalShape.height);
-        result.width = std::clamp(result.width, 0,
-                                  imageOriginalShape.width - result.x);
-        result.height = std::clamp(result.height, 0,
-                                   imageOriginalShape.height - result.y);
-    }
-    return result;
-}
-
 std::vector<YOLOResult> YOLOFilter::ApplyNMS(const std::vector<YOLOResult>& detections, float iou_threshold) noexcept
 {
     std::vector<int> indices;
@@ -207,7 +175,7 @@ YOLOFrameResult YOLOFilter::v11(std::span<const float> infer_output, float confi
             const float width = ow;
             const float height = oh;
             auto scaled_rect = cv::Rect2f(x, y, width, height);
-            auto origin_rect = ScaleCoords(cv::Size2f(img_width, img_height),
+            auto origin_rect = VisionHelper::ScaleCoords(cv::Size2f(img_width, img_height),
                                            scaled_rect,
                                            cv::Size2f(orig_width, orig_height),
                                            true);

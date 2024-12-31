@@ -48,7 +48,7 @@ int main(int argc,char *argv[]){
 |YOLOv10|Y|
 |YOLOv11|Y|
 |EasyOCR|N|
-|PaddleOCR|N|
+|PaddleOCR|Y|
 ### inference frameworks
 |framework|status|
 |-|-|
@@ -57,9 +57,9 @@ int main(int argc,char *argv[]){
 ### execution providers
 |platform|CPU|DirectML|CUDA|TensorRT|Vulkan|OpenGL|OpenCL|
 |-|-|-|-|-|-|-|-|
-|windows|Y|Y|Y|N|N|N|N|
-|linux|Y|N|Y|N|N|N|N|
-|WSL|Y|N|Y|N|N|N|N|
+|windows|Y|Y|Y|?|N|N|N|
+|linux|Y|N|Y|?|N|N|N|
+|WSL|Y|N|Y|?|N|N|N|
 ## demo
 ### yolo(HellDivers2)
 <center>vision-simple</center>

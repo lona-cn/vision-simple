@@ -135,16 +135,21 @@ namespace vision_simple
         InferOCR& operator=(InferOCR&&) = default;
         virtual OCRModelType model_type() const noexcept =0;
         virtual RunResult Run(const cv::Mat& image, float confidence_threshold) noexcept = 0;
-        static CreateResult Create(InferContext& context, std::span<uint8_t> data, OCRModelType model_type,
-                                   size_t device_id = 0) noexcept;
+        static CreateResult Create(InferContext& context,
+                                   std::map<int, std::string> char_dict,
+                                   std::span<uint8_t> det_data, std::span<uint8_t> rec_data,
+                                   OCRModelType model_type, size_t device_id = 0) noexcept;
 
         template <typename T>
             requires std::is_arithmetic_v<T>
-        static CreateResult Create(InferContext& context, std::span<T> data, OCRModelType model_type,
-                                   size_t device_id = 0) noexcept
+        static CreateResult Create(InferContext& context,
+                                   std::map<int, std::string> char_dict,
+                                   std::span<T> det_data, std::span<T> rec_data,
+                                   OCRModelType model_type, size_t device_id = 0) noexcept
         {
-            return Create(context,
-                          std::span(reinterpret_cast<uint8_t*>(data.data()), data.size_bytes()),
+            return Create(context, std::move(char_dict),
+                          std::span<uint8_t>{reinterpret_cast<uint8_t*>(det_data.data()), det_data.size_bytes()},
+                          std::span<uint8_t>{reinterpret_cast<uint8_t*>(rec_data.data()), rec_data.size_bytes()},
                           model_type, device_id);
         }
     };

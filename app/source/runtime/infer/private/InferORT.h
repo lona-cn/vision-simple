@@ -28,6 +28,6 @@ namespace vision_simple
         Ort::Env& env() const noexcept;
 
         [[nodiscard]] Ort::MemoryInfo& env_memory_info();
-        CreateResult CreateSession(std::span<uint8_t> data, size_t device_id);
+        CreateResult CreateSession(std::span<uint8_t> data, size_t device_id) const;
     };
 }

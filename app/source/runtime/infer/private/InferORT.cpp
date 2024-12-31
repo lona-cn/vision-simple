@@ -8,7 +8,7 @@
 
 #define INFER_CTX_LOG_ID "vision-simple"
 #ifdef VISION_SIMPLE_DEBUG
-#define INFER_CTX_LOG_LEVEL OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE
+#define INFER_CTX_LOG_LEVEL OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING
 #else
 #define INFER_CTX_LOG_LEVEL OrtLoggingLevel::ORT_LOGGING_LEVEL_FATAL
 #endif
@@ -44,18 +44,20 @@ Ort::MemoryInfo& vision_simple::InferContextORT::env_memory_info()
 }
 
 vision_simple::InferContextORT::CreateResult vision_simple::InferContextORT::CreateSession(
-    std::span<uint8_t> data, size_t device_id)
+    std::span<uint8_t> data, size_t device_id) const
 {
     Ort::SessionOptions session_options;
     session_options.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_ALL);
-    session_options.DisableProfiling();
+    // session_options.DisableProfiling();
     session_options.AddConfigEntry(kOrtSessionOptionsConfigUseEnvAllocators,
                                    "1");
     session_options.AddConfigEntry(kOrtSessionOptionsConfigAllowInterOpSpinning,
                                    "0");
     session_options.AddConfigEntry(kOrtSessionOptionsConfigAllowIntraOpSpinning,
                                    "0");
+    session_options.AddConfigEntry(kOrtSessionOptionsDisableCPUEPFallback, "0");
+    session_options.SetLogSeverityLevel(INFER_CTX_LOG_LEVEL);
     if (ep_ == InferEP::kDML)
     {
 #ifndef VISION_SIMPLE_WITH_DML
@@ -69,10 +71,8 @@ vision_simple::InferContextORT::CreateResult vision_simple::InferContextORT::Cre
 #else
         session_options.SetInterOpNumThreads(1);
         session_options.SetIntraOpNumThreads(1);
-        // session_options.SetLogSeverityLevel(ORT_LOGGING_LEVEL_VERBOSE);
         session_options.SetExecutionMode(ORT_SEQUENTIAL);
         session_options.DisableMemPattern();
-        session_options.AddConfigEntry(kOrtSessionOptionsDisableCPUEPFallback, "1");
         const OrtDmlApi* dml_api = nullptr;
         Ort::GetApi().GetExecutionProviderApi("DML",ORT_API_VERSION,
                                               reinterpret_cast<const void**>(&
