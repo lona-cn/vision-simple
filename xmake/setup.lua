@@ -11,4 +11,5 @@ local project_semver = "0.2.0"
 set_version(project_semver, { build = "%Y%m%d%H%M" })
 set_allowedplats("windows","linux")
 set_allowedarchs("x64","x86_64","aarch64")
+add_defines("EXPORTING_VISION_SIMPLE")
 includes(path.join(os.projectdir(), "app", "xmake.lua"))

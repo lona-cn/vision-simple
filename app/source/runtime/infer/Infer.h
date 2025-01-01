@@ -12,6 +12,15 @@
 #endif
 #include "InferError.hpp"
 
+#ifdef _WIN32
+#ifdef EXPORTING_VISION_SIMPLE
+        #define VISION_SIMPLE_API __declspec(dllexport)
+#else
+#define VISION_SIMPLE_API __declspec(dllimport)
+#endif
+#else
+    #define VISION_SIMPLE_API
+#endif
 
 namespace vision_simple
 {
@@ -39,7 +48,7 @@ namespace vision_simple
 
     using InferArgs = std::unordered_map<std::string, std::string>;
 
-    class InferContext
+    class VISION_SIMPLE_API InferContext
     {
     protected:
         InferFramework framework_;
@@ -62,7 +71,6 @@ namespace vision_simple
         // static void RegisterFramework(InferFramework framework, CtxFactory factory) noexcept;
     };
 
-
     //--------YOLO--------
     enum class YOLOVersion:uint8_t
     {
@@ -84,7 +92,7 @@ namespace vision_simple
         std::vector<YOLOResult> results;
     };
 
-    class InferYOLO
+    class VISION_SIMPLE_API InferYOLO
     {
     public:
         using CreateResult = InferResult<std::unique_ptr<InferYOLO>>;
@@ -132,7 +140,7 @@ namespace vision_simple
         std::vector<OCRResult> results;
     };
 
-    class InferOCR
+    class VISION_SIMPLE_API InferOCR
     {
     public:
         using CreateResult = InferResult<std::unique_ptr<InferOCR>>;
