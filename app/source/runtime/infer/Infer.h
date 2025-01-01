@@ -6,21 +6,11 @@
 #include <string>
 #include <vector>
 #include <opencv2/opencv.hpp>
-#include <immintrin.h>
 #ifdef _WIN32
 #include "DXInfo.hpp"
 #endif
 #include "InferError.hpp"
-
-#ifdef _WIN32
-#ifdef EXPORTING_VISION_SIMPLE
-        #define VISION_SIMPLE_API __declspec(dllexport)
-#else
-#define VISION_SIMPLE_API __declspec(dllimport)
-#endif
-#else
-    #define VISION_SIMPLE_API
-#endif
+#include "config.h"
 
 namespace vision_simple
 {

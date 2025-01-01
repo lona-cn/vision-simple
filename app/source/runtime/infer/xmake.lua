@@ -1,9 +1,10 @@
 target("infer")
 set_kind("static")
+set_basename("vs_infer_$(mode)_$(arch)")
 set_group("runtime")
 add_options("with_dml","with_cuda","with_tensorrt")
 -- deps
-local packages = {"openmp","opencv","magic_enum"}
+local packages = {"openmp","opencv","magic_enum","libhv"}
 if has_config("with_dml") then
 table.insert(packages,"directml")
 table.insert(packages,"onnxruntime-dml")

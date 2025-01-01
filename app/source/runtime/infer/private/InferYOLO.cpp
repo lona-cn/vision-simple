@@ -4,9 +4,6 @@
 #include <dml_provider_factory.h>
 #endif
 
-// #ifdef VISION_SIMPLE_WITH_CUDA
-// #include <cuda_provider_factory.h>
-// #endif
 #include <magic_enum.hpp>
 #include <numeric>
 #include <onnxruntime_float16.h>

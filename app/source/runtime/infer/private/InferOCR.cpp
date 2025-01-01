@@ -170,8 +170,8 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl
         VisionHelper vision_helper_tmp;
         vision_helper_tmp.HWC2CHW_BGR2RGB<uint8_t>(resized_image, resized_image);
         cv::Mat output_image{output_size,CV_32FC3};
-        resized_image.convertTo(output_image,CV_32F, 1.f / 255.f);
-        output_image = (output_image - 0.5) / 0.5;
+        resized_image.convertTo(output_image, CV_32F, 1.f / 255.f, -0.5f);
+        output_image /= 0.5f;
         std::memcpy(tensor_base_ptr, output_image.ptr<float>(), output_image_size_bytes);
         return tensor;
     }

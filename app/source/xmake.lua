@@ -1,5 +1,5 @@
 -- openmp magic_enum
-add_requires("openmp","magic_enum 0.9.6")
+add_requires("openmp","magic_enum 0.9.6","libhv 1.3.3")
 -- onnxruntime
 if has_config("with_dml") then
 add_requires("directml", { system = false })
