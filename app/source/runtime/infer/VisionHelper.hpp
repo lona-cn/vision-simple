@@ -203,15 +203,15 @@ namespace vision_simple
         }
 
         template <typename T>
-        void HWC2CHW_BGR2RGB(cv::Mat& from, cv::Mat& to) noexcept
+        void HWC2CHW_BGR2RGB(const cv::Mat& from, cv::Mat& to) noexcept
         {
+            constexpr int channel_mapper[3] = {2, 1, 0};
             size_t width = from.cols, height = from.rows;
             split(from, channels_);
             const size_t num_pixels = width * height;
             auto dst_base_ptr = to.ptr<T>();
             for (int c = 0; c < 3; ++c)
             {
-                int channel_mapper[3] = {2, 1, 0};
                 const auto src = channels_[channel_mapper[c]].data;
                 auto dst = dst_base_ptr + num_pixels * c;
                 std::memcpy(dst, src, num_pixels * sizeof(T));
@@ -248,6 +248,51 @@ namespace vision_simple
                                            image_original_shape.height - result.y);
             }
             return result;
+        }
+
+        double ComputeIOU(const cv::Rect& rect1, const cv::Rect& rect2)
+        {
+            // 计算交集
+            cv::Rect intersection = rect1 & rect2;
+
+            // 计算并集
+            cv::Rect union_rect = rect1 | rect2;
+
+            // 交集面积
+            double intersectionArea = intersection.area();
+
+            // 并集面积
+            double unionArea = union_rect.area();
+
+            // 计算IOU
+            return intersectionArea / unionArea;
+        }
+
+        // 根据IOU阈值进行过滤
+        std::vector<cv::Rect> FilterByIOU(std::vector<cv::Rect>& boxes, double iou_threshold)
+        {
+            std::vector<cv::Rect> filteredBoxes;
+
+            for (size_t i = 0; i < boxes.size(); i++)
+            {
+                bool keep = true;
+                for (size_t j = 0; j < filteredBoxes.size(); j++)
+                {
+                    // 如果当前框和已过滤框的IOU大于阈值，丢弃当前框
+                    if (ComputeIOU(boxes[i], filteredBoxes[j]) > iou_threshold)
+                    {
+                        keep = false;
+                        break;
+                    }
+                }
+                if (keep)
+                {
+                    filteredBoxes.push_back(boxes[i]);
+                }
+            }
+
+            // 将过滤后的框替换回原始框列表
+            return filteredBoxes;
         }
     };
 }

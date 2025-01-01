@@ -1,10 +1,10 @@
 # vision-simple
-english(./README-en.md) | 简体中文
+english | [简体中文](./README.md)
 
-`vision-simple`是一个基于C++23的跨平台视觉推理库，提供开箱即用的推理功能，目前支持常用的YOLO系列（YOLOv10和YOLOv11）和一些OCR（`PaddleOCR`）,内建HTTP API，并且基于`ONNXRuntime`支持多种Execution Provider，如`DirectML`、`CUDA`、`TensorRT`，以及一些特殊的设备（如RockChip的NPU）。
+vision-simple is a C++23 library that provides a high-performance inference server for `YOLOv10`, `YOLOv11`, `PaddleOCR`, and `EasyOCR` with built-in HTTP API support. It supports multiple Execution Providers, including `DirectML` `CUDA` `TensorRT`, enabling flexible hardware acceleration. Designed for cross-platform deployment, it runs seamlessly on both Windows and Linux.
 
 
-### 例子：YOLOv11+ONNXRuntime+DirectML
+### A Simple Example of YOLOv11 Using DirectML
 `test_yolo.cpp`
 ```cpp
 #include <Infer.h>
@@ -44,25 +44,25 @@ int main(int argc,char *argv[]){
 }
 ```
 
-## 视觉模型
+## support list
 |type|status|
 |-|-|
 |YOLOv10|Y|
 |YOLOv11|Y|
 |EasyOCR|N|
 |PaddleOCR|Y|
-### 推理框架
+### inference frameworks
 |framework|status|
 |-|-|
 |ONNXRuntime|Y|
 |TVM|N|
-### EP
+### execution providers
 |platform|CPU|DirectML|CUDA|TensorRT|Vulkan|OpenGL|OpenCL|
 |-|-|-|-|-|-|-|-|
 |windows|Y|Y|Y|?|N|N|N|
 |linux|Y|N|Y|?|N|N|N|
 |WSL|Y|N|Y|?|N|N|N|
-## 演示
+## demo
 ### yolo(HellDivers2)
 <center>vision-simple</center>
 
@@ -72,8 +72,8 @@ int main(int argc,char *argv[]){
 
 ![hd2-yolo-gif](doc/images/hd2-yolo.gif)
 
-## 开始
-### 构建项目
+## get started
+### build
 #### windows/amd64
 * [xmake](https://xmake.io) >= 2.9.4
 * msvc support c++23
@@ -100,8 +100,7 @@ xmake run test_yolo
 ```
 
 ## docker
-暂未支持。
+not support yet.
 
-## 联系方式
-QQ: 1307693959 </br>
+## Contact me
 [email](amhakureireimu@gmail.com)

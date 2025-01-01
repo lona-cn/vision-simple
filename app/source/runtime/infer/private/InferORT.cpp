@@ -13,24 +13,14 @@
 #define INFER_CTX_LOG_LEVEL OrtLoggingLevel::ORT_LOGGING_LEVEL_FATAL
 #endif
 
-vision_simple::InferContextORT::InferContextORT(const InferEP ep): env_(std::make_unique<Ort::Env>(
-                                                                       INFER_CTX_LOG_LEVEL, INFER_CTX_LOG_ID)),
-                                                                   ep_(ep),
-                                                                   env_memory_info_(
-                                                                       Ort::MemoryInfo::CreateCpu(
-                                                                           OrtArenaAllocator, OrtMemTypeDefault))
+vision_simple::InferContextORT::InferContextORT(const InferEP ep, InferArgs args):
+    InferContext(InferFramework::kONNXRUNTIME, ep, std::move(args)), env_(std::make_unique<Ort::Env>(
+        INFER_CTX_LOG_LEVEL, INFER_CTX_LOG_ID)),
+    env_memory_info_(
+        Ort::MemoryInfo::CreateCpu(
+            OrtArenaAllocator, OrtMemTypeDefault))
 {
     env_->CreateAndRegisterAllocator(env_memory_info_, nullptr);
-}
-
-vision_simple::InferFramework vision_simple::InferContextORT::framework() const noexcept
-{
-    return InferFramework::kONNXRUNTIME;
-}
-
-vision_simple::InferEP vision_simple::InferContextORT::execution_provider() const noexcept
-{
-    return ep_;
 }
 
 Ort::Env& vision_simple::InferContextORT::env() const noexcept
@@ -49,7 +39,7 @@ vision_simple::InferContextORT::CreateResult vision_simple::InferContextORT::Cre
     Ort::SessionOptions session_options;
     session_options.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_ALL);
-    // session_options.DisableProfiling();
+    session_options.DisableProfiling();
     session_options.AddConfigEntry(kOrtSessionOptionsConfigUseEnvAllocators,
                                    "1");
     session_options.AddConfigEntry(kOrtSessionOptionsConfigAllowInterOpSpinning,
@@ -108,6 +98,7 @@ vision_simple::InferContextORT::CreateResult vision_simple::InferContextORT::Cre
             }
         };
 #else
+        //TODO fixit
         OrtTensorRTProviderOptions trt_options{};
         trt_options.device_id = static_cast<int>(device_id);
         session_options.AppendExecutionProvider_TensorRT(trt_options);

@@ -37,19 +37,29 @@ namespace vision_simple
         kOpenCL
     };
 
+    using InferArgs = std::unordered_map<std::string, std::string>;
+
     class InferContext
     {
+    protected:
+        InferFramework framework_;
+        InferEP ep_;
+        InferArgs args_;
+
     public:
         using CreateResult = InferResult<std::unique_ptr<InferContext>>;
-        InferContext() = default;
+        using CtxFactory = std::function<CreateResult(InferFramework framework, InferEP ep, InferArgs)>;
+        InferContext(InferFramework framework, InferEP ep, InferArgs args);
         virtual ~InferContext() = default;
         InferContext(const InferContext&) = delete;
-        InferContext(InferContext&&) = default;
+        InferContext(InferContext&&) noexcept = default;
         InferContext& operator=(const InferContext&) = delete;
-        InferContext& operator=(InferContext&&) = default;
-        virtual InferFramework framework() const noexcept =0;
-        virtual InferEP execution_provider() const noexcept =0;
-        static CreateResult Create(InferFramework framework, InferEP ep) noexcept;
+        InferContext& operator=(InferContext&&) noexcept = default;
+        virtual InferFramework framework() const noexcept;
+        virtual InferEP execution_provider() const noexcept;
+        virtual const InferArgs& args() const noexcept;
+        static CreateResult Create(InferFramework framework, InferEP ep, InferArgs args = InferArgs{}) noexcept;
+        // static void RegisterFramework(InferFramework framework, CtxFactory factory) noexcept;
     };
 
 
@@ -66,7 +76,7 @@ namespace vision_simple
         int32_t class_id;
         cv::Rect bbox;
         float confidence;
-        const std::string_view class_name;
+        std::string_view class_name;
     };
 
     struct YOLOFrameResult
