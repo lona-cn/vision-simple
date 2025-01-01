@@ -1,5 +1,7 @@
 # vision-simple
 english | [简体中文](./README.md)
+</br>
+Version: `0.2.0`
 
 vision-simple is a C++23 library that provides a high-performance inference server for `YOLOv10`, `YOLOv11`, `PaddleOCR`, and `EasyOCR` with built-in HTTP API support. It supports multiple Execution Providers, including `DirectML` `CUDA` `TensorRT`, enabling flexible hardware acceleration. Designed for cross-platform deployment, it runs seamlessly on both Windows and Linux.
 
@@ -72,6 +74,9 @@ int main(int argc,char *argv[]){
 
 ![hd2-yolo-gif](doc/images/hd2-yolo.gif)
 
+### PaddleOCR(HellDivers2)
+
+![paddleocr](doc/images/ppocr.png)
 ## get started
 ### build
 #### windows/amd64
