@@ -56,6 +56,7 @@ namespace vision_simple
         std::string input_name_, output_name_;
         cv::Size2i input_size_;
         Ort::Value input_value_;
+        Ort::MemoryInfo output_memory_info_;
         std::vector<std::string> class_names_;
 
         VisionHelper vision_helper_;
@@ -63,7 +64,6 @@ namespace vision_simple
         std::vector<float> output_fp32_cache_;
 
     protected:
-
         cv::Mat& PreProcess(const cv::Mat& image) noexcept;
 
     public:

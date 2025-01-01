@@ -176,9 +176,9 @@ YOLOFrameResult YOLOFilter::v11(std::span<const float> infer_output, float confi
             const float height = oh;
             auto scaled_rect = cv::Rect2f(x, y, width, height);
             auto origin_rect = VisionHelper::ScaleCoords(cv::Size2f(img_width, img_height),
-                                           scaled_rect,
-                                           cv::Size2f(orig_width, orig_height),
-                                           true);
+                                                         scaled_rect,
+                                                         cv::Size2f(orig_width, orig_height),
+                                                         true);
             detections.emplace_back(object_class_id, origin_rect, object_confidence,
                                     this->class_names_[object_class_id]);
         }
@@ -267,6 +267,8 @@ InferYOLOOrtImpl::InferYOLOOrtImpl(InferContextORT& ort_ctx, std::unique_ptr<Ort
     allocator_(std::move(allocator)),
     io_binding_(*session_),
     input_value_(nullptr),
+    output_memory_info_(Ort::MemoryInfo::CreateCpu(ort_ctx.env_memory_info().GetAllocatorType(),
+                                                   ort_ctx.env_memory_info().GetMemoryType())),
     class_names_(std::move(class_names))
 {
     auto input_info = session_->GetInputTypeInfo(0);
@@ -282,7 +284,7 @@ InferYOLOOrtImpl::InferYOLOOrtImpl(InferContextORT& ort_ctx, std::unique_ptr<Ort
     // read shapes from model metadata
     input_value_ = Ort::Value::CreateTensor(allocator_, shape.data(), shape.size(),
                                             ele_type);
-    io_binding_.BindOutput(output_name_ptr.get(), ort_ctx.env_memory_info());
+    io_binding_.BindOutput(output_name_ptr.get(), output_memory_info_);
     input_value_type_ = input_value_.GetTensorTypeAndShapeInfo().GetElementType();
     output_value_type_ = session_->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetElementType();
 }
@@ -332,6 +334,7 @@ InferYOLO::RunResult InferYOLOOrtImpl::Run(const cv::Mat& image, float confidenc
         });
     }
     io_binding_.BindInput(input_name_.data(), input_value_);
+    io_binding_.BindOutput(output_name_.data(), output_memory_info_);
     Ort::RunOptions run_options;
     session_->Run(run_options, io_binding_);
     auto output_values = io_binding_.GetOutputValues();
