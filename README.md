@@ -1,5 +1,5 @@
 # vision-simple
-english(./README-en.md) | 简体中文
+[english](./README-en.md) | 简体中文
 
 `vision-simple`是一个基于C++23的跨平台视觉推理库，提供开箱即用的推理功能，目前支持常用的YOLO系列（YOLOv10和YOLOv11）和一些OCR（`PaddleOCR`）,内建HTTP API，并且基于`ONNXRuntime`支持多种Execution Provider，如`DirectML`、`CUDA`、`TensorRT`，以及一些特殊的设备（如RockChip的NPU）。
 
