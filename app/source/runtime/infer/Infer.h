@@ -9,7 +9,7 @@
 #ifdef _WIN32
 #include "DXInfo.hpp"
 #endif
-#include "InferError.hpp"
+#include "VisionSimpleError.hpp"
 #include "config.h"
 
 namespace vision_simple

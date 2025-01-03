@@ -6,7 +6,7 @@ set_description("Direct Machine Learning (DirectML) is a low-level API for machi
 -- set_license("MIT")
 
 add_configs("shared", { description = "Forced Shared Library", default = true, readonly = true })
-add_configs("runtimes", { description = "Forced MD", default = "MT", readonly = true })
+add_configs("runtimes", { description = "Forced MD", default = "MD", readonly = true })
 
 if is_plat("windows") then
     if is_arch("x64") then
@@ -57,11 +57,9 @@ on_download(function(package, opt)
 end)
 
 on_install("windows", function(package)
-    if package:is_plat("windows") then
-        os.cp("bin/x64-win/*.lib", package:installdir("lib"))
-		os.cp("bin/x64-win/*.pdb", package:installdir("lib"))
-		os.cp("bin/x64-win/*.dll", package:installdir("bin"))
-    end
+    os.cp("bin/x64-win/*.lib", package:installdir("lib"))
+    os.cp("bin/x64-win/*.pdb", package:installdir("lib"))
+    os.cp("bin/x64-win/*.dll", package:installdir("bin"))
     os.cp("include/*", package:installdir("include"))
 end)
 

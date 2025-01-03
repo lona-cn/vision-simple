@@ -7,7 +7,7 @@ set_license("MIT")
 
 add_configs("dml", { description = "Enable MicroSoft DirectML Support", default = true, readonly = true })
 add_configs("shared", { description = "Forced Shared Library", default = true, readonly = true })
-add_configs("runtimes", { description = "Forced MD", default = "MT", readonly = true })
+add_configs("runtimes", { description = "Forced MD", default = "MD", readonly = true })
 add_deps("directml",{system = false})
 if is_plat("windows") then
     if is_arch("x64") then
@@ -56,10 +56,8 @@ on_download(function(package, opt)
 end)
 
 on_install("windows", function(package)
-    if package:is_plat("windows") then
-        os.cp("runtimes/win-x64/native/*.lib", package:installdir("lib"))
-		os.cp("runtimes/win-x64/native/*.dll", package:installdir("bin"))
-    end
+    os.cp("runtimes/win-x64/native/*.lib", package:installdir("lib"))
+    os.cp("runtimes/win-x64/native/*.dll", package:installdir("bin"))
     os.cp("build/native/include/*", package:installdir("include"))
 end)
 

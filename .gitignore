@@ -1,8 +1,7 @@
 .xmake/
 .idea/
 .vscode/
-vsxmake2022/
+vsxmake*/
 build/
-cmake-build/
 build-*/
-linux_build/
+cmake-build/

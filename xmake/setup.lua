@@ -1,15 +1,9 @@
-add_rules("plugin.vsxmake.autoupdate")
-
-includes("plugins/*.lua")
-includes("rules/*.lua")
-add_repositories("local-repo repo", {
-    rootdir = os.scriptdir()
-})
+includes("project.lua")
+SetupProject()
+includes("funcs/*.lua")
 includes("options.lua")
-includes("modules/*.lua")
-local project_semver = "0.2.0"
-set_version(project_semver, { build = "%Y%m%d%H%M" })
-set_allowedplats("windows","linux")
-set_allowedarchs("x64","x86_64","aarch64")
-add_defines("EXPORTING_VISION_SIMPLE")
-includes(path.join(os.projectdir(), "app", "xmake.lua"))
+includes("rules/*.lua")
+includes("repo.lua")
+add_moduledirs(path.join(os.scriptdir(),"modules"))
+add_plugindirs(path.join(os.scriptdir(),"plugins"))
+includes(path.join(os.projectdir(),"app","xmake.lua"))
