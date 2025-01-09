@@ -1,4 +1,5 @@
 ﻿#include "IOUtil.h"
+#include <filesystem>
 
 std::expected<vision_simple::DataBuffer<unsigned char>, VisionSimpleError> vision_simple::ReadAll(
     const std::string& path) noexcept
@@ -6,7 +7,7 @@ std::expected<vision_simple::DataBuffer<unsigned char>, VisionSimpleError> visio
     std::ifstream ifs(path, std::ios::binary | std::ios::ate);
     if (!ifs)
     {
-        std::unexpected(VisionSimpleError{
+        return std::unexpected(VisionSimpleError{
             VisionSimpleErrorCode::kIOError,
             std::format("unable to open file '{}'", path)
         });
@@ -14,7 +15,7 @@ std::expected<vision_simple::DataBuffer<unsigned char>, VisionSimpleError> visio
     const size_t size = ifs.tellg();
     if (size <= 0)
     {
-        std::unexpected(VisionSimpleError{
+        return std::unexpected(VisionSimpleError{
             VisionSimpleErrorCode::kIOError,
             std::format("file:{} is empty,size:{}", path, size)
         });

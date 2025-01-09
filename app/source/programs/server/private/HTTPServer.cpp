@@ -75,7 +75,7 @@ namespace vision_simple
                         }
                     };
                 auto version = *version_opt;
-                auto data_result = ReadAll(name);
+                auto data_result = ReadAll(model_info.path);
                 if (!data_result)
                     return std::unexpected{
                         VisionSimpleError{
