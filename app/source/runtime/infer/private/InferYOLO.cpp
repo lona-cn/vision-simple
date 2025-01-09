@@ -53,8 +53,8 @@ namespace
                                if (!class_names_opt)
                                {
                                    return std::unexpected{
-                                       InferError{
-                                           InferErrorCode::kModelError,
+                                       VisionSimpleError{
+                                           VisionSimpleErrorCode::kModelError,
                                            std::format("unable to find class names from model metadata")
                                        }
                                    };
@@ -67,8 +67,8 @@ namespace
                            catch (std::exception& e)
                            {
                                return std::unexpected{
-                                   InferError{
-                                       InferErrorCode::kRuntimeError,
+                                   VisionSimpleError{
+                                       VisionSimpleErrorCode::kRuntimeError,
                                        std::format("unable to create ONNXRuntime Session:{}", e.what())
                                    }
                                };
@@ -87,8 +87,8 @@ InferYOLO::CreateResult InferYOLO::Create(InferContext& context, std::span<uint8
     catch (std::exception& e)
     {
         return std::unexpected{
-            InferError{
-                InferErrorCode::kParameterError, std::format(
+            VisionSimpleError{
+                VisionSimpleErrorCode::kParameterError, std::format(
                     "unsupported context:framework({}),ep({}),with exception:{}",
                     magic_enum::enum_name(context.framework()),
                     magic_enum::enum_name(context.execution_provider()),
@@ -96,7 +96,7 @@ InferYOLO::CreateResult InferYOLO::Create(InferContext& context, std::span<uint8
             }
         };
     }
-    // return std::unexpected{InferError{InferErrorCode::kUnknownError, "InferYOLO::Create"}};
+    // return std::unexpected{VisionSimpleError{VisionSimpleErrorCode::kUnknownError, "InferYOLO::Create"}};
 }
 
 YOLOFilter::YOLOFilter(YOLOVersion version, std::vector<std::string> class_names, std::vector<int64_t> shapes):
@@ -239,8 +239,8 @@ YOLOFilter::FilterResult YOLOFilter::operator()(std::span<const float> infer_out
     {
         return v11(infer_output, confidence_threshold, img_width, img_height, orig_width, orig_height);
     }
-    return std::unexpected(InferError{
-        InferErrorCode::kParameterError,
+    return std::unexpected(VisionSimpleError{
+        VisionSimpleErrorCode::kParameterError,
         std::format("unsupported version: {}", magic_enum::enum_name(version_))
     });
 }
@@ -300,8 +300,8 @@ InferYOLO::RunResult InferYOLOOrtImpl::Run(const cv::Mat& image, float confidenc
 {
     //PreProcess
     if (image.rows == 0 || image.cols == 0)
-        return std::unexpected(InferError{
-            InferErrorCode::kParameterError, "image is empty"
+        return std::unexpected(VisionSimpleError{
+            VisionSimpleErrorCode::kParameterError, "image is empty"
         });
     cv::Mat& chw = PreProcess(image);
     // auto hwc_ptr = hwc.ptr<float>();
@@ -325,8 +325,8 @@ InferYOLO::RunResult InferYOLOOrtImpl::Run(const cv::Mat& image, float confidenc
     }
     else
     {
-        return std::unexpected(InferError{
-            InferErrorCode::kParameterError,
+        return std::unexpected(VisionSimpleError{
+            VisionSimpleErrorCode::kParameterError,
             std::format("unsupported input value type:{}", magic_enum::enum_name(input_value_type_))
         });
     }
@@ -356,8 +356,8 @@ InferYOLO::RunResult InferYOLOOrtImpl::Run(const cv::Mat& image, float confidenc
     }
     else
     {
-        return std::unexpected(InferError{
-            InferErrorCode::kParameterError,
+        return std::unexpected(VisionSimpleError{
+            VisionSimpleErrorCode::kParameterError,
             std::format("unsupported output value type:{}", magic_enum::enum_name(output_value_type_))
         });
     }

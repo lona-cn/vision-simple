@@ -1,0 +1,7 @@
+host: "127.0.0.1"
+port: 11451
+options:
+  static_path: "assets/static"
+  infer_framework: "kONNXRUNTIME"
+  infer_ep: "kDML"
+  infer_device: "0"

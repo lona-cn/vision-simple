@@ -107,7 +107,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl
                                          double iou_threshold = 0.3f,
                                          double contours_min_area = 12. * 12.,
                                          double rect_min_area = 8 * 8,
-                                         int kernel_size = 8) noexcept
+                                         int kernel_size = 6) noexcept
     {
         auto output_shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
         auto output_ptr = output_tensor.GetConst().GetTensorData<float>();
@@ -119,10 +119,6 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl
         cv::Mat dilated;
         cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kernel_size, kernel_size));
         cv::dilate(gray, dilated, kernel);
-        for (auto i = 0; i < 2; ++i)
-        {
-            cv::dilate(dilated, dilated, kernel);
-        }
         std::vector<std::vector<cv::Point>> contours, filtered_contours;
         cv::findContoursLinkRuns(dilated, contours);
         // cv::findContours(gray, contours, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE);
@@ -149,6 +145,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl
             filtered_box = VisionHelper::ScaleCoords(input_image_size, filtered_box,
                                                      original_image_size, true);
         }
+        //TODO: 增加Rect size，w*1.5 h*1.18
         return filtered_boxes;
     }
 

@@ -9,8 +9,8 @@ using namespace vision_simple;
 
 #define UNSUPPORTED(framework,ep) \
 std::unexpected{ \
-InferError{ \
-    InferErrorCode::kParameterError, std::format("unsupported framework({}) or ep({})", \
+VisionSimpleError{ \
+    VisionSimpleErrorCode::kParameterError, std::format("unsupported framework({}) or ep({})", \
                                                  magic_enum::enum_name((framework)), \
                                                  magic_enum::enum_name((ep))) \
 } \
@@ -77,4 +77,26 @@ namespace vision_simple
             return UNSUPPORTED(framework, ep);
         }
     }
+
+    // InferOCR::DetResult InferOCR::Det(const cv::Mat* images, size_t count) noexcept
+    // {
+    //     std::vector<std::reference_wrapper<const cv::Mat>> images_vec;
+    //     images_vec.reserve(count);
+    //     for (decltype(count) i = 0u; i < count; ++i)
+    //     {
+    //         images_vec.emplace_back(std::cref(images[i]));
+    //     }
+    //     return Det(images_vec);
+    // }
+    //
+    // InferOCR::RecResult InferOCR::Rec(const cv::Mat* images, size_t count, float confidence_threshold) noexcept
+    // {
+    //     std::vector<std::reference_wrapper<const cv::Mat>> images_vec;
+    //     images_vec.reserve(count);
+    //     for (decltype(count) i = 0u; i < count; ++i)
+    //     {
+    //         images_vec.emplace_back(std::cref(images[i]));
+    //     }
+    //     return Rec(images_vec, confidence_threshold);
+    // }
 }

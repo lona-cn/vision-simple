@@ -1,7 +1,7 @@
 local target_name = "common"
-local kind = "headeronly"
+local kind = "object"
 local group_name = "runtime"
-local pkgs = {}
+local pkgs = {"yalantinglibs","magic_enum"}
 local deps = {}
 local syslinks = {}
 local function callback()

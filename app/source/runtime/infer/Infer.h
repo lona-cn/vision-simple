@@ -9,13 +9,13 @@
 #ifdef _WIN32
 #include "DXInfo.hpp"
 #endif
-#include "VisionSimpleError.hpp"
+#include "VisionSimpleCommon.h"
 #include "config.h"
 
 namespace vision_simple
 {
     template <typename T>
-    using InferResult = std::expected<T, InferError>;
+    using InferResult = VSResult<T>;
 
     enum class InferFramework:uint8_t
     {

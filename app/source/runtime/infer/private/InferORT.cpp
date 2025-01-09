@@ -75,8 +75,8 @@ vision_simple::InferContextORT::CreateResult vision_simple::InferContextORT::Cre
     {
 #ifndef VISION_SIMPLE_WITH_CUDA
         return std::unexpected{
-            InferError{
-                InferErrorCode::kRuntimeError,
+            VisionSimpleError{
+                VisionSimpleErrorCode::kRuntimeError,
                 std::format("unsupported execution_provider:{}",
                             magic_enum::enum_name((ep_)))
             }
@@ -91,8 +91,8 @@ vision_simple::InferContextORT::CreateResult vision_simple::InferContextORT::Cre
     {
 #ifndef VISION_SIMPLE_WITH_TENSORRT
         return std::unexpected{
-            InferError{
-                InferErrorCode::kRuntimeError,
+            VisionSimpleError{
+                VisionSimpleErrorCode::kRuntimeError,
                 std::format("unsupported execution_provider:{}",
                             magic_enum::enum_name(ep_))
             }
@@ -112,8 +112,8 @@ vision_simple::InferContextORT::CreateResult vision_simple::InferContextORT::Cre
     catch (std::exception& e)
     {
         return std::unexpected{
-            InferError{
-                InferErrorCode::kRuntimeError,
+            VisionSimpleError{
+                VisionSimpleErrorCode::kRuntimeError,
                 std::format("unable to create ONNXRuntime Session:{}", e.what())
             }
         };

@@ -64,6 +64,6 @@ function SetupProject()
 	add_defines("EXPORTING_API")
 	add_rules("plugin.vsxmake.autoupdate")
 	set_allowedmodes("debug", "release", "releasedbg")
-	set_defaultmode("releasedbg")
-	set_defaultarchs("windows|x64","linux|x64")
+	set_defaultmode("release")
+	set_defaultarchs("windows|x64","linux|x86_64")
 end

@@ -10,6 +10,7 @@
          std::cout << std::format("fail code:{} message:{}", magic_enum::enum_name((err).code), (err).message) << std::endl; \
          return -1; \
      }}while(0)
+using namespace vision_simple;
 
 int main()
 {
