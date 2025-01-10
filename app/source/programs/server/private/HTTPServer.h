@@ -13,9 +13,9 @@ namespace vision_simple
     using HTTPServerResult = VSResult<T>;
 
     constexpr std::string_view HTTPSERVER_OPT_KEY_STATIC_DIR{"static_path"};
-    constexpr std::string_view HTTPSERVER_OPTKEY_INFER_FRAMEWORK{"infer_framework"};
-    constexpr std::string_view HTTPSERVER_OPTKEY_INFER_EP{"infer_ep"};
-    constexpr std::string_view HTTPSERVER_OPTKEY_INFER_DEVICE{"infer_device"};
+    constexpr std::string_view HTTPSERVER_OPT_KEY_INFER_FRAMEWORK{"infer_framework"};
+    constexpr std::string_view HTTPSERVER_OPT_KEY_INFER_EP{"infer_ep"};
+    constexpr std::string_view HTTPSERVER_OPT_KEY_INFER_DEVICE{"infer_device"};
 
     constexpr std::string_view HTTPSERVER_OPT_DEFVAL_STATIC_DIR{"assets/static"};
     constexpr std::string_view HTTPSERVER_OPT_DEFVAL_INFER_FRAMEWORK{"kONNXRUNTIME"};

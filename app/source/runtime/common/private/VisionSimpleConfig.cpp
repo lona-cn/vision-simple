@@ -12,7 +12,7 @@ namespace
     std::unique_ptr<vision_simple::Config> config_instance{nullptr};
 }
 
-std::expected<vision_simple::Config, VisionSimpleError> vision_simple::Config::Load(
+std::expected<vision_simple::Config, vision_simple::VisionSimpleError> vision_simple::Config::Load(
     const ConfigLoadOptions& options) noexcept
 {
     std::optional<ModelConfig> model_config_opt;
@@ -36,7 +36,7 @@ const vision_simple::ModelConfig& vision_simple::Config::model_config() const no
     return model_config_;
 }
 
-std::expected<std::reference_wrapper<const vision_simple::Config>, VisionSimpleError>
+std::expected<std::reference_wrapper<const vision_simple::Config>, vision_simple::VisionSimpleError>
 vision_simple::Config::Instance() noexcept
 {
     {

@@ -79,6 +79,7 @@ function CreateTarget(target_name --[[string]],kind --[[string]],base_dir --[[st
     target(target_name)
     set_kind(kind)
     set_group(group_name)
+    add_extrafiles(path.join(base_dir,"xmake.lua"))
     add_rules("auto_cp_deps_assets_configs_to_build")
     -- packages
     -- add packages here

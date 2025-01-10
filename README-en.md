@@ -3,8 +3,21 @@ english | [简体中文](./README.md)
 </br>
 Version: `0.2.0`
 
-vision-simple is a C++23 library that provides a high-performance inference server for `YOLOv10`, `YOLOv11`, `PaddleOCR`, and `EasyOCR` with built-in HTTP API support. It supports multiple Execution Providers, including `DirectML` `CUDA` `TensorRT`, enabling flexible hardware acceleration. Designed for cross-platform deployment, it runs seamlessly on both Windows and Linux.
+***document is out-of-date.***
 
+vision-simple is a C++23 library that provides a high-performance inference server for `YOLOv10`, `YOLOv11`, `PaddleOCR`, and `EasyOCR` with **built-in HTTP API** support. It supports multiple Execution Providers, including `DirectML` `CUDA` `TensorRT`, enabling flexible hardware acceleration. Designed for cross-platform deployment, it runs seamlessly on both Windows and Linux.
+
+
+## demo
+### yolo
+![hd2-yolo-gif](doc/images/hd2-yolo.gif)
+
+### OCR
+
+![http-inferocr](doc/images/http-inferocr.png)
+
+![paddleocr](doc/images/ppocr.png)
+---
 
 ### A Simple Example of YOLOv11 Using DirectML
 `test_yolo.cpp`
@@ -64,19 +77,7 @@ int main(int argc,char *argv[]){
 |windows|Y|Y|Y|?|N|N|N|
 |linux|Y|N|Y|?|N|N|N|
 |WSL|Y|N|Y|?|N|N|N|
-## demo
-### yolo(HellDivers2)
-<center>vision-simple</center>
 
-![hd2-yolo-img](doc/images/hd2-yolo.jpg)
-
-<center>ultralytics</center>
-
-![hd2-yolo-gif](doc/images/hd2-yolo.gif)
-
-### PaddleOCR(HellDivers2)
-
-![paddleocr](doc/images/ppocr.png)
 ## get started
 ### build
 #### windows/amd64

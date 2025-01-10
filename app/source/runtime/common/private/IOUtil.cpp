@@ -1,7 +1,7 @@
 ﻿#include "IOUtil.h"
 #include <filesystem>
 
-std::expected<vision_simple::DataBuffer<unsigned char>, VisionSimpleError> vision_simple::ReadAll(
+std::expected<vision_simple::DataBuffer<unsigned char>, vision_simple::VisionSimpleError> vision_simple::ReadAll(
     const std::string& path) noexcept
 {
     std::ifstream ifs(path, std::ios::binary | std::ios::ate);
@@ -27,7 +27,8 @@ std::expected<vision_simple::DataBuffer<unsigned char>, VisionSimpleError> visio
     return DataBuffer{std::move(buffer), size};
 }
 
-std::expected<std::string, VisionSimpleError> vision_simple::ReadAllString(const std::string& path) noexcept
+std::expected<std::string, vision_simple::VisionSimpleError> vision_simple::ReadAllString(
+    const std::string& path) noexcept
 {
     std::ifstream file(path);
     if (!file)
@@ -40,4 +41,23 @@ std::expected<std::string, VisionSimpleError> vision_simple::ReadAllString(const
 
     return std::string((std::istreambuf_iterator<char>(file)),
                        std::istreambuf_iterator<char>());
+}
+
+std::expected<std::vector<std::string>, vision_simple::VisionSimpleError> vision_simple::ReadAllLines(
+    const std::string& path) noexcept
+{
+    std::vector<std::string> lines;
+    std::ifstream ifs(path);
+    if (!ifs)
+    {
+        return MK_VSERROR(
+            VisionSimpleErrorCode::kIOError,
+            std::format("Unable to open file:{}", path));
+    }
+    std::string line;
+    while (std::getline(ifs, line))
+    {
+        lines.push_back(line.substr(0, line.size()));
+    }
+    return lines;
 }
