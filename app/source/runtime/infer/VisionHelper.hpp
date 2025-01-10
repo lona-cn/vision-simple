@@ -294,5 +294,23 @@ namespace vision_simple
             // 将过滤后的框替换回原始框列表
             return filteredBoxes;
         }
+
+        static cv::Rect ScaleRect(const cv::Rect& rect, double scale_width, double scale_height) noexcept
+        {
+            // 计算新的宽度和高度
+            int new_width = static_cast<int>(rect.width * scale_width);
+            int new_height = static_cast<int>(rect.height * scale_height);
+
+            // 计算原矩形的中心
+            int center_x = rect.x + rect.width / 2;
+            int center_y = rect.y + rect.height / 2;
+
+            // 计算新的x和y坐标，使得缩放后的矩形中心不变
+            int new_x = center_x - new_width / 2;
+            int new_y = center_y - new_height / 2;
+
+            // 返回新的矩形
+            return {new_x, new_y, new_width, new_height};
+        }
     };
 }

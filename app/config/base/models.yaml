@@ -1,0 +1,13 @@
+yolo:
+  - name: "hd2-fp16"
+    version: "kV11"
+    path: "assets/hd2-yolo11n-fp16.onnx"
+  - name: "hd2-fp32"
+    version: "kV11"
+    path: "assets/hd2-yolo11n-fp32.onnx"
+ocr:
+  - name: "ppocr-v4"
+    version: "kPPOCRv4"
+    det_path: "assets/ppocr_det.onnx"
+    rec_path: "assets/ppocr_rec.onnx"
+    char_dict_path: "assets/ppocr_keys_v1.txt"

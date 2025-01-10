@@ -9,13 +9,14 @@
 #ifdef _WIN32
 #include "DXInfo.hpp"
 #endif
-#include "VisionSimpleError.hpp"
+#include "VisionSimpleCommon.h"
 #include "config.h"
+#include "IOUtil.h"
 
 namespace vision_simple
 {
     template <typename T>
-    using InferResult = std::expected<T, InferError>;
+    using InferResult = VSResult<T>;
 
     enum class InferFramework:uint8_t
     {
@@ -108,6 +109,9 @@ namespace vision_simple
                           std::span(reinterpret_cast<uint8_t*>(data.data()), data.size_bytes()),
                           version, device_id);
         }
+
+        static CreateResult Create(InferContext& context, const std::string& path, YOLOVersion version,
+                                   size_t device_id = 0) noexcept;
     };
 
     //--------OCR--------
@@ -160,5 +164,9 @@ namespace vision_simple
                           std::span<uint8_t>{reinterpret_cast<uint8_t*>(rec_data.data()), rec_data.size_bytes()},
                           model_type, device_id);
         }
+
+        static CreateResult Create(InferContext& context, const std::string& char_dict_path,
+                                   const std::string& det_path, const std::string& rec_path, OCRModelType model_type,
+                                   size_t device_id = 0) noexcept;
     };
 }

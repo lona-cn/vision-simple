@@ -1,12 +1,51 @@
 # vision-simple
 [english](./README-en.md) | 简体中文
 </br>
-Version: `0.2.0`
+Version: `0.3.0`
 
-`vision-simple`是一个基于C++23的跨平台视觉推理库，提供开箱即用的推理功能，目前支持常用的YOLO系列（YOLOv10和YOLOv11）和一些OCR（`PaddleOCR`）,内建HTTP API，并且基于`ONNXRuntime`支持多种Execution Provider，如`DirectML`、`CUDA`、`TensorRT`，以及一些特殊的设备（如RockChip的NPU）。
+`vision-simple`是一个基于C++23的跨平台视觉推理库，提供开箱即用的推理功能，目前支持常用的YOLO系列（YOLOv10和YOLOv11）和一些OCR（`PaddleOCR`）,**内建HTTP API**，并且基于`ONNXRuntime`支持多种Execution Provider，如`DirectML`、`CUDA`、`TensorRT`，以及一些特殊的设备（如RockChip的NPU）。
 
+---
 
-### 例子：YOLOv11+ONNXRuntime+DirectML
+## 演示
+### yolo
+
+![hd2-yolo-gif](doc/images/hd2-yolo.gif)
+
+### OCR
+
+![http-inferocr](doc/images/http-inferocr.png)
+
+![paddleocr](doc/images/ppocr.png)
+---
+
+## 支持情况
+
+### 视觉模型
+|type|status|
+|-|-|
+|YOLOv10|Y|
+|YOLOv11|Y|
+|EasyOCR|N|
+|PaddleOCR|Y|
+
+### 推理框架
+|framework|status|
+|-|-|
+|ONNXRuntime|Y|
+|TVM|N|
+
+### EP
+|platform|CPU|DirectML|CUDA|TensorRT|Vulkan|OpenGL|OpenCL|
+|-|-|-|-|-|-|-|-|
+|windows|Y|Y|Y|?|N|N|N|
+|linux|Y|N|Y|?|N|N|N|
+|WSL|Y|N|Y|?|N|N|N|
+
+---
+
+## 例子
+### YOLOv11+ONNXRuntime+DirectML
 `test_yolo.cpp`
 ```cpp
 #include <Infer.h>
@@ -46,37 +85,23 @@ int main(int argc,char *argv[]){
 }
 ```
 
-## 视觉模型
-|type|status|
-|-|-|
-|YOLOv10|Y|
-|YOLOv11|Y|
-|EasyOCR|N|
-|PaddleOCR|Y|
-### 推理框架
-|framework|status|
-|-|-|
-|ONNXRuntime|Y|
-|TVM|N|
-### EP
-|platform|CPU|DirectML|CUDA|TensorRT|Vulkan|OpenGL|OpenCL|
-|-|-|-|-|-|-|-|-|
-|windows|Y|Y|Y|?|N|N|N|
-|linux|Y|N|Y|?|N|N|N|
-|WSL|Y|N|Y|?|N|N|N|
-## 演示
-### yolo(HellDivers2)
-<center>vision-simple</center>
+### HTTP API+OCR
+1. 启动server项目：
+```powershell
+# 构建
+./scripts/build-release.bat
+xmake build server
+# 启动server
+xmake run server
+```
+2. 打开[swagger在线编辑器](https://editor-next.swagger.io/)，并允许该网站的不安全内容
+3. 复制[doc/openapi/server.yaml](doc/openapi/server.yaml)的内容到`swagger在线编辑器`
+4. 在编辑器右侧选择感兴趣的API进行测试
+![swagger-right](doc/images/swagger-right.png)
 
-![hd2-yolo-img](doc/images/hd2-yolo.jpg)
+---
 
-<center>ultralytics</center>
-
-![hd2-yolo-gif](doc/images/hd2-yolo.gif)
-### PaddleOCR(HellDivers2)
-
-![paddleocr](doc/images/ppocr.png)
-## 开始
+## 开发
 ### 构建项目
 #### windows/amd64
 * [xmake](https://xmake.io) >= 2.9.4
@@ -102,7 +127,8 @@ xmake run test_yolo
 xmake build test_yolo
 xmake run test_yolo
 ```
-
+### HTTP API
+api按照OAS描述，其文件位于[doc/openapi/server.yaml](doc/openapi/server.yaml)
 ## docker
 暂未支持。
 

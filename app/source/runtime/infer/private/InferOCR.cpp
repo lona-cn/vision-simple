@@ -40,7 +40,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl
     Ort::Value det_input_tensor, rec_input_tensor;
     std::string det_input_name, det_output_name,
                 rec_input_name, rec_output_name;
-    Ort::MemoryInfo rec_memory_info;
+    Ort::MemoryInfo det_memory_info, rec_memory_info;
     cv::Mat chwrgb_image, preprocessed_image;
 
     explicit Impl(InferContextORT& ort_ctx,
@@ -55,10 +55,12 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl
           det_output_name(std::string(this->det->GetOutputNameAllocated(0, det_allocator).get())),
           rec_input_name(std::string(this->rec->GetInputNameAllocated(0, rec_allocator).get())),
           rec_output_name(std::string(this->rec->GetOutputNameAllocated(0, rec_allocator).get())),
+          det_memory_info(Ort::MemoryInfo::CreateCpu(ort_ctx.env_memory_info().GetAllocatorType(),
+                                                     ort_ctx.env_memory_info().GetMemoryType())),
           rec_memory_info(Ort::MemoryInfo::CreateCpu(ort_ctx.env_memory_info().GetAllocatorType(),
                                                      ort_ctx.env_memory_info().GetMemoryType()))
     {
-        det_io_binding.BindOutput(det_output_name.c_str(), ort_ctx.env_memory_info());
+        det_io_binding.BindOutput(det_output_name.c_str(), det_memory_info);
         rec_io_binding.BindOutput(rec_output_name.c_str(), rec_memory_info);
     }
 
@@ -107,7 +109,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl
                                          double iou_threshold = 0.3f,
                                          double contours_min_area = 12. * 12.,
                                          double rect_min_area = 8 * 8,
-                                         int kernel_size = 8) noexcept
+                                         int kernel_size = 6) noexcept
     {
         auto output_shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
         auto output_ptr = output_tensor.GetConst().GetTensorData<float>();
@@ -119,7 +121,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl
         cv::Mat dilated;
         cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kernel_size, kernel_size));
         cv::dilate(gray, dilated, kernel);
-        for (auto i = 0; i < 2; ++i)
+        for (auto i = 0; i < 2; i++)
         {
             cv::dilate(dilated, dilated, kernel);
         }
@@ -254,6 +256,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl
                                                     ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
         std::memcpy(det_input_tensor.GetTensorMutableData<float>(), input_image.ptr<float>(), input_size_bytes);
         det_io_binding.BindInput(det_input_name.c_str(), det_input_tensor);
+        det_io_binding.BindOutput(det_output_name.c_str(), det_memory_info);
         Ort::RunOptions run_options;
         det->Run(run_options, det_io_binding);
         const auto& ovalues = det_io_binding.GetOutputValues();

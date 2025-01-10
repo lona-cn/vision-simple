@@ -9,44 +9,7 @@
 #include <cstddef>
 #include <format>
 #include <magic_enum.hpp>
-
-template <typename T>
-struct DataBuffer
-{
-    std::unique_ptr<T[]> data;
-    size_t size;
-
-    std::span<T> span()
-    {
-        return std::span{data.get(), size};
-    }
-};
-
-std::expected<DataBuffer<uint8_t>, InferError> ReadAll(
-    const std::string& path)
-{
-    std::ifstream ifs(path, std::ios::binary | std::ios::ate);
-    if (!ifs)
-    {
-        std::unexpected(InferError{
-            InferErrorCode::kIOError,
-            std::format("unable to open file '{}'", path)
-        });
-    }
-    const size_t size = ifs.tellg();
-    if (size <= 0)
-    {
-        std::unexpected(InferError{
-            InferErrorCode::kIOError,
-            std::format("file:{} is empty,size:{}", path, size)
-        });
-    }
-    ifs.seekg(std::ios::beg);
-    auto buffer = std::make_unique<uint8_t[]>(size);
-    ifs.read(reinterpret_cast<char*>(buffer.get()),
-             static_cast<long long>(size));
-    return DataBuffer{std::move(buffer), size};
-}
+#include "IOUtil.h"
 
 class DoubleBuffer
 {
