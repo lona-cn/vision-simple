@@ -4,7 +4,9 @@
 <p align="center">
 <a><img alt="GitHub License" src="https://img.shields.io/github/license/lona-cn/vision-simple"></a>
 <a><img alt="GitHub Release" src="https://img.shields.io/github/v/release/lona-cn/vision-simple"></a>
+<a><img alt="Docker pulls" src="https://img.shields.io/docker/pulls/lonacn/vision_simple"></a>
 <a><img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/lona-cn/vision-simple/total"></a>
+
 </p>
 <p align="center">
 <a><img alt="" src="https://img.shields.io/badge/yolo-v10-AD65F1.svg"></a>
@@ -15,13 +17,15 @@
 <a><img alt="windows x64" src="https://img.shields.io/badge/windows-x64-brightgreen.svg"></a>
 <a><img alt="linux x86_64" src="https://img.shields.io/badge/linux-x86_64-brightgreen.svg"></a>
 <a><img alt="linux arm64" src="https://img.shields.io/badge/linux-arm64-brightgreen.svg"></a>
-<a><img alt="ort cpu" src="https://img.shields.io/badge/ort-cpu-yellow.svg"></a>
+</p>
+<p align="center">
+<a><img alt="ort cpu" src="https://img.shields.io/badge/ort-cpu-880088.svg"></a>
 <a><img alt="ort dml" src="https://img.shields.io/badge/ort-dml-blue.svg"></a>
 <a><img alt="ort cuda" src="https://img.shields.io/badge/ort-cuda-green.svg"></a>
+<a><img alt="ort rknn" src="https://img.shields.io/badge/ort-rknn-white.svg"></a>
 </p>
 
 `vision-simple` 是一个基于 C++23 的跨平台视觉推理库，旨在提供 **开箱即用** 的推理功能。通过 Docker用户可以快速搭建推理服务。该库目前支持常见的 YOLO 系列（包括 YOLOv10 和 YOLOv11），以及部分 OCR 模型（如 `PaddleOCR`）。**内建 HTTP API** 使得服务更加便捷。此外，`vision-simple` 采用 `ONNXRuntime` 引擎，支持多种 Execution Provider，如 `DirectML`、`CUDA`、`TensorRT`，并可与特定硬件设备（如 RockChip 的 RKNPU）兼容，提供更高效的推理性能。
-
 
 ### yolov11n 3440x1440@60fps+
 ![hd2-yolo-gif](doc/images/hd2-yolo.gif)
@@ -30,7 +34,7 @@
 
 ![http-inferocr](doc/images/http-inferocr.png)
 
-## <div align="center"> 特性 </div>
+## <div align="center">🚀 特性 </div>
 - **跨平台**：支持`windows/x64`、`linux/x86_64`、`linux/arm64`
 - **多设备**：支持CPU、GPU、RKNPU
 - **小体积**：静态编译版本体积不到20MiB，推理YOLO和OCR占用300MiB内存
@@ -43,7 +47,7 @@
 ### docker部署HTTP服务
 1. 启动server项目：
 ```sh
-docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.0-cpu-x86_64
+docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:<version>-<ep>-<arch>
 ```
 2. 打开[swagger在线编辑器](https://editor-next.swagger.io/)，并允许该网站的不安全内容
 3. 复制[doc/openapi/server.yaml](doc/openapi/server.yaml)的内容到`swagger在线编辑器`
