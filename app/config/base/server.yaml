@@ -3,5 +3,5 @@ port: 11451
 options:
   static_path: "assets/static"
   infer_framework: "kONNXRUNTIME"
-  infer_ep: "kDML"
+  infer_ep: "kCPU"
   infer_device: "0"

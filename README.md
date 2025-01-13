@@ -1,52 +1,59 @@
-# vision-simple
+# <div align="center">🚀 vision-simple 🚀</div>
 [english](./README-en.md) | 简体中文
-</br>
-Version: `0.3.0`
 
-`vision-simple`是一个基于C++23的跨平台视觉推理库，提供开箱即用的推理功能，目前支持常用的YOLO系列（YOLOv10和YOLOv11）和一些OCR（`PaddleOCR`）,**内建HTTP API**，并且基于`ONNXRuntime`支持多种Execution Provider，如`DirectML`、`CUDA`、`TensorRT`，以及一些特殊的设备（如RockChip的NPU）。
+<p align="center">
+<a><img alt="GitHub License" src="https://img.shields.io/github/license/lona-cn/vision-simple"></a>
+<a><img alt="GitHub Release" src="https://img.shields.io/github/v/release/lona-cn/vision-simple"></a>
+<a><img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/lona-cn/vision-simple/total"></a>
+</p>
+<p align="center">
+<a><img alt="" src="https://img.shields.io/badge/yolo-v10-AD65F1.svg"></a>
+<a><img alt="" src="https://img.shields.io/badge/yolo-v11-AD65F1.svg"></a>
+<a><img alt="" src="https://img.shields.io/badge/paddle_ocr-v4-2932DF.svg"></a>
+</p>
+<p align="center">
+<a><img alt="windows x64" src="https://img.shields.io/badge/windows-x64-brightgreen.svg"></a>
+<a><img alt="linux x86_64" src="https://img.shields.io/badge/linux-x86_64-brightgreen.svg"></a>
+<a><img alt="linux arm64" src="https://img.shields.io/badge/linux-arm64-brightgreen.svg"></a>
+<a><img alt="ort cpu" src="https://img.shields.io/badge/ort-cpu-yellow.svg"></a>
+<a><img alt="ort dml" src="https://img.shields.io/badge/ort-dml-blue.svg"></a>
+<a><img alt="ort cuda" src="https://img.shields.io/badge/ort-cuda-green.svg"></a>
+</p>
 
----
+`vision-simple` 是一个基于 C++23 的跨平台视觉推理库，旨在提供 **开箱即用** 的推理功能。通过 Docker用户可以快速搭建推理服务。该库目前支持常见的 YOLO 系列（包括 YOLOv10 和 YOLOv11），以及部分 OCR 模型（如 `PaddleOCR`）。**内建 HTTP API** 使得服务更加便捷。此外，`vision-simple` 采用 `ONNXRuntime` 引擎，支持多种 Execution Provider，如 `DirectML`、`CUDA`、`TensorRT`，并可与特定硬件设备（如 RockChip 的 RKNPU）兼容，提供更高效的推理性能。
 
-## 演示
-### yolo
 
+### yolov11n 3440x1440@60fps+
 ![hd2-yolo-gif](doc/images/hd2-yolo.gif)
 
-### OCR
+### OCR(HTTP API)
 
 ![http-inferocr](doc/images/http-inferocr.png)
 
-![paddleocr](doc/images/ppocr.png)
----
+## <div align="center"> 特性 </div>
+- **跨平台**：支持`windows/x64`、`linux/x86_64`、`linux/arm64`
+- **多设备**：支持CPU、GPU、RKNPU
+- **小体积**：静态编译版本体积不到20MiB，推理YOLO和OCR占用300MiB内存
+- **快速部署**：
+  - **一键编译**：提供各个平台已验证的编译脚本
+  - **容器部署**：使用`docker`、`podman`、`container`一键部署
+  - **HTTP服务**：提供[]`HTTP API`](doc/openapi/server.yaml)供非实时应用使用
 
-## 支持情况
+## <div align="center">🚀 使用vision-simple </div>
+### docker部署HTTP服务
+1. 启动server项目：
+```sh
+docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.0-cpu-x86_64
+```
+2. 打开[swagger在线编辑器](https://editor-next.swagger.io/)，并允许该网站的不安全内容
+3. 复制[doc/openapi/server.yaml](doc/openapi/server.yaml)的内容到`swagger在线编辑器`
+4. 在编辑器右侧选择感兴趣的API进行测试：
+![swagger-right](doc/images/swagger-right.png)
 
-### 视觉模型
-|type|status|
-|-|-|
-|YOLOv10|Y|
-|YOLOv11|Y|
-|EasyOCR|N|
-|PaddleOCR|Y|
 
-### 推理框架
-|framework|status|
-|-|-|
-|ONNXRuntime|Y|
-|TVM|N|
+## <div align="center">🚀 快速开始 </div>
+### 开发YOLOv11推理
 
-### EP
-|platform|CPU|DirectML|CUDA|TensorRT|Vulkan|OpenGL|OpenCL|
-|-|-|-|-|-|-|-|-|
-|windows|Y|Y|Y|?|N|N|N|
-|linux|Y|N|Y|?|N|N|N|
-|WSL|Y|N|Y|?|N|N|N|
-
----
-
-## 例子
-### YOLOv11+ONNXRuntime+DirectML
-`test_yolo.cpp`
 ```cpp
 #include <Infer.h>
 #include <opencv2/opencv.hpp>
@@ -84,28 +91,10 @@ int main(int argc,char *argv[]){
     return 0;
 }
 ```
-
-### HTTP API+OCR
-1. 启动server项目：
-```powershell
-# 构建
-./scripts/build-release.bat
-xmake build server
-# 启动server
-xmake run server
-```
-2. 打开[swagger在线编辑器](https://editor-next.swagger.io/)，并允许该网站的不安全内容
-3. 复制[doc/openapi/server.yaml](doc/openapi/server.yaml)的内容到`swagger在线编辑器`
-4. 在编辑器右侧选择感兴趣的API进行测试
-![swagger-right](doc/images/swagger-right.png)
-
----
-
-## 开发
 ### 构建项目
-#### windows/amd64
-* [xmake](https://xmake.io) >= 2.9.4
-* msvc support c++23
+#### windows/x64
+* [xmake](https://xmake.io) >= 2.9.7
+* msvc with c++23
 * windows 11
 
 ```powershell
@@ -115,8 +104,8 @@ xmake run server
 xmake build test_yolo
 xmake run test_yolo
 ```
-#### linux/amd64
-* [xmake](https://xmake.io) >= 2.9.4
+#### linux/x86_64
+* [xmake](https://xmake.io) >= 2.9.7
 * gcc-13
 * debian12/ubuntu2022
 
@@ -127,11 +116,23 @@ xmake run test_yolo
 xmake build test_yolo
 xmake run test_yolo
 ```
-### HTTP API
-api按照OAS描述，其文件位于[doc/openapi/server.yaml](doc/openapi/server.yaml)
-## docker
-暂未支持。
+### docker镜像
+所有`Dockerfile`位于目录：`docker/`
 
-## 联系方式
-QQ: 1307693959 </br>
-[email](amhakureireimu@gmail.com)
+```sh
+# 处于vision-simple根目录
+# 构建项目
+docker build -t vision-simple:latest -f  dockerfile/debian-x86_64.Dockefile .
+# 运行容器，默认配置会使用CPU推理并监听11451端口
+docker run -it --rm -p 11451:11451 --name vs vision-simple
+```
+
+## <div align="center">🚀 联系方式</div>
+QQ群: 464992884
+
+![Discord](https://img.shields.io/discord/1327875843581808640)
+
+## <div align="center">📄 许可证</div>
+项目内的YOLO模型和PaddleOCR模型版权归原项目所有
+
+本项目使用**Apache-2.0**许可证

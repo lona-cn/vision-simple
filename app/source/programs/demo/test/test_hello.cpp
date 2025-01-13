@@ -1,5 +1,3 @@
 #include <cstdio>
 
-void main(){
-    puts("hello test");
-}
+void main() { puts("hello test"); }

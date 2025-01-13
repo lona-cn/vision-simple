@@ -25,10 +25,12 @@ after_build(function(target)
         local to_dir = target_dir.."/assets/"
         local group = target:get("group")
         local asset_dir = path.join(os.projectdir(),"app","assets")
-        os.trycp(asset_dir.."/main/**",to_dir)
+        local from_path = path.join(asset_dir,"main/")
+        os.trycp(from_path,to_dir,{rootdir = from_path})
         -- add test assests
         if type(group) == "string" and string.find(group,"test") then
-            os.trycp(asset_dir.."/test/**",to_dir)
+            local from_path = path.join(asset_dir,"test/")
+            os.trycp(from_path,to_dir,{rootdir = from_path})
         end
     end
 
@@ -45,7 +47,8 @@ after_build(function(target)
             table.insert(config_dirs,config_plat_dir)
         end
         for _,config_dir in ipairs(config_dirs) do
-            os.trycp(config_dir.."/**",to_dir)
+            local from_path = path.join(config_dir)
+            os.trycp(from_path,to_dir,{rootdir = from_path})
         end
     end
 

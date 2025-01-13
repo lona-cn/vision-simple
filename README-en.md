@@ -1,26 +1,56 @@
-# vision-simple
+# <div align="center">🚀 vision-simple 🚀</div>
 english | [简体中文](./README.md)
-</br>
-Version: `0.2.0`
 
-***document is out-of-date.***
+<p align="center">
+<a><img alt="GitHub License" src="https://img.shields.io/github/license/lona-cn/vision-simple"></a>
+<a><img alt="GitHub Release" src="https://img.shields.io/github/v/release/lona-cn/vision-simple"></a>
+<a><img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/lona-cn/vision-simple/total"></a>
+</p>
+<p align="center">
+<a><img alt="" src="https://img.shields.io/badge/yolo-v10-AD65F1.svg"></a>
+<a><img alt="" src="https://img.shields.io/badge/yolo-v11-AD65F1.svg"></a>
+<a><img alt="" src="https://img.shields.io/badge/paddle_ocr-v4-2932DF.svg"></a>
+</p>
+<p align="center">
+<a><img alt="windows x64" src="https://img.shields.io/badge/windows-x64-brightgreen.svg"></a>
+<a><img alt="linux x86_64" src="https://img.shields.io/badge/linux-x86_64-brightgreen.svg"></a>
+<a><img alt="linux arm64" src="https://img.shields.io/badge/linux-arm64-brightgreen.svg"></a>
+<a><img alt="ort cpu" src="https://img.shields.io/badge/ort-cpu-yellow.svg"></a>
+<a><img alt="ort dml" src="https://img.shields.io/badge/ort-dml-blue.svg"></a>
+<a><img alt="ort cuda" src="https://img.shields.io/badge/ort-cuda-green.svg"></a>
+</p>
 
-vision-simple is a C++23 library that provides a high-performance inference server for `YOLOv10`, `YOLOv11`, `PaddleOCR`, and `EasyOCR` with **built-in HTTP API** support. It supports multiple Execution Providers, including `DirectML` `CUDA` `TensorRT`, enabling flexible hardware acceleration. Designed for cross-platform deployment, it runs seamlessly on both Windows and Linux.
+`vision-simple` is a cross-platform visual inference library based on C++23, designed to provide **out-of-the-box** inference capabilities. With Docker, users can quickly set up inference services. This library currently supports popular YOLO models (including YOLOv10 and YOLOv11) and some OCR models (such as `PaddleOCR`). It features a **built-in HTTP API**, making the service more accessible. Additionally, `vision-simple` uses the `ONNXRuntime` engine, which supports multiple Execution Providers such as `DirectML`, `CUDA`, `TensorRT`, and can be compatible with specific hardware devices (such as RockChip's RKNPU), offering more efficient inference performance.
 
-
-## demo
-### yolo
+### yolov11n 3440x1440@60fps+
 ![hd2-yolo-gif](doc/images/hd2-yolo.gif)
 
-### OCR
+### OCR (HTTP API)
 
 ![http-inferocr](doc/images/http-inferocr.png)
 
-![paddleocr](doc/images/ppocr.png)
----
+## <div align="center"> Features </div>
+- **Cross-platform**: Supports `windows/x64`, `linux/x86_64`, and `linux/arm64`
+- **Multi-device**: Supports CPU, GPU, and RKNPU
+- **Small size**: The statically compiled version is under 20 MiB, with YOLO and OCR inference occupying 300 MiB of memory
+- **Fast deployment**:
+  - **One-click compilation**: Provides verified build scripts for multiple platforms
+  - **Container deployment**: One-click deployment with `docker`, `podman`, or `container`
+  - **HTTP Service**: Offers a [`HTTP API`](doc/openapi/server.yaml) for non-real-time applications
 
-### A Simple Example of YOLOv11 Using DirectML
-`test_yolo.cpp`
+## <div align="center">🚀 Using vision-simple </div>
+### Deploy HTTP Service
+1. Start the server project:
+```powershell
+docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.0-cpu-x86_64
+```
+2. Open the Swagger online editor and allow the site’s unsafe content.
+3. Copy the content from doc/openapi/server.yaml into the Swagger editor.
+4. On the right panel of the editor, select the APIs you want to test
+![swagger-right](doc/images/swagger-right.png)
+
+## <div align="center">🚀 Quick Start for Development </div>
+### YOLOv11 Inference Development
 ```cpp
 #include <Infer.h>
 #include <opencv2/opencv.hpp>
@@ -41,7 +71,7 @@ struct DataBuffer
 
 extern std::expected<DataBuffer<uint8_t>, InferError> ReadAll(const std::string& path);
 
-int main(int argc,char *argv[]){
+int main(int argc, char *argv[]){
     //----read file----
     // read fp32 onnx model
     auto data = ReadAll("assets/hd2-yolo11n-fp32.onnx");
@@ -58,33 +88,11 @@ int main(int argc,char *argv[]){
     return 0;
 }
 ```
-
-## support list
-|type|status|
-|-|-|
-|YOLOv10|Y|
-|YOLOv11|Y|
-|EasyOCR|N|
-|PaddleOCR|Y|
-### inference frameworks
-|framework|status|
-|-|-|
-|ONNXRuntime|Y|
-|TVM|N|
-### execution providers
-|platform|CPU|DirectML|CUDA|TensorRT|Vulkan|OpenGL|OpenCL|
-|-|-|-|-|-|-|-|-|
-|windows|Y|Y|Y|?|N|N|N|
-|linux|Y|N|Y|?|N|N|N|
-|WSL|Y|N|Y|?|N|N|N|
-
-## get started
-### build
-#### windows/amd64
-* [xmake](https://xmake.io) >= 2.9.4
-* msvc support c++23
-* windows 11
-
+### Build Project
+#### windows/x64
+- xmake >= 2.9.7
+- msvc with C++23
+- Windows 11
 ```powershell
 # setup sln
 ./scripts/setupdev-vs.bat
@@ -92,11 +100,10 @@ int main(int argc,char *argv[]){
 xmake build test_yolo
 xmake run test_yolo
 ```
-#### linux/amd64
-* [xmake](https://xmake.io) >= 2.9.4
-* gcc-13
-* debian12/ubuntu2022
-
+#### linux/x86_64
+- xmake >= 2.9.7
+- gcc-13
+- Debian 12 / Ubuntu 2022
 ```sh
 # build release
 ./scripts/build-release.sh
@@ -104,9 +111,21 @@ xmake run test_yolo
 xmake build test_yolo
 xmake run test_yolo
 ```
+### Docker Image
+All `Dockerfiles` are located in the `docker/` directory.
+```sh
+# From the root directory of vision-simple
+# Build the project
+docker build -t vision-simple:latest -f dockerfile/debian-x86_64.Dockerfile .
+# Run the container, the default configuration will use CPU inference and listen on port 11451
+docker run -it --rm -p 11451:11451 --name vs vision-simple
+```
 
-## docker
-not support yet.
+<div align="center">🚀 Contact</div>
 
-## Contact me
-[email](amhakureireimu@gmail.com)
+![Discord](https://img.shields.io/discord/1327875843581808640)
+
+<div align="center">📄 License</div>
+The copyrights for the YOLO models and PaddleOCR models in this project belong to the original authors.
+
+This project is licensed under the Apache-2.0 license.

@@ -1,5 +1,5 @@
 function SetupProject()
-	local project_semver = "0.0.1"
+	local project_semver = "0.4.0"
 	set_project("vision-simple")
 	-- language version
 	set_languages("clatest", "c++23")
@@ -52,15 +52,17 @@ function SetupProject()
 			add_defines("_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH")
 		end
 	elseif is_os("linux") then
-		add_cxxflags("-mf16c")
+		if is_arch("x86_64") then
+			add_cxxflags("-mf16c")
+		end
 		add_rpathdirs("./")
 		-- add_syslinks("c++")
 		-- add_cxxflags("-stdlib=libc++", {tools = "clang"})
 		-- add_cxxflags("-fexperimental-library", {tools = "clang"})
 	end
 	set_version(project_semver, { build = "%Y%m%d%H%M" })
-	set_allowedplats("windows","linux")
-	set_allowedarchs("x64","x86_64","arm64")
+	set_allowedplats("windows","linux","cross")
+	set_allowedarchs("x64","x86_64","arm64","riscv64")
 	add_defines("EXPORTING_API")
 	add_rules("plugin.vsxmake.autoupdate")
 	set_allowedmodes("debug", "release", "releasedbg")

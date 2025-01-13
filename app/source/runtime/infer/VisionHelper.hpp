@@ -1,7 +1,7 @@
 ﻿#pragma once
 #include <span>
 #include <immintrin.h>
-#include <omp.h>
+//#include <omp.h>
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/opencv.hpp>
 

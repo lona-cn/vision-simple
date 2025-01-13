@@ -1,7 +1,7 @@
 local target_name = "infer"
 local kind = "object"
 local group_name = "runtime"
-local pkgs = { "openmp", "opencv", "magic_enum" }
+local pkgs = { "opencv", "magic_enum" }
 if has_config("with_dml") then
     table.insert(pkgs, "directml")
     table.insert(pkgs, "onnxruntime-dml")

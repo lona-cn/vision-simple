@@ -1,0 +1,56 @@
+FROM debian:bookworm AS builder
+
+ARG no_proxy=localhost,.cn,.gitee.com,.aliyun.com,.huaweicloud.com,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+
+RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\
+    printf 'deb http://mirrors.huaweicloud.com/debian/ sid main contrib non-free non-free-firmware\ndeb http://mirrors.huaweicloud.com/debian/ bookworm main contrib non-free non-free-firmware\n' > /etc/apt/sources.list
+
+#----##可修改## 安装基础构建环境----
+RUN DEBIAN_FRONTEND=noninteractive apt update &&\
+    apt install -y ca-certificates build-essential iputils-ping curl wget unzip cmake ninja-build &&\
+    apt install -y gcc-13 g++-13 &&\
+    apt install -y bash
+
+SHELL ["/bin/bash","-c"]
+#----##不要动## 安装xmake----
+ARG XMAKE_ROOT=y
+#----##不要动## 安装依赖----
+RUN apt install -y xmake
+#----##不要动## 复制基础xmake文件，用于构建第三方库----
+COPY ./app/xmake.lua /src/app/xmake.lua
+COPY ./app/source/xmake.lua /src/app/source/xmake.lua
+COPY ./app/source/third /src/app/source/third/
+COPY ./scripts /src/scripts/
+COPY ./xmake /src/xmake/
+COPY ./xmake.lua /src/xmake.lua
+
+#----##可修改## 配置项目，构建第三方库，可以修改xmake相关命令----
+ARG NUM_BUILD_THREADS=16
+WORKDIR /src
+RUN xmake f -vDy -c -p linux -a x86_64 --toolchain=gcc-13 -k binary -m release -o build/release-linux --require=no
+RUN xmake q -vDy -f -j${NUM_BUILD_THREADS}
+
+#----##不要动## 复制项目资产、配置、源码----
+COPY ./app/assets /src/app/assets/
+COPY ./app/binaries /src/app/binaries/
+COPY ./app/config /src/app/config/
+COPY ./app/source/programs /src/app/source/programs/
+COPY ./app/source/runtime /src/app/source/runtime/
+
+#----##请修改## 构建项目----
+RUN xmake build -vDy -j${NUM_BUILD_THREADS} server
+#----##请修改## 安装项目，后处理----
+RUN mkdir /app &&\
+    cp -r /src/build/release-linux/linux/x86_64/release/* /app &&\
+    cd /app && ln -s libonnxruntime.so libonnxruntime.so.1
+
+#----##请修改## 二阶段----
+FROM debian:bookworm
+RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\
+    printf 'deb http://mirrors.huaweicloud.com/debian/ sid main contrib non-free non-free-firmware\ndeb http://mirrors.huaweicloud.com/debian/ bookworm main contrib non-free non-free-firmware\n' > /etc/apt/sources.list
+RUN DEBIAN_FRONTEND=noninteractive apt update&&apt install -y libc6 libstdc++6
+COPY --from=builder /app /app
+COPY --from=builder /src/app/assets/test /app/assets
+EXPOSE 11451
+WORKDIR /app
+ENTRYPOINT ["./server"]
