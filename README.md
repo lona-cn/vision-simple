@@ -6,18 +6,21 @@
 <a><img alt="GitHub Release" src="https://img.shields.io/github/v/release/lona-cn/vision-simple"></a>
 <a><img alt="Docker pulls" src="https://img.shields.io/docker/pulls/lonacn/vision_simple"></a>
 <a><img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/lona-cn/vision-simple/total"></a>
-
 </p>
+
 <p align="center">
 <a><img alt="" src="https://img.shields.io/badge/yolo-v10-AD65F1.svg"></a>
 <a><img alt="" src="https://img.shields.io/badge/yolo-v11-AD65F1.svg"></a>
 <a><img alt="" src="https://img.shields.io/badge/paddle_ocr-v4-2932DF.svg"></a>
 </p>
+
 <p align="center">
 <a><img alt="windows x64" src="https://img.shields.io/badge/windows-x64-brightgreen.svg"></a>
 <a><img alt="linux x86_64" src="https://img.shields.io/badge/linux-x86_64-brightgreen.svg"></a>
 <a><img alt="linux arm64" src="https://img.shields.io/badge/linux-arm64-brightgreen.svg"></a>
+<a><img alt="linux arm64" src="https://img.shields.io/badge/linux-riscv64-brightgreen.svg"></a>
 </p>
+
 <p align="center">
 <a><img alt="ort cpu" src="https://img.shields.io/badge/ort-cpu-880088.svg"></a>
 <a><img alt="ort dml" src="https://img.shields.io/badge/ort-dml-blue.svg"></a>
@@ -27,27 +30,30 @@
 
 `vision-simple` 是一个基于 C++23 的跨平台视觉推理库，旨在提供 **开箱即用** 的推理功能。通过 Docker用户可以快速搭建推理服务。该库目前支持常见的 YOLO 系列（包括 YOLOv10 和 YOLOv11），以及部分 OCR 模型（如 `PaddleOCR`）。**内建 HTTP API** 使得服务更加便捷。此外，`vision-simple` 采用 `ONNXRuntime` 引擎，支持多种 Execution Provider，如 `DirectML`、`CUDA`、`TensorRT`，并可与特定硬件设备（如 RockChip 的 RKNPU）兼容，提供更高效的推理性能。
 
-### yolov11n 3440x1440@60fps+
-![hd2-yolo-gif](doc/images/hd2-yolo.gif)
-
-### OCR(HTTP API)
-
-![http-inferocr](doc/images/http-inferocr.png)
 
 ## <div align="center">🚀 特性 </div>
-- **跨平台**：支持`windows/x64`、`linux/x86_64`、`linux/arm64`
-- **多设备**：支持CPU、GPU、RKNPU
+
+- **跨平台**：支持`windows/x64`、`linux/x86_64`、`linux/arm64/v8`、`linux/riscv64`
+- **多计算设备**：支持CPU、GPU、RKNPU
+- **嵌入式设备**：目前已支持`rk3568`、`rv1106G3`（Luckfox Pico 1T算力版本）
 - **小体积**：静态编译版本体积不到20MiB，推理YOLO和OCR占用300MiB内存
 - **快速部署**：
   - **一键编译**：提供各个平台已验证的编译脚本
-  - **容器部署**：使用`docker`、`podman`、`container`一键部署
-  - **HTTP服务**：提供[]`HTTP API`](doc/openapi/server.yaml)供非实时应用使用
+  - **[容器部署](https://hub.docker.com/r/lonacn/vision_simple)**：使用`docker`、`podman`、`container`一键部署
+  - **[HTTP服务](doc/openapi/server.yaml)**：提供HTTP API供Web应用调用
 
-## <div align="center">🚀 使用vision-simple </div>
+
+### <div align="center"> yolov11n 3440x1440@60fps+ </div>
+![hd2-yolo-gif](doc/images/hd2-yolo.gif)
+
+### <div align="center"> OCR(HTTP API) </div>
+
+![http-inferocr](doc/images/http-inferocr.png)
+## <div align="center">🚀 部署使用 </div>
 ### docker部署HTTP服务
 1. 启动server项目：
 ```sh
-docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:<version>-<ep>-<arch>
+docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.0-cpu-x86_64
 ```
 2. 打开[swagger在线编辑器](https://editor-next.swagger.io/)，并允许该网站的不安全内容
 3. 复制[doc/openapi/server.yaml](doc/openapi/server.yaml)的内容到`swagger在线编辑器`
@@ -61,40 +67,28 @@ docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:<version>-<ep>
 ```cpp
 #include <Infer.h>
 #include <opencv2/opencv.hpp>
-
 using namespace vision_simple;
-
 template <typename T>
 struct DataBuffer
 {
     std::unique_ptr<T[]> data;
     size_t size;
-
-    std::span<T> span()
-    {
-        return std::span{data.get(), size};
-    }
+    std::span<T> span(){return std::span{data.get(), size};}
 };
 
 extern std::expected<DataBuffer<uint8_t>, InferError> ReadAll(const std::string& path);
 
 int main(int argc,char *argv[]){
-    //----read file----
-    // read fp32 onnx model
     auto data = ReadAll("assets/hd2-yolo11n-fp32.onnx");
-    // read test image
     auto image = cv::imread("assets/hd2.png");
-    //----create context----
-    // create inference context
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
-    // create yolo inference instance
     auto infer_yolo = InferYOLO::Create(**ctx, data->span(), YOLOVersion::kV11);
-    //----do inference----
     auto result = infer_yolo->get()->Run(image, 0.625);
     // do what u want
     return 0;
 }
 ```
+
 ### 构建项目
 #### windows/x64
 * [xmake](https://xmake.io) >= 2.9.7
@@ -132,7 +126,6 @@ docker run -it --rm -p 11451:11451 --name vs vision-simple
 ```
 
 ## <div align="center">🚀 联系方式</div>
-QQ群: 464992884
 
 ![Discord](https://img.shields.io/discord/1327875843581808640)
 
