@@ -4,6 +4,7 @@ english | [简体中文](./README.md)
 <p align="center">
 <a><img alt="GitHub License" src="https://img.shields.io/github/license/lona-cn/vision-simple"></a>
 <a><img alt="GitHub Release" src="https://img.shields.io/github/v/release/lona-cn/vision-simple"></a>
+<a><img alt="Docker pulls" src="https://img.shields.io/docker/pulls/lonacn/vision_simple"></a>
 <a><img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/lona-cn/vision-simple/total"></a>
 </p>
 <p align="center">
@@ -11,33 +12,38 @@ english | [简体中文](./README.md)
 <a><img alt="" src="https://img.shields.io/badge/yolo-v11-AD65F1.svg"></a>
 <a><img alt="" src="https://img.shields.io/badge/paddle_ocr-v4-2932DF.svg"></a>
 </p>
+
 <p align="center">
 <a><img alt="windows x64" src="https://img.shields.io/badge/windows-x64-brightgreen.svg"></a>
 <a><img alt="linux x86_64" src="https://img.shields.io/badge/linux-x86_64-brightgreen.svg"></a>
 <a><img alt="linux arm64" src="https://img.shields.io/badge/linux-arm64-brightgreen.svg"></a>
-<a><img alt="ort cpu" src="https://img.shields.io/badge/ort-cpu-yellow.svg"></a>
+<a><img alt="linux arm64" src="https://img.shields.io/badge/linux-riscv64-brightgreen.svg"></a>
+</p>
+
+<p align="center">
+<a><img alt="ort cpu" src="https://img.shields.io/badge/ort-cpu-880088.svg"></a>
 <a><img alt="ort dml" src="https://img.shields.io/badge/ort-dml-blue.svg"></a>
 <a><img alt="ort cuda" src="https://img.shields.io/badge/ort-cuda-green.svg"></a>
+<a><img alt="ort rknn" src="https://img.shields.io/badge/ort-rknn-white.svg"></a>
 </p>
 
 `vision-simple` is a cross-platform visual inference library based on C++23, designed to provide **out-of-the-box** inference capabilities. With Docker, users can quickly set up inference services. This library currently supports popular YOLO models (including YOLOv10 and YOLOv11) and some OCR models (such as `PaddleOCR`). It features a **built-in HTTP API**, making the service more accessible. Additionally, `vision-simple` uses the `ONNXRuntime` engine, which supports multiple Execution Providers such as `DirectML`, `CUDA`, `TensorRT`, and can be compatible with specific hardware devices (such as RockChip's RKNPU), offering more efficient inference performance.
 
-### yolov11n 3440x1440@60fps+
-![hd2-yolo-gif](doc/images/hd2-yolo.gif)
-
-### OCR (HTTP API)
-
-![http-inferocr](doc/images/http-inferocr.png)
-
-## <div align="center"> Features </div>
-- **Cross-platform**: Supports `windows/x64`, `linux/x86_64`, and `linux/arm64`
+## <div align="center">🚀 Features </div>
+- **Cross-platform**: Supports `windows/x64`, `linux/x86_64`, `linux/arm64`,and `linux/riscv64`
 - **Multi-device**: Supports CPU, GPU, and RKNPU
 - **Small size**: The statically compiled version is under 20 MiB, with YOLO and OCR inference occupying 300 MiB of memory
 - **Fast deployment**:
   - **One-click compilation**: Provides verified build scripts for multiple platforms
-  - **Container deployment**: One-click deployment with `docker`, `podman`, or `container`
-  - **HTTP Service**: Offers a [`HTTP API`](doc/openapi/server.yaml) for non-real-time applications
+  - **[Container deployment](https://hub.docker.com/r/lonacn/vision_simple)**: One-click deployment with `docker`, `podman`, or `container`
+  - **[HTTP Service](doc/openapi/server.yaml)**: Offers a HTTP API for non-real-time applications
 
+### <div align="center"> yolov11n 3440x1440@60fps+ </div>
+![hd2-yolo-gif](doc/images/hd2-yolo.gif)
+
+### <div align="center"> OCR (HTTP API) </div>
+
+![http-inferocr](doc/images/http-inferocr.png)
 ## <div align="center">🚀 Using vision-simple </div>
 ### Deploy HTTP Service
 1. Start the server project:
@@ -54,35 +60,22 @@ docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.0-cpu-x86_
 ```cpp
 #include <Infer.h>
 #include <opencv2/opencv.hpp>
-
 using namespace vision_simple;
-
 template <typename T>
 struct DataBuffer
 {
     std::unique_ptr<T[]> data;
     size_t size;
-
-    std::span<T> span()
-    {
-        return std::span{data.get(), size};
-    }
+    std::span<T> span(){return std::span{data.get(), size};}
 };
 
 extern std::expected<DataBuffer<uint8_t>, InferError> ReadAll(const std::string& path);
 
-int main(int argc, char *argv[]){
-    //----read file----
-    // read fp32 onnx model
+int main(int argc,char *argv[]){
     auto data = ReadAll("assets/hd2-yolo11n-fp32.onnx");
-    // read test image
     auto image = cv::imread("assets/hd2.png");
-    //----create context----
-    // create inference context
     auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
-    // create yolo inference instance
     auto infer_yolo = InferYOLO::Create(**ctx, data->span(), YOLOVersion::kV11);
-    //----do inference----
     auto result = infer_yolo->get()->Run(image, 0.625);
     // do what u want
     return 0;
