@@ -24,7 +24,7 @@ english | [简体中文](./README.md)
 <a><img alt="ort cpu" src="https://img.shields.io/badge/ort-cpu-880088.svg"></a>
 <a><img alt="ort dml" src="https://img.shields.io/badge/ort-dml-blue.svg"></a>
 <a><img alt="ort cuda" src="https://img.shields.io/badge/ort-cuda-green.svg"></a>
-<a><img alt="ort rknn" src="https://img.shields.io/badge/ort-rknn-white.svg"></a>
+<a><img alt="ort rknpu" src="https://img.shields.io/badge/ort-rknpu-white.svg"></a>
 </p>
 
 `vision-simple` is a cross-platform visual inference library based on C++23, designed to provide **out-of-the-box** inference capabilities. With Docker, users can quickly set up inference services. This library currently supports popular YOLO models (including YOLOv10 and YOLOv11) and some OCR models (such as `PaddleOCR`). It features a **built-in HTTP API**, making the service more accessible. Additionally, `vision-simple` uses the `ONNXRuntime` engine, which supports multiple Execution Providers such as `DirectML`, `CUDA`, `TensorRT`, and can be compatible with specific hardware devices (such as RockChip's RKNPU), offering more efficient inference performance.
@@ -35,7 +35,7 @@ english | [简体中文](./README.md)
 - **Small size**: The statically compiled version is under 20 MiB, with YOLO and OCR inference occupying 300 MiB of memory
 - **Fast deployment**:
   - **One-click compilation**: Provides verified build scripts for multiple platforms
-  - **[Container deployment](https://hub.docker.com/r/lonacn/vision_simple)**: One-click deployment with `docker`, `podman`, or `container`
+  - **[Container deployment](https://hub.docker.com/r/lonacn/vision_simple)**: One-click deployment with `docker`, `podman`, or `containerd`
   - **[HTTP Service](doc/openapi/server.yaml)**: Offers a HTTP API for non-real-time applications
 
 ### <div align="center"> yolov11n 3440x1440@60fps+ </div>
@@ -109,7 +109,7 @@ All `Dockerfiles` are located in the `docker/` directory.
 ```sh
 # From the root directory of vision-simple
 # Build the project
-docker build -t vision-simple:latest -f dockerfile/debian-x86_64.Dockerfile .
+docker build -t vision-simple:latest -f  docker/Dockerfile.debian-bookworm-x86_64-cpu .
 # Run the container, the default configuration will use CPU inference and listen on port 11451
 docker run -it --rm -p 11451:11451 --name vs vision-simple
 ```

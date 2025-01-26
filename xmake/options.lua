@@ -24,3 +24,12 @@ if is_os("windows") or is_os("linux") then
         set_description("ONNXRuntime with TensorRT Execution Provider")
     option_end()
 end
+
+if is_os("linux") then
+    option("with_rknpu")
+    set_showmenu(true)
+    set_default(false)
+    add_defines("VISION_SIMPLE_WITH_RKNPU")
+    set_description("ONNXRuntime with RKNPU Execution Provider")
+    option_end()
+end

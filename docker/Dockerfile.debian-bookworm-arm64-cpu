@@ -7,15 +7,13 @@ RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\
 
 #----##可修改## 安装基础构建环境----
 RUN DEBIAN_FRONTEND=noninteractive apt update &&\
-    apt install -y ca-certificates build-essential iputils-ping curl wget unzip cmake ninja-build &&\
-    apt install -y gcc-13 g++-13 &&\
-    apt install -y bash
+    apt install -y bash curl wget unzip cmake ninja-build pkg-config git git-lfs gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
 SHELL ["/bin/bash","-c"]
 #----##不要动## 安装xmake----
 ARG XMAKE_ROOT=y
 #----##不要动## 安装依赖----
-RUN apt install -y xmake
+RUN apt install -y xmake python3 python3-pip python3-setuptools python3-numpy iputils-ping patchelf
 #----##不要动## 复制基础xmake文件，用于构建第三方库----
 COPY ./app/xmake.lua /src/app/xmake.lua
 COPY ./app/source/xmake.lua /src/app/source/xmake.lua
@@ -27,8 +25,8 @@ COPY ./xmake.lua /src/xmake.lua
 #----##可修改## 配置项目，构建第三方库，可以修改xmake相关命令----
 ARG NUM_BUILD_THREADS=16
 WORKDIR /src
-RUN xmake f -vDy -c -p linux -a x86_64 --toolchain=gcc-13 -k binary -m release -o build/release-linux --require=no
-RUN xmake q -vDy -f -j${NUM_BUILD_THREADS}
+RUN xmake f -vDy -c -p linux -a arm64 --cross=aarch64-linux-gnu- -k binary -m release --runtimes=stdc++_static -o build/release-linux --require=yes
+#RUN xmake q -vDy -f -j${NUM_BUILD_THREADS}
 
 #----##不要动## 复制项目资产、配置、源码----
 COPY ./app/assets /src/app/assets/
@@ -41,11 +39,11 @@ COPY ./app/source/runtime /src/app/source/runtime/
 RUN xmake build -vDy -j${NUM_BUILD_THREADS} server
 #----##请修改## 安装项目，后处理----
 RUN mkdir /app &&\
-    cp -r /src/build/release-linux/linux/x86_64/release/* /app &&\
-    cd /app && ln -s libonnxruntime.so libonnxruntime.so.1
+    cp -r /src/build/release-linux/linux/arm64/release/* /app &&\
+    cd /app && patchelf --replace-needed libonnxruntime.so.1 libonnxruntime.so server
 
 #----##请修改## 二阶段----
-FROM debian:bookworm
+FROM --platform=linux/arm64 arm64v8/debian:bookworm-slim
 RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\
     printf 'deb http://mirrors.huaweicloud.com/debian/ sid main contrib non-free non-free-firmware\ndeb http://mirrors.huaweicloud.com/debian/ bookworm main contrib non-free non-free-firmware\n' > /etc/apt/sources.list
 RUN DEBIAN_FRONTEND=noninteractive apt update&&apt install -y libc6 libstdc++6

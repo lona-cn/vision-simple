@@ -48,9 +48,9 @@ int main(int argc, char* argv[]) {
   std::cout << "Create Infer Context" << std::endl;
 #ifdef VISION_SIMPLE_WITH_DML
   auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
-#elifdef VISION_SIMPLE_WITH_CUDA
+#elif defined(VISION_SIMPLE_WITH_CUDA)
   auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCUDA);
-  // #elifdef VISION_SIMPLE_WITH_TENSORRT
+  // #elif defined(VISION_SIMPLE_WITH_TENSORRT)
   // auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME,
   // InferEP::kTensorRT);
 #else

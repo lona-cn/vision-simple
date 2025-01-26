@@ -1,4 +1,4 @@
-FROM --platform=linux/arm64 arm64v8/debian:bookworm AS builder
+FROM debian:bookworm AS builder
 
 ARG no_proxy=localhost,.cn,.gitee.com,.aliyun.com,.huaweicloud.com,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
 
@@ -7,14 +7,13 @@ RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\
 
 #----##可修改## 安装基础构建环境----
 RUN DEBIAN_FRONTEND=noninteractive apt update &&\
-    apt install -y ca-certificates iputils-ping curl wget unzip cmake ninja-build git git-lfs &&\
-    apt install -y clang
+    apt install -y bash curl wget unzip cmake ninja-build pkg-config git git-lfs gcc g++
 
 SHELL ["/bin/bash","-c"]
 #----##不要动## 安装xmake----
 ARG XMAKE_ROOT=y
 #----##不要动## 安装依赖----
-RUN apt install -y xmake
+RUN apt install -y xmake python3 python3-pip python3-setuptools python3-numpy libffi-dev openssl libaio-dev libasio-dev iputils-ping patchelf
 #----##不要动## 复制基础xmake文件，用于构建第三方库----
 COPY ./app/xmake.lua /src/app/xmake.lua
 COPY ./app/source/xmake.lua /src/app/source/xmake.lua
@@ -24,9 +23,9 @@ COPY ./xmake /src/xmake/
 COPY ./xmake.lua /src/xmake.lua
 
 #----##可修改## 配置项目，构建第三方库，可以修改xmake相关命令----
-ARG NUM_BUILD_THREADS=4
+ARG NUM_BUILD_THREADS=16
 WORKDIR /src
-RUN xmake f -vDy -c -p linux -a arm64 --toolchain=clang -k binary -m release -o build/release-linux --require=no
+RUN xmake f -vDy -c -p linux -a x86_64 --toolchain=gcc -k binary -m release --runtimes=stdc++_static -o build/release-linux --require=no
 RUN xmake q -vDy -f -j${NUM_BUILD_THREADS}
 
 #----##不要动## 复制项目资产、配置、源码----
@@ -41,10 +40,10 @@ RUN xmake build -vDy -j${NUM_BUILD_THREADS} server
 #----##请修改## 安装项目，后处理----
 RUN mkdir /app &&\
     cp -r /src/build/release-linux/linux/x86_64/release/* /app &&\
-    cd /app && ln -s libonnxruntime.so libonnxruntime.so.1
+    cd /app && patchelf --replace-needed libonnxruntime.so.1 libonnxruntime.so server
 
 #----##请修改## 二阶段----
-FROM --platform=linux/arm64 arm64v8/debian:bookworm
+FROM debian:bookworm-slim
 RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\
     printf 'deb http://mirrors.huaweicloud.com/debian/ sid main contrib non-free non-free-firmware\ndeb http://mirrors.huaweicloud.com/debian/ bookworm main contrib non-free non-free-firmware\n' > /etc/apt/sources.list
 RUN DEBIAN_FRONTEND=noninteractive apt update&&apt install -y libc6 libstdc++6
@@ -52,4 +51,4 @@ COPY --from=builder /app /app
 COPY --from=builder /src/app/assets/test /app/assets
 EXPOSE 11451
 WORKDIR /app
-ENTRYPOINT ["server"]
+ENTRYPOINT ["./server"]
