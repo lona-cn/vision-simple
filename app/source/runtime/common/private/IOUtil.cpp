@@ -1,5 +1,6 @@
 ﻿#include "IOUtil.h"
 
+#include <sstream>
 #include <filesystem>
 
 std::expected<vision_simple::DataBuffer<unsigned char>,

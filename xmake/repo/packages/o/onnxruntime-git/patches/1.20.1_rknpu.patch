@@ -1,0 +1,459 @@
+diff -urN onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/onnx_converter.cc onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/onnx_converter.cc
+--- onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/onnx_converter.cc	2024-11-20 05:25:47.000000000 +0800
++++ onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/onnx_converter.cc	2024-06-12 22:01:17.000000000 +0800
+@@ -35,10 +35,10 @@
+     const auto& tensor = rk_tensors_.at(name);            \
+     const void* data = tensor->GetData();                 \
+     rk::nn::PrecisionType fmt = tensor->GetPrecision();   \
+-    uint32_t dim = 1;                                     \
++    int32_t dim = 1;                                     \
+     if (tensor->GetDims().size() > 0)                     \
+       dim = tensor->GetDims()[0];                         \
+-    for (uint32_t i = 0; i < dim; i++) {                  \
++    for (int32_t i = 0; i < dim; i++) {                  \
+       if (fmt == rk::nn::PrecisionType::UINT8 ||          \
+           fmt == rk::nn::PrecisionType::INT8) {           \
+         attr.push_back(((type*)data)[i]);                 \
+@@ -94,7 +94,7 @@
+ 
+ std::shared_ptr<rk::nn::Tensor>
+ OnnxConverter::CreateRknnTensor(const std::string& name,
+-                                const std::vector<uint32_t>& dims,
++                                const std::vector<int32_t>& dims,
+                                 const void* data,
+                                 const rk::nn::TensorRole role,
+                                 const rk::nn::PrecisionType precision,
+@@ -122,9 +122,9 @@
+ void OnnxConverter::HandleInitializer() {
+   for (const auto& tensor : model_proto_.graph().initializer()) {
+     const std::string name = tensor.name();
+-    std::vector<uint32_t> dims;
++    std::vector<int32_t> dims;
+     for (const auto dim : tensor.dims()) {
+-      dims.push_back(static_cast<uint32_t>(dim));
++      dims.push_back(static_cast<int32_t>(dim));
+     }
+     if (tensor.data_type() == ONNX_NAMESPACE::TensorProto_DataType_FLOAT) {
+       const char* ptr = tensor.float_data().empty()
+@@ -186,7 +186,7 @@
+     for (const auto& dim : input.type().tensor_type().shape().dim()) {
+       if (dim.value_case() ==
+           ONNX_NAMESPACE::TensorShapeProto_Dimension::kDimValue) {
+-        shape.push_back(static_cast<uint32_t>(dim.dim_value()));
++        shape.push_back(static_cast<int32_t>(dim.dim_value()));
+       } else {
+         throw std::invalid_argument(
+             "The input of graph doesn't have dim_value");
+@@ -250,7 +250,7 @@
+ }
+ 
+ Shaper::Shape GetShape(const ONNX_NAMESPACE::ModelProto& model_proto,
+-                       const std::map<std::string, std::vector<uint32_t>>& tensor_dims,
++                       const std::map<std::string, std::vector<int32_t>>& tensor_dims,
+                        const std::string& name) {
+   Shaper::Shape shape;
+   for (const auto& value_info : model_proto.graph().value_info()) {
+@@ -546,9 +546,9 @@
+     const ONNX_NAMESPACE::ModelProto& model_proto) {
+   for (const auto& tensor : model_proto.graph().initializer()) {
+     const std::string name = tensor.name();
+-    std::vector<uint32_t> dims;
++    std::vector<int32_t> dims;
+     for (const auto dim : tensor.dims()) {
+-      dims.push_back(static_cast<uint32_t>(dim));
++      dims.push_back(static_cast<int32_t>(dim));
+     }
+     tensor_dims_[name] = dims;
+   }
+@@ -930,7 +930,7 @@
+   shaper_.Conv(input, weight, pads, strides, auto_pad, output);
+ 
+   std::vector<std::shared_ptr<rk::nn::Tensor>> inputs, outputs;
+-  std::vector<uint32_t> weight_dims;
++  std::vector<int32_t> weight_dims;
+   if (HAS(rk_tensors_, input)) {
+     inputs.push_back(rk_tensors_.at(input));
+   }
+@@ -943,12 +943,12 @@
+       inputs.push_back(rk_tensors_.at(bias));
+     }
+   } else {
+-    uint32_t dim = shaper_[weight][0];
++    int32_t dim = shaper_[weight][0];
+     void* ptr = (void*)malloc(sizeof(float) * dim);
+     memset(ptr, 0, sizeof(float) * dim);
+     free_list_.push_back(ptr);
+ 
+-    std::vector<uint32_t> dims = {dim};
++    std::vector<int32_t> dims = {dim};
+     auto rk_bias = CreateRknnTensor(bias, dims, ptr, rk::nn::TensorRole::CONST);
+     inputs.push_back(rk_bias);
+   }
+@@ -1025,7 +1025,7 @@
+   GET_ATTR(out_zp, output_zp, uint8_t);
+ 
+   std::vector<std::shared_ptr<rk::nn::Tensor>> inputs, outputs;
+-  std::vector<uint32_t> weight_dims;
++  std::vector<int32_t> weight_dims;
+   if (HAS(rk_tensors_, input)) {
+     rk::nn::QuantizationParamAffineAsymmetric param;
+     param.scale.push_back(in_s[0]);
+@@ -1052,12 +1052,12 @@
+       inputs.push_back(tensor);
+     }
+   } else {
+-    uint32_t dim = shaper_[weight][0];
++    int32_t dim = shaper_[weight][0];
+     void* ptr = (void*)malloc(sizeof(int32_t) * dim);
+     memset(ptr, 0, sizeof(int32_t) * dim);
+     free_list_.push_back(ptr);
+ 
+-    std::vector<uint32_t> dims = {dim};
++    std::vector<int32_t> dims = {dim};
+     auto rk_bias = CreateRknnTensor(bias, dims, ptr, rk::nn::TensorRole::CONST,
+                                     rk::nn::PrecisionType::INT32,
+                                     rk::nn::DataLayoutType::NCHW,
+@@ -1128,7 +1128,7 @@
+   shaper_.DepthwiseConv(input, weight, pads, strides, output);
+ 
+   std::vector<std::shared_ptr<rk::nn::Tensor>> inputs, outputs;
+-  std::vector<uint32_t> weight_dims;
++  std::vector<int32_t> weight_dims;
+   if (HAS(rk_tensors_, input)) {
+     inputs.push_back(rk_tensors_.at(input));
+   }
+@@ -1141,12 +1141,12 @@
+       inputs.push_back(rk_tensors_.at(bias));
+     }
+   } else {
+-    uint32_t dim = shaper_[weight][0];
++    int32_t dim = shaper_[weight][0];
+     void* ptr = (void*)malloc(sizeof(float) * dim);
+     memset(ptr, 0, sizeof(float) * dim);
+     free_list_.push_back(ptr);
+ 
+-    std::vector<uint32_t> dims = {dim};
++    std::vector<int32_t> dims = {dim};
+     auto rk_bias = CreateRknnTensor(bias, dims, ptr, rk::nn::TensorRole::CONST);
+     inputs.push_back(rk_bias);
+   }
+@@ -1362,7 +1362,7 @@
+   shaper_.FC(input, weight, output);
+ 
+   std::vector<std::shared_ptr<rk::nn::Tensor>> inputs, outputs;
+-  std::vector<uint32_t> weight_dims;
++  std::vector<int32_t> weight_dims;
+   if (HAS(rk_tensors_, input)) {
+     inputs.push_back(rk_tensors_.at(input));
+   }
+@@ -1375,12 +1375,12 @@
+       inputs.push_back(rk_tensors_.at(bias));
+     }
+   } else {
+-    uint32_t dim = shaper_[weight][0];
++    int32_t dim = shaper_[weight][0];
+     void* ptr = (void*)malloc(sizeof(float) * dim);
+     memset(ptr, 0, sizeof(float) * dim);
+     free_list_.push_back(ptr);
+ 
+-    std::vector<uint32_t> dims = {dim};
++    std::vector<int32_t> dims = {dim};
+     auto rk_bias = CreateRknnTensor(bias, dims, ptr, rk::nn::TensorRole::CONST);
+     inputs.push_back(rk_bias);
+   }
+@@ -1554,7 +1554,7 @@
+ 
+   rk::nn::ReshapeAttr attr;
+   for (const auto dim : shaper_[output]) {
+-    attr.shapes.push_back(static_cast<uint32_t>(dim));
++    attr.shapes.push_back(static_cast<int32_t>(dim));
+   }
+   graph_->AddOperator(rk::nn::OperatorType::RESHAPE,
+                       inputs, outputs, (void*)&attr);
+@@ -1570,7 +1570,7 @@
+     const auto in_shape = shaper_[input];
+     shape[0] = (int32_t)std::accumulate(in_shape.begin(),
+                                         in_shape.begin() + axis, 1,
+-                                        std::multiplies<uint32_t>());
++                                        std::multiplies<int32_t>());
+   }
+ 
+   shaper_.Reshape(input, shape, output);
+@@ -1591,7 +1591,7 @@
+ 
+   rk::nn::ReshapeAttr attr;
+   for (const auto dim : shaper_[output]) {
+-    attr.shapes.push_back(static_cast<uint32_t>(dim));
++    attr.shapes.push_back(static_cast<int32_t>(dim));
+   }
+   graph_->AddOperator(rk::nn::OperatorType::RESHAPE,
+                       inputs, outputs, (void*)&attr);
+@@ -1620,7 +1620,7 @@
+ 
+   rk::nn::PermuteAttr attr;
+   for (const auto val : perm) {
+-    attr.perm.push_back(static_cast<uint32_t>(val));
++    attr.perm.push_back(static_cast<int32_t>(val));
+   }
+   graph_->AddOperator(rk::nn::OperatorType::PERMUTE,
+                       inputs, outputs, (void*)&attr);
+@@ -1666,7 +1666,7 @@
+ 
+   for (const auto dim : shaper_[output]) {
+     attr.start.push_back(0);
+-    attr.length.push_back(static_cast<uint32_t>(dim));
++    attr.length.push_back(static_cast<int32_t>(dim));
+   }
+ 
+   const auto input_dims = shaper_[input];
+@@ -1705,7 +1705,7 @@
+ 
+   rk::nn::ReshapeAttr attr;
+   for (const auto dim : shaper_[output]) {
+-    attr.shapes.push_back(static_cast<uint32_t>(dim));
++    attr.shapes.push_back(static_cast<int32_t>(dim));
+   }
+   graph_->AddOperator(rk::nn::OperatorType::RESHAPE,
+                       inputs, outputs, (void*)&attr);
+@@ -1734,7 +1734,7 @@
+ 
+   rk::nn::ReshapeAttr attr;
+   for (const auto dim : shaper_[output]) {
+-    attr.shapes.push_back(static_cast<uint32_t>(dim));
++    attr.shapes.push_back(static_cast<int32_t>(dim));
+   }
+   graph_->AddOperator(rk::nn::OperatorType::RESHAPE,
+                       inputs, outputs, (void*)&attr);
+diff -urN onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/onnx_converter.h onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/onnx_converter.h
+--- onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/onnx_converter.h	2024-11-20 05:25:47.000000000 +0800
++++ onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/onnx_converter.h	2024-06-12 22:01:17.000000000 +0800
+@@ -61,7 +61,7 @@
+   std::map<std::string, std::shared_ptr<rk::nn::Tensor>> rk_tensors_;
+ 
+   // for GetSupportedNodes
+-  std::map<std::string, std::vector<uint32_t>> tensor_dims_;
++  std::map<std::string, std::vector<int32_t>> tensor_dims_;
+ 
+   std::vector<void*> free_list_;  // remember free
+ 
+@@ -71,7 +71,7 @@
+ 
+   std::shared_ptr<rk::nn::Tensor>
+   CreateRknnTensor(const std::string& name,
+-                   const std::vector<uint32_t>& dims,
++                   const std::vector<int32_t>& dims,
+                    const void* data = NULL,
+                    const rk::nn::TensorRole role = rk::nn::TensorRole::VAR,
+                    const rk::nn::PrecisionType precision = rk::nn::PrecisionType::FLOAT32,
+diff -urN onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/rknpu_execution_provider.cc onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/rknpu_execution_provider.cc
+--- onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/rknpu_execution_provider.cc	2024-11-20 05:25:47.000000000 +0800
++++ onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/rknpu_execution_provider.cc	2024-06-12 22:01:17.000000000 +0800
+@@ -5,6 +5,7 @@
+ #include <set>
+ #include <unordered_set>
+ #include <map>
++#include <memory>
+ #include <utility>
+ #include <functional>
+ #include "rknpu_execution_provider.h"
+@@ -12,6 +13,7 @@
+ #include "core/framework/compute_capability.h"
+ #include "core/session/onnxruntime_cxx_api.h"
+ #include "core/session/inference_session.h"
++#include "core/graph/graph_proto_serializer.h"
+ #include "core/graph/model.h"
+ #include "core/framework/memcpy.h"
+ #include "node_attr_helper.h"
+@@ -21,6 +23,13 @@
+ using std::string;
+ using std::vector;
+ 
++namespace {
++struct KernelRegistryAndStatus {
++  std::shared_ptr<onnxruntime::KernelRegistry> kernel_registry = std::make_shared<onnxruntime::KernelRegistry>();
++  onnxruntime::Status st;
++};
++}  // namespace
++
+ namespace onnxruntime {
+ 
+ constexpr const char* RKNPU = "Rknpu";
+@@ -28,7 +37,7 @@
+ struct RknpuFuncState {
+   std::string uniq_input_shape;
+ 
+-  std::unique_ptr<rk::nn::Execution> exector;
++  std::unique_ptr<rk::nn::Exection> exector;
+   ONNX_NAMESPACE::ModelProto model_proto;
+   std::unordered_map<std::string, int> input_map;
+   std::unordered_map<std::string, int> output_map;
+@@ -253,7 +262,8 @@
+                              std::vector<ONNX_NAMESPACE::FunctionProto>(),
+                              *GetLogger());
+     ONNX_NAMESPACE::ModelProto model_proto = model.ToProto();
+-    graph_body_viewer.ToProto(*model_proto->mutable_graph(), true, true);
++    // RKNPU EP is using static lib approach, so invoke serializer directly.
++    GraphViewerToProto(graph_body_viewer, *model_proto.mutable_graph(), true, true);
+     model_proto.set_ir_version(ONNX_NAMESPACE::Version::IR_VERSION);
+ 
+     // Build map from input name to its index in input definitions
+@@ -282,7 +292,7 @@
+       std::unique_ptr<RknpuFuncState> p =
+           std::make_unique<RknpuFuncState>();
+       rk::nn::Graph* graph = new rk::nn::Graph();
+-      *p = {"", std::unique_ptr<rk::nn::Execution>(new rk::nn::Execution(graph)),
++      *p = {"", std::unique_ptr<rk::nn::Exection>(new rk::nn::Exection(graph)),
+             model_proto_[context->node_name], input_info_[context->node_name],
+             output_info_[context->node_name],
+             std::vector<int>{}, std::vector<int>{}};
+@@ -438,10 +448,11 @@
+         const auto output_shape = output->GetDims();
+         std::vector<int64_t>
+             int64_output_shape(output_shape.begin(), output_shape.end());
+-        const auto* output_tensor = ctx.GetOutput(
++        auto output_tensor = ctx.GetOutput(
+             rk_state->output_indexes[i],
+             int64_output_shape.data(),
+             int64_output_shape.size());
++        ORT_ENFORCE(output_tensor.IsTensor());
+         float* output_buf = output_tensor.GetTensorMutableData<float>();
+ 
+         const auto type = output->GetPrecision();
+@@ -514,30 +525,30 @@
+ class ONNX_OPERATOR_KERNEL_CLASS_NAME(
+     kRknpuExecutionProvider, kOnnxDomain, 1, MemcpyToHost);
+ 
+-static void RegisterRknpuKernels(KernelRegistry& kernel_registry) {
++static Status RegisterRknpuKernels(KernelRegistry& kernel_registry) {
+   static const BuildKernelCreateInfoFn function_table[] = {
+       BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kRknpuExecutionProvider, kOnnxDomain, 1, MemcpyFromHost)>,
+       BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kRknpuExecutionProvider, kOnnxDomain, 1, MemcpyToHost)>,
+   };
+ 
+   for (auto& function_table_entry : function_table) {
+-    kernel_registry.Register(function_table_entry());
++    ORT_RETURN_IF_ERROR(kernel_registry.Register(function_table_entry()));
+   }
+-}
+ 
+-std::shared_ptr<KernelRegistry> GetRknpuKernelRegistry() {
+-  std::shared_ptr<KernelRegistry> kernel_registry =
+-      std::make_shared<KernelRegistry>();
+-  RegisterRknpuKernels(*kernel_registry);
++  return Status::OK();
++}
+ 
+-  return kernel_registry;
++KernelRegistryAndStatus GetRknpuKernelRegistry() {
++  KernelRegistryAndStatus ret;
++  ret.st = RegisterRknpuKernels(*ret.kernel_registry);
++  return ret;
+ }
+ 
+ std::shared_ptr<KernelRegistry>
+ RknpuExecutionProvider::GetKernelRegistry() const {
+-  static std::shared_ptr<KernelRegistry> kernel_registry =
+-      onnxruntime::GetRknpuKernelRegistry();
+-  return kernel_registry;
++  static KernelRegistryAndStatus ret = GetRknpuKernelRegistry();
++  ORT_THROW_IF_ERROR(ret.st);
++  return ret.kernel_registry;
+ }
+ 
+ }  // namespace onnxruntime
+diff -urN onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/shaper.cc onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/shaper.cc
+--- onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/shaper.cc	2024-11-20 05:25:47.000000000 +0800
++++ onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/shaper.cc	2024-06-12 22:01:17.000000000 +0800
+@@ -171,8 +171,8 @@
+                    const std::vector<int32_t>& axes,
+                    const std::vector<int32_t>& steps,
+                    const std::string& output) {
+-  std::vector<uint32_t> inputDimen = shape_map_.at(input);
+-  std::vector<uint32_t> outputDimen = inputDimen;
++  std::vector<int32_t> inputDimen = shape_map_.at(input);
++  std::vector<int32_t> outputDimen = inputDimen;
+   for (size_t i = 0; i < axes.size(); i++) {
+     int32_t axis =
+         (axes[i] < 0) ? (axes[i] + (int32_t)inputDimen.size()) : axes[i];
+@@ -199,8 +199,8 @@
+                           const int32_t shrinkAxisMask,
+                           const std::string& output) {
+   // NHWC
+-  std::vector<uint32_t> inputDimen = shape_map_.at(input);
+-  std::vector<uint32_t> outputDimen;
++  std::vector<int32_t> inputDimen = shape_map_.at(input);
++  std::vector<int32_t> outputDimen;
+   for (size_t i = 0; i < inputDimen.size(); i++) {
+     if (shrinkAxisMask & (1 << i)) {
+       continue;
+@@ -226,7 +226,7 @@
+   int32_t input_rank = indicesDimen.size();
+   int32_t axis_new = (axis < 0) ? (axis + input_rank) : axis;
+ 
+-  std::vector<uint32_t> outputDimen;
++  std::vector<int32_t> outputDimen;
+   outputDimen.reserve(input_rank - 1 + indicesDimen.size());
+ 
+   // replace the dimension for axis with the shape from the indices
+@@ -388,7 +388,7 @@
+                      const std::string& output) {
+   auto input_dimen = shape_map_.at(input);
+   int64_t input_size = std::accumulate(
+-      input_dimen.begin(), input_dimen.end(), 1, std::multiplies<uint32_t>());
++      input_dimen.begin(), input_dimen.end(), 1, std::multiplies<int32_t>());
+   std::vector<int32_t> output_dimen(shape.size());
+ 
+   int64_t capacity = 1;
+@@ -426,7 +426,7 @@
+ 
+   Shape final_dimen(shape.size());
+   for (size_t i = 0; i < shape.size(); i++) {
+-    final_dimen[i] = (uint32_t)output_dimen[i];
++    final_dimen[i] = (int32_t)output_dimen[i];
+   }
+   shape_map_[output] = final_dimen;
+ }
+@@ -448,7 +448,7 @@
+ void Shaper::Squeeze(const std::string& input,
+                      const std::vector<int32_t>& axes,
+                      const std::string& output) {
+-  std::vector<uint32_t> inputDimen = shape_map_.at(input);
++  std::vector<int32_t> inputDimen = shape_map_.at(input);
+   size_t n_axes = axes.size();
+   int cnt_squeezed_dims = 0;
+   bool should_squeeze[9] = {false};
+@@ -472,7 +472,7 @@
+   }
+ 
+   // Make output dimensions
+-  std::vector<uint32_t> outputDimen(inputDimen.size() - cnt_squeezed_dims, 0);
++  std::vector<int32_t> outputDimen(inputDimen.size() - cnt_squeezed_dims, 0);
+   for (size_t in_idx = 0, out_idx = 0; in_idx < inputDimen.size(); ++in_idx) {
+     if (!should_squeeze[in_idx]) {
+       outputDimen[out_idx++] = inputDimen[in_idx];
+@@ -485,11 +485,11 @@
+ void Shaper::Unsqueeze(const std::string& input,
+                        const std::vector<int32_t>& axes,
+                        const std::string& output) {
+-  std::vector<uint32_t> inputDimen = shape_map_.at(input);
++  std::vector<int32_t> inputDimen = shape_map_.at(input);
+ 
+   int output_size = inputDimen.size() + axes.size();
+   int cur_output_size = inputDimen.size();
+-  std::vector<uint32_t> outputDimen(output_size, 0);
++  std::vector<int32_t> outputDimen(output_size, 0);
+ 
+   for (int axis : axes) {
+     int cur = axis;
+diff -urN onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/shaper.h onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/shaper.h
+--- onnxruntime-1.20.1/onnxruntime/core/providers/rknpu/shaper.h	2024-11-20 05:25:47.000000000 +0800
++++ onnxruntime-rknpu_ep/onnxruntime/core/providers/rknpu/shaper.h	2024-06-12 22:01:17.000000000 +0800
+@@ -14,7 +14,7 @@
+  */
+ class Shaper {
+  public:
+-  using len_t = uint32_t;
++  using len_t = int32_t;
+   using Shape = std::vector<len_t>;
+ 
+   static len_t total(const Shape& shape);

@@ -25,7 +25,7 @@
 <a><img alt="ort cpu" src="https://img.shields.io/badge/ort-cpu-880088.svg"></a>
 <a><img alt="ort dml" src="https://img.shields.io/badge/ort-dml-blue.svg"></a>
 <a><img alt="ort cuda" src="https://img.shields.io/badge/ort-cuda-green.svg"></a>
-<a><img alt="ort rknn" src="https://img.shields.io/badge/ort-rknn-white.svg"></a>
+<a><img alt="ort rknpu" src="https://img.shields.io/badge/ort-rknpu-white.svg"></a>
 </p>
 
 `vision-simple` 是一个基于 C++23 的跨平台视觉推理库，旨在提供 **开箱即用** 的推理功能。通过 Docker用户可以快速搭建推理服务。该库目前支持常见的 YOLO 系列（包括 YOLOv10 和 YOLOv11），以及部分 OCR 模型（如 `PaddleOCR`）。**内建 HTTP API** 使得服务更加便捷。此外，`vision-simple` 采用 `ONNXRuntime` 引擎，支持多种 Execution Provider，如 `DirectML`、`CUDA`、`TensorRT`，并可与特定硬件设备（如 RockChip 的 RKNPU）兼容，提供更高效的推理性能。
@@ -39,7 +39,7 @@
 - **小体积**：静态编译版本体积不到20MiB，推理YOLO和OCR占用300MiB内存
 - **快速部署**：
   - **一键编译**：提供各个平台已验证的编译脚本
-  - **[容器部署](https://hub.docker.com/r/lonacn/vision_simple)**：使用`docker`、`podman`、`container`一键部署
+  - **[容器部署](https://hub.docker.com/r/lonacn/vision_simple)**：使用`docker`、`podman`、`containerd`一键部署
   - **[HTTP服务](doc/openapi/server.yaml)**：提供HTTP API供Web应用调用
 
 
@@ -120,7 +120,7 @@ xmake run test_yolo
 ```sh
 # 处于vision-simple根目录
 # 构建项目
-docker build -t vision-simple:latest -f  dockerfile/debian-x86_64.Dockefile .
+docker build -t vision-simple:latest -f  docker/Dockerfile.debian-bookworm-x86_64-cpu .
 # 运行容器，默认配置会使用CPU推理并监听11451端口
 docker run -it --rm -p 11451:11451 --name vs vision-simple
 ```
