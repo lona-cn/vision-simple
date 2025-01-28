@@ -45,10 +45,10 @@ english | [简体中文](./README.md)
 
 ![http-inferocr](doc/images/http-inferocr.png)
 ## <div align="center">🚀 Using vision-simple </div>
-### Deploy HTTP Service
+### Deploy HTTP Service with docker
 1. Start the server project:
 ```powershell
-docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.0-cpu-x86_64
+docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.1-cpu-x86_64
 ```
 2. Open the Swagger online editor and allow the site’s unsafe content.
 3. Copy the content from doc/openapi/server.yaml into the Swagger editor.
@@ -56,7 +56,50 @@ docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.0-cpu-x86_
 ![swagger-right](doc/images/swagger-right.png)
 
 ## <div align="center">🚀 Quick Start for Development </div>
-### YOLOv11 Inference Development
+
+```
+### Build Project
+#### windows/x64
+- xmake >= 2.9.7
+- msvc with C++23
+- Windows 11
+```powershell
+# pull project
+git clone https://github.com/lona-cn/vision-simple.git
+cd vision-simple
+# setup sln
+./scripts/dev-vs.bat
+# run server
+xmake build server
+xmake run server
+```
+#### linux/x86_64
+- xmake >= 2.9.7
+- gcc-13
+- Debian 12 / Ubuntu 2022
+```sh
+# pull project
+git clone https://github.com/lona-cn/vision-simple.git
+cd vision-simple
+# build release
+./scripts/build-release.sh
+# run server
+xmake build server
+xmake run server
+```
+### Docker Image
+All `Dockerfiles` are located in the `docker/` directory.
+```sh
+# pull project
+git clone https://github.com/lona-cn/vision-simple.git
+cd vision-simple
+# Build the project
+docker build -t vision-simple:latest -f  docker/Dockerfile.debian-bookworm-x86_64-cpu .
+# Run the container, the default configuration will use CPU inference and listen on port 11451
+docker run -it --rm -p 11451:11451 --name vs vision-simple
+```
+
+### dev YOLOv11 Inference with `vision-simple`
 ```cpp
 #include <Infer.h>
 #include <opencv2/opencv.hpp>
@@ -80,43 +123,6 @@ int main(int argc,char *argv[]){
     // do what u want
     return 0;
 }
-```
-### Build Project
-#### windows/x64
-- xmake >= 2.9.7
-- msvc with C++23
-- Windows 11
-```powershell
-# setup sln
-./scripts/setupdev-vs.bat
-# test
-xmake build test_yolo
-xmake run test_yolo
-```
-#### linux/x86_64
-- xmake >= 2.9.7
-- gcc-13
-- Debian 12 / Ubuntu 2022
-```sh
-# build release
-./scripts/build-release.sh
-# test
-xmake build test_yolo
-xmake run test_yolo
-```
-### Docker Image
-All `Dockerfiles` are located in the `docker/` directory.
-```sh
-# From the root directory of vision-simple
-# Build the project
-docker build -t vision-simple:latest -f  docker/Dockerfile.debian-bookworm-x86_64-cpu .
-# Run the container, the default configuration will use CPU inference and listen on port 11451
-docker run -it --rm -p 11451:11451 --name vs vision-simple
-```
-
-<div align="center">🚀 Contact</div>
-
-![Discord](https://img.shields.io/discord/1327875843581808640)
 
 <div align="center">📄 License</div>
 The copyrights for the YOLO models and PaddleOCR models in this project belong to the original authors.

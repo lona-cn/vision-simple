@@ -43,17 +43,17 @@
   - **[HTTP服务](doc/openapi/server.yaml)**：提供HTTP API供Web应用调用
 
 
-### <div align="center"> yolov11n 3440x1440@60fps+ </div>
+### <div align="center"> YOLOv11 </div>
 ![hd2-yolo-gif](doc/images/hd2-yolo.gif)
 
 ### <div align="center"> OCR(HTTP API) </div>
 
 ![http-inferocr](doc/images/http-inferocr.png)
-## <div align="center">🚀 部署使用 </div>
+## <div align="center">🚀 快速使用 </div>
 ### docker部署HTTP服务
 1. 启动server项目：
 ```sh
-docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.0-cpu-x86_64
+docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.1-cpu-x86_64
 ```
 2. 打开[swagger在线编辑器](https://editor-next.swagger.io/)，并允许该网站的不安全内容
 3. 复制[doc/openapi/server.yaml](doc/openapi/server.yaml)的内容到`swagger在线编辑器`
@@ -61,11 +61,57 @@ docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.0-cpu-x86_
 ![swagger-right](doc/images/swagger-right.png)
 
 
-## <div align="center">🚀 快速开始 </div>
-### 开发YOLOv11推理
+## <div align="center">🚀 快速开发 </div>
+
+### 构建项目
+#### windows/x64
+* [xmake](https://xmake.io) >= 2.9.7
+* msvc with c++23
+* windows 11
+
+```powershell
+# pull project
+git clone https://github.com/lona-cn/vision-simple.git
+cd vision-simple
+# setup sln
+./scripts/dev-vs.bat
+# run server
+xmake build server
+xmake run server
+```
+#### linux/x86_64
+* [xmake](https://xmake.io) >= 2.9.7
+* gcc-13
+* debian12/ubuntu2022
+
+```sh
+# pull project
+git clone https://github.com/lona-cn/vision-simple.git
+cd vision-simple
+# build release
+./scripts/build-release.sh
+# run server
+xmake build server
+xmake run server
+```
+
+### 构建docker镜像
+所有`Dockerfile`位于目录：`docker/`
+
+```sh
+# pull project
+git clone https://github.com/lona-cn/vision-simple.git
+cd vision-simple
+# 构建项目
+docker build -t vision-simple:latest -f  docker/Dockerfile.debian-bookworm-x86_64-cpu .
+# 运行容器，默认配置会使用CPU推理并监听11451端口
+docker run -it --rm -p 11451:11451 --name vs vision-simple
+```
+
+### 使用`vision-simple`进行YOLOv11推理
 
 ```cpp
-#include <Infer.h>
+#include <vision_simple/Infer.h>
 #include <opencv2/opencv.hpp>
 using namespace vision_simple;
 template <typename T>
@@ -88,46 +134,6 @@ int main(int argc,char *argv[]){
     return 0;
 }
 ```
-
-### 构建项目
-#### windows/x64
-* [xmake](https://xmake.io) >= 2.9.7
-* msvc with c++23
-* windows 11
-
-```powershell
-# setup sln
-./scripts/setupdev-vs.bat
-# test
-xmake build test_yolo
-xmake run test_yolo
-```
-#### linux/x86_64
-* [xmake](https://xmake.io) >= 2.9.7
-* gcc-13
-* debian12/ubuntu2022
-
-```sh
-# build release
-./scripts/build-release.sh
-# test
-xmake build test_yolo
-xmake run test_yolo
-```
-### docker镜像
-所有`Dockerfile`位于目录：`docker/`
-
-```sh
-# 处于vision-simple根目录
-# 构建项目
-docker build -t vision-simple:latest -f  docker/Dockerfile.debian-bookworm-x86_64-cpu .
-# 运行容器，默认配置会使用CPU推理并监听11451端口
-docker run -it --rm -p 11451:11451 --name vs vision-simple
-```
-
-## <div align="center">🚀 联系方式</div>
-
-![Discord](https://img.shields.io/discord/1327875843581808640)
 
 ## <div align="center">📄 许可证</div>
 项目内的YOLO模型和PaddleOCR模型版权归原项目所有

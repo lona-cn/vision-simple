@@ -3,6 +3,7 @@
 #include <codecvt>
 #include <format>
 #include <magic_enum.hpp>
+#include <ranges>
 
 #include "Util.hpp"
 #define CHECK_RESULT(result)                                      \

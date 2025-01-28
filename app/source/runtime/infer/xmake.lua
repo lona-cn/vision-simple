@@ -1,5 +1,5 @@
 local target_name = "infer"
-local kind = "object"
+local kind = "static"
 local group_name = "runtime"
 local pkgs = { "opencv", "magic_enum" }
 if has_config("with_dml") then
