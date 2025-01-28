@@ -44,7 +44,6 @@ RUN mkdir /app &&\
     mkdir /rknpu &&cp -r $(find /root/.xmake/packages -type f -name "librknpu_ddk.so" 2>/dev/null | xargs -I {} dirname {})/* /rknpu
 
 RUN sed -i '/^\s*#/d' /app/config/log.properties
-
 #----##请修改## 二阶段----
 FROM --platform=linux/arm64 arm64v8/debian:bookworm-slim
 RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\

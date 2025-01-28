@@ -43,7 +43,6 @@ RUN mkdir /app &&\
     cd /app && patchelf --replace-needed libonnxruntime.so.1 libonnxruntime.so vision_simple-server
 
 RUN sed -i '/^\s*#/d' /app/config/log.properties
-
 #----##请修改## 二阶段----
 FROM --platform=linux/riscv64 riscv64/debian:sid
 RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\
