@@ -26,6 +26,11 @@ vision_simple::ReadAll(const std::string& path) noexcept {
 
 std::expected<std::string, vision_simple::VisionSimpleError>
 vision_simple::ReadAllString(const std::string& path) noexcept {
+  if (!std::filesystem::exists(path)) {
+    return std::unexpected(
+        VisionSimpleError{VisionSimpleErrorCode::kIOError,
+                          std::format("file not exists '{}'", path)});
+  }
   std::ifstream file(path, std::ios::binary);
   if (!file) {
     return std::unexpected(

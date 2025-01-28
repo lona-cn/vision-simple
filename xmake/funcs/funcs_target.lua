@@ -1,10 +1,11 @@
 local header_suffixes = { "h", "hpp" }
-local source_suffixes = { "cpp", "cc", "c", "cxx" }
+local source_suffixes = { "cpp", "c" }
 local private_dirs = {"private"}
 local binary_dirs = {"bin","lib"}
 local binary_suffixes = {"dll","so"}
 local test_root_dirs = {"test"}
 local test_file_prefixes = {"test_"}
+local header_install_prefix = "vision_simple"
 
 function TargetAddHeaders(base_dir --[[string]])
     for _,private_dir_name in ipairs(private_dirs) do
@@ -14,10 +15,16 @@ function TargetAddHeaders(base_dir --[[string]])
             add_headerfiles(path.join(private_dir,"*."..header_suffix), { install = false })
         end
     end
-    local public_dir = path.join(base_dir)
+    local public_dir = base_dir
     add_includedirs(public_dir, { public = true })
     for _,header_suffix in ipairs(header_suffixes) do
-        add_headerfiles(path.join(public_dir,"*."..header_suffix), { install = true })
+        local absolute_dir = path.join(public_dir,"*."..header_suffix)
+        local relative_dir = path.relative(absolute_dir,public_dir)
+        if not (header_install_prefix == "") then
+            add_headerfiles(relative_dir, { prefixdir = header_install_prefix, install = true })
+        else
+            add_headerfiles(relative_dir, { install = true })
+        end
     end
 end
 

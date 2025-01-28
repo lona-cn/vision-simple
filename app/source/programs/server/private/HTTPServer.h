@@ -31,7 +31,7 @@ namespace vision_simple
         ServerOptions options;
 
         const std::string& OptionOrPut(const std::string& key, const std::string& default_value);
-        const std::string& OptionOrPut(const std::string_view& key, const std::string_view& default_value);
+        const std::string& OptionOrPut(std::string_view key, std::string_view default_value);
     };
 
     class HTTPServer

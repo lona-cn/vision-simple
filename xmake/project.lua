@@ -1,5 +1,5 @@
 function SetupProject()
-	local project_semver = "0.4.0"
+	local project_semver = "0.4.1"
 	set_project("vision-simple")
 	-- language version
 	set_languages("clatest", "c++23")

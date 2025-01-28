@@ -12,7 +12,7 @@ package("onnxruntime-git")
     add_patches("1.20.1", path.join(os.scriptdir(), "patches", "1.20.1_rknpu.patch"), "e40b832a224b1b503f14caa56a820041894b2301920dc3b3a9979d8c0ea33abf")
 
     --##configs##
-    add_configs("static", { description = "Forced Static Library", default = true, readonly = true })
+    add_configs("shared", { description = "Forced Shared Library", default = true, readonly = true })
     -- training
     add_configs("training_api", {description = "Build with training apis", default = false, type = "boolean"})
     add_configs("lm_training", {description = "Build with Large Model Training", default = false, type = "boolean"})

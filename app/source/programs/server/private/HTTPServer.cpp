@@ -1,6 +1,7 @@
 #include "HTTPServer.h"
 
 #include <hv/hv.h>
+#include <hv/hlog.h>
 
 #include <span>
 // #include <hv/HttpService.h>
@@ -16,7 +17,9 @@
 
 #include "IOUtil.h"
 #include "Infer.h"
+#include "Logger.h"
 #include "VisionSimpleConfig.h"
+#define LOG_DOMAIN_NAME "HTTPServer"
 
 namespace vision_simple {
 struct InferYOLORequest {
@@ -68,7 +71,7 @@ class HTTPServerImpl : public HTTPServer {
     {
       std::shared_lock lock{yolo_models_cache_mutex_};
       if (auto it = yolo_models_cache_.find(name);
-          it != yolo_models_cache_.end())
+        it != yolo_models_cache_.end())
         return *it->second;
     }
     std::unique_lock lock{yolo_models_cache_mutex_};
@@ -80,9 +83,9 @@ class HTTPServerImpl : public HTTPServer {
       return std::unexpected(std::move(config_result.error()));
     auto& config = config_result->get();
     if (auto it = std::ranges::find_if(
-            config.model_config().yolo,
-            [&name](const auto& item) { return name == item.name; });
-        it != config.model_config().yolo.end()) {
+          config.model_config().yolo,
+          [&name](const auto& item) { return name == item.name; });
+      it != config.model_config().yolo.end()) {
       auto& model_info = *it;
       auto version_opt = magic_enum::enum_cast<YOLOVersion>(model_info.version);
       if (!version_opt)
@@ -97,16 +100,16 @@ class HTTPServerImpl : public HTTPServer {
                               "Failed to read YOLO model from file: " + name}};
       auto& device_str = options_.OptionOrPut(
           HTTPSERVER_OPT_KEY_INFER_DEVICE, HTTPSERVER_OPT_DEFVAL_INFER_DEVICE);
-      int device{0};
+      int device_id{0};
       try {
-        device = std::stoi(device_str);
+        device_id = std::stoi(device_str);
       } catch (std::exception& _) {
         return std::unexpected{
             VisionSimpleError{VisionSimpleErrorCode::kParameterError,
                               "device_id is not a integer: " + device_str}};
       }
       auto infer_yolo_result = InferYOLO::Create(
-          *infer_context_, data_result->span(), version, device);
+          *infer_context_, data_result->span(), version, device_id);
       if (!infer_yolo_result) {
         return std::unexpected{VisionSimpleError{
             VisionSimpleErrorCode::kModelError,
@@ -135,9 +138,9 @@ class HTTPServerImpl : public HTTPServer {
       return std::unexpected(std::move(config_result.error()));
     auto& config = config_result->get();
     if (auto it = std::ranges::find_if(
-            config.model_config().ocr,
-            [&name](const auto& item) { return name == item.name; });
-        it != config.model_config().ocr.end()) {
+          config.model_config().ocr,
+          [&name](const auto& item) { return name == item.name; });
+      it != config.model_config().ocr.end()) {
       const auto& model_info = *it;
       auto model_type_opt =
           magic_enum::enum_cast<OCRModelType>(model_info.version);
@@ -148,9 +151,9 @@ class HTTPServerImpl : public HTTPServer {
       auto model_type = *model_type_opt;
       auto& device_str = options_.OptionOrPut(
           HTTPSERVER_OPT_KEY_INFER_DEVICE, HTTPSERVER_OPT_DEFVAL_INFER_DEVICE);
-      int device{0};
+      int device_id{0};
       try {
-        device = std::stoi(device_str);
+        device_id = std::stoi(device_str);
       } catch (std::exception& _) {
         return std::unexpected{
             VisionSimpleError{VisionSimpleErrorCode::kParameterError,
@@ -158,7 +161,7 @@ class HTTPServerImpl : public HTTPServer {
       }
       auto infer_ocr_result = InferOCR::Create(
           *infer_context_, model_info.char_dict_path, model_info.det_path,
-          model_info.rec_path, model_type, device);
+          model_info.rec_path, model_type, device_id);
       if (!infer_ocr_result) {
         return std::unexpected{VisionSimpleError{
             VisionSimpleErrorCode::kModelError,
@@ -172,22 +175,20 @@ class HTTPServerImpl : public HTTPServer {
                       "unable to find model: " + name);
   }
 
- public:
+public:
   explicit HTTPServerImpl(HTTPServerOptions&& options,
                           std::unique_ptr<InferContext>&& infer_context)
-      : HTTPServer{},
-        options_(std::move(options)),
-        http_service_(),
-        http_server_(),
-        infer_context_{std::move(infer_context)},
-        yolo_models_cache_{}
-
-  {
+    : HTTPServer{},
+      options_(std::move(options)),
+      http_service_(),
+      http_server_(),
+      infer_context_{std::move(infer_context)},
+      yolo_models_cache_{} {
     // static resource
     http_service_.Static("/", options_
-                                  .OptionOrPut(HTTPSERVER_OPT_KEY_STATIC_DIR,
-                                               HTTPSERVER_OPT_DEFVAL_STATIC_DIR)
-                                  .c_str());
+                              .OptionOrPut(HTTPSERVER_OPT_KEY_STATIC_DIR,
+                                           HTTPSERVER_OPT_DEFVAL_STATIC_DIR)
+                              .c_str());
     // register handles
     // /v0/infer/yolo
     http_service_.POST("/v0/infer/yolo", [this](const HttpContextPtr& ctx) {
@@ -201,11 +202,48 @@ class HTTPServerImpl : public HTTPServer {
     http_service_.GET("/v0/infer/models", [this](const HttpContextPtr& ctx) {
       return this->HandleInferModels(ctx);
     });
-
+    http_service_.Use([](const HttpContextPtr& ctx) {
+      Logger::Instance()->get().Info(LOG_DOMAIN_NAME,
+                                     std::format("{}:{} -> {}", ctx->ip(),
+                                                 ctx->port(), ctx->url()));
+      return HTTP_STATUS_NEXT;
+    });
     http_service_.AllowCORS();
+    http_service_.enable_access_log = 0;
 
     http_server_.port = options_.port;
     http_server_.service = &http_service_;
+    logger_set_handler(hv_default_logger(),
+                       [](int log_level, const char* buf, int
+                          len) {
+                         auto msg = std::string(buf, len);
+                         msg.erase(std::remove(msg.begin(), msg.end(), '\r'),
+                                   msg.end());
+                         msg.erase(std::remove(msg.begin(), msg.end(), '\n'),
+                                   msg.end());
+                         auto logger_instance = Logger::Instance();
+                         if (log_level == LOG_LEVEL_DEBUG) {
+                           logger_instance->get().Debug(
+                               "libhv",
+                               msg.substr(msg.find_first_of("DEBUG") + 7));
+                         } else if (log_level == LOG_LEVEL_WARN) {
+                           logger_instance->get().Warn(
+                               "libhv",
+                               msg.substr(msg.find_first_of("WARN") + 6));
+                         } else if (log_level == LOG_LEVEL_ERROR) {
+                           logger_instance->get().Error(
+                               "libhv",
+                               msg.substr(msg.find_first_of("ERROR") + 7));
+                         } else if (log_level == LOG_LEVEL_FATAL) {
+                           logger_instance->get().Fatal(
+                               "libhv",
+                               msg.substr(msg.find_first_of("FATAL") + 7));
+                         } else if (log_level != LOG_LEVEL_SILENT) {
+                           logger_instance->get().Info(
+                               "libhv",
+                               msg.substr(msg.find_first_of("INFO") + 6));
+                         }
+                       });
   }
 
   const HTTPServerOptions& options() const noexcept override {
@@ -223,6 +261,8 @@ class HTTPServerImpl : public HTTPServer {
     if (!config_result) {
       auto& err = config_result.error();
       ctx->send(err.message.c_str());
+      Logger::Instance()->get().Warn(LOG_DOMAIN_NAME,
+                                     std::format("{}", err.message));
       return 500;
     }
     const auto& model_config = config_result->get().model_config();
@@ -236,6 +276,11 @@ class HTTPServerImpl : public HTTPServer {
       ppocr_list.emplace_back(model_info.name);
     }
     ctx->sendJson(model_list);
+    //TODO: move to logger thread
+    std::string dbg_msg;
+    struct_json::to_json(model_list, dbg_msg);
+    Logger::Instance()->get().Debug(LOG_DOMAIN_NAME,
+                                    std::format("{}", dbg_msg));
     return 200;
   }
 
@@ -300,6 +345,9 @@ class HTTPServerImpl : public HTTPServer {
       std::string json_str;
       struct_json::to_json(std::move(response), json_str);
       ctx->send(json_str, APPLICATION_JSON);
+      //TODO: move to logger thread
+      Logger::Instance()->get().Debug(LOG_DOMAIN_NAME,
+                                      std::format("{}", json_str));
       return 200;
     } catch (std::exception& e) {
       ctx->sendString(std::format("unable to serialize:{}", e.what()));
@@ -363,6 +411,9 @@ class HTTPServerImpl : public HTTPServer {
       std::string json_str;
       struct_json::to_json(std::move(response), json_str);
       ctx->send(json_str, APPLICATION_JSON);
+      //TODO: move to logger thread
+      Logger::Instance()->get().Debug(LOG_DOMAIN_NAME,
+                                      std::format("{}", json_str));
       return 200;
     } catch (std::exception& e) {
       ctx->sendString(std::format("unable to serialize:{}", e.what()));
@@ -370,7 +421,7 @@ class HTTPServerImpl : public HTTPServer {
     }
   }
 };
-}  // namespace vision_simple
+} // namespace vision_simple
 
 const std::string& vision_simple::HTTPServerOptions::OptionOrPut(
     const std::string& key, const std::string& default_value) {
@@ -382,7 +433,7 @@ const std::string& vision_simple::HTTPServerOptions::OptionOrPut(
 }
 
 const std::string& vision_simple::HTTPServerOptions::OptionOrPut(
-    const std::string_view& key, const std::string_view& default_value) {
+    std::string_view key, std::string_view default_value) {
   return OptionOrPut(std::string(key), std::string(default_value));
 }
 
@@ -407,6 +458,9 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) {
         std::format("unable to create infer context with {}:{},error:{}",
                     infer_fw_str, infer_ep_str,
                     infer_context.error().message)});
+  Logger::Instance()->get().Info(LOG_DOMAIN_NAME, std::format(
+                                     "Execution Provider:{}",
+                                     infer_ep_str));
   return std::make_unique<HTTPServerImpl>(std::move(options),
                                           std::move(*infer_context));
 }

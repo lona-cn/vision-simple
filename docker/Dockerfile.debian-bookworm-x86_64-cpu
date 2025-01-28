@@ -40,7 +40,9 @@ RUN xmake build -vDy -j${NUM_BUILD_THREADS} server
 #----##请修改## 安装项目，后处理----
 RUN mkdir /app &&\
     cp -r /src/build/release-linux/linux/x86_64/release/* /app &&\
-    cd /app && patchelf --replace-needed libonnxruntime.so.1 libonnxruntime.so server
+    cd /app && patchelf --replace-needed libonnxruntime.so.1 libonnxruntime.so vision_simple-server
+
+RUN sed -i '/^\s*#/d' /app/config/log.properties
 
 #----##请修改## 二阶段----
 FROM debian:bookworm-slim
@@ -51,4 +53,4 @@ COPY --from=builder /app /app
 COPY --from=builder /src/app/assets/test /app/assets
 EXPOSE 11451
 WORKDIR /app
-ENTRYPOINT ["./server"]
+ENTRYPOINT ["./vision_simple-server"]

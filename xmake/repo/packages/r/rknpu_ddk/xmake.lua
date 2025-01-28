@@ -20,7 +20,6 @@ package("rknpu_ddk")
             os.cp("include/*", package:installdir("include"))
             os.cp("lib64/*", package:installdir("lib"))
             local to_lib64_dir = path.join(package:installdir(), "lib64")
-            print("----114514----"..to_lib64_dir)
             os.mkdir(to_lib64_dir)
             os.cp("lib64/*", to_lib64_dir)
         end

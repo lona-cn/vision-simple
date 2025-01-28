@@ -5,13 +5,13 @@ add_requires("magic_enum 0.9.6","libhv 1.3.3","turbobase64","yalantinglibs","log
 if is_arch("x86_64") or is_arch("x64") then
 	if has_config("with_dml") then
 		add_requires("directml", { system = false })
-		add_requires("onnxruntime-dml", { system = false })
+		add_requires("onnxruntime-dml", { system = false ,alias = "onnxruntime" })
 	elseif has_config("with_cuda") or has_config("with_tensorrt") then
 		add_requires("onnxruntime", { system = false, configs = { gpu = true } })
 	else
 		add_requires("onnxruntime", { system = false } )
 	end
-elseif is_arch("arm64") then
+elseif is_arch("arm64") then	
 	if has_config("with_rknpu") then
 		add_requires("onnxruntime-git", { system = false, alias = "onnxruntime", configs = { rknpu = true} } )
 	else

@@ -40,9 +40,10 @@ RUN xmake build -vDy -j${NUM_BUILD_THREADS} server
 #----##请修改## 安装项目，后处理----
 RUN mkdir /app &&\
     cp -r /src/build/release-linux/linux/arm64/release/* /app &&\
-    cd /app && patchelf --replace-needed libonnxruntime.so.1 libonnxruntime.so server &&\
+    cd /app && patchelf --replace-needed libonnxruntime.so.1 libonnxruntime.so vision_simple-server &&\
     mkdir /rknpu &&cp -r $(find /root/.xmake/packages -type f -name "librknpu_ddk.so" 2>/dev/null | xargs -I {} dirname {})/* /rknpu
 
+RUN sed -i '/^\s*#/d' /app/config/log.properties
 #----##请修改## 二阶段----
 FROM --platform=linux/arm64 arm64v8/debian:bookworm-slim
 RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\
@@ -53,4 +54,4 @@ COPY --from=builder /src/app/assets/test /app/assets
 COPY --from=builder /rknpu /usr/lib
 EXPOSE 11451
 WORKDIR /app
-ENTRYPOINT ["./server"]
+ENTRYPOINT ["./vision_simple-server"]
