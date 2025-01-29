@@ -22,6 +22,7 @@ elseif is_arch("riscv64") then
 end
 -- opencv
 add_requires("opencv 4.10.0")
+--local opencv_enable_cuda = has_config("with_cuda") and true or false
 add_requireconfs("opencv", { system = false, configs = { ffmpeg = false, jpeg = true,webp = false,opengl = false,tiff = false,protobuf = false } })
 if is_os("linux") then
 	add_requireconfs("opencv.python",{ system = true })

@@ -101,7 +101,7 @@ vision_simple::InferContextORT::CreateSession(std::span<uint8_t> data,
     //session_options.AppendExecutionProvider_TensorRT(trt_options);
       OrtSessionOptionsAppendExecutionProvider_Tensorrt(
           session_options, device_id);
-      OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, device_id)
+      OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, device_id);
     } catch (const std::exception& e) {
       return std::unexpected{VisionSimpleError{
         VisionSimpleErrorCode::kRuntimeError,
