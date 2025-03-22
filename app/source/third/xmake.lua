@@ -17,6 +17,12 @@ elseif is_arch("arm64") then
 	else
 		add_requires("onnxruntime-git", { system = false, alias = "onnxruntime", configs = { rknpu = false} } )
 	end
+elseif is_arch("arm") then
+	if has_config("with_rknpu") then
+		add_requires("onnxruntime-git", { system = false, alias = "onnxruntime", configs = { rknpu = true} } )
+	else
+		add_requires("onnxruntime-git", { system = false, alias = "onnxruntime", configs = { rknpu = false} } )
+	end
 elseif is_arch("riscv64") then
 		add_requires("onnxruntime-git", { system = false, alias = "onnxruntime"} )
 end

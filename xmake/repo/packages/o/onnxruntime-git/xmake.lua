@@ -51,6 +51,15 @@ package("onnxruntime-git")
                 else
                     build_cmd = build_cmd.." --cmake_extra_defines "..common_cmake_defines.." CMAKE_TOOLCHAIN_FILE="..toolchain_file_path
                 end
+            elseif is_arch("arm") then
+                local toolchain_file_path = path.join(package:scriptdir(), "cross-cmake","armv7.toolchain.cmake")
+                build_cmd = build_cmd.." --arm"
+                if package:config("rknpu") then
+                    local rknpu_ddk_path = package:dep("rknpu_ddk"):installdir()
+                    build_cmd = build_cmd.." --use_rknpu --cmake_extra_defines "..common_cmake_defines.." CMAKE_TOOLCHAIN_FILE="..toolchain_file_path.." RKNPU_DDK_PATH="..rknpu_ddk_path
+                else
+                    build_cmd = build_cmd.." --cmake_extra_defines "..common_cmake_defines.." CMAKE_TOOLCHAIN_FILE="..toolchain_file_path
+                end
             elseif is_arch("riscv64") then
                 local toolchain_file_path = path.join(package:scriptdir(), "cross-cmake","riscv64.toolchain.cmake")
                 -- TODO: fixit

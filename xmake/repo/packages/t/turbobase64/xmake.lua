@@ -30,6 +30,8 @@ package("turbobase64")
 
 		if is_arch("aarch64") or is_arch("arm64") then
 			table.insert(configs, "-DCMAKE_SYSTEM_PROCESSOR=aarch64")
+        elseif is_arch("arm") then
+            table.insert(configs, "-DCMAKE_SYSTEM_PROCESSOR=arm")
 		elseif is_arch("x86_64") then
 			table.insert(configs, "-DCMAKE_SYSTEM_PROCESSOR=x86_64")
 		elseif is_arch("ppc64le") then
