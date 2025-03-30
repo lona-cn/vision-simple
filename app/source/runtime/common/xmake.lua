@@ -1,5 +1,5 @@
 local target_name = "common"
-local kind = "static"
+local kind = "object"
 local group_name = "runtime"
 local pkgs = {"yalantinglibs","magic_enum"}
 local deps = {}

@@ -42,30 +42,30 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
                 std::map<int, std::string> char_dict,
                 std::unique_ptr<Ort::Session> det,
                 std::unique_ptr<Ort::Session> rec)
-      : model_type(model_type),
-        char_dict(std::move(char_dict)),
-        det(std::move(det)),
-        rec(std::move(rec)),
-        det_allocator(*this->det, ort_ctx.env_memory_info()),
-        rec_allocator(*this->rec, ort_ctx.env_memory_info()),
-        det_io_binding(*this->det),
-        rec_io_binding(*this->rec),
-        det_input_tensor{nullptr},
-        rec_input_tensor{nullptr},
-        det_input_name(std::string(
-            this->det->GetInputNameAllocated(0, det_allocator).get())),
-        det_output_name(std::string(
-            this->det->GetOutputNameAllocated(0, det_allocator).get())),
-        rec_input_name(std::string(
-            this->rec->GetInputNameAllocated(0, rec_allocator).get())),
-        rec_output_name(std::string(
-            this->rec->GetOutputNameAllocated(0, rec_allocator).get())),
-        det_memory_info(Ort::MemoryInfo::CreateCpu(
-            ort_ctx.env_memory_info().GetAllocatorType(),
-            ort_ctx.env_memory_info().GetMemoryType())),
-        rec_memory_info(Ort::MemoryInfo::CreateCpu(
-            ort_ctx.env_memory_info().GetAllocatorType(),
-            ort_ctx.env_memory_info().GetMemoryType())) {
+    : model_type(model_type),
+      char_dict(std::move(char_dict)),
+      det(std::move(det)),
+      rec(std::move(rec)),
+      det_allocator(*this->det, ort_ctx.env_memory_info()),
+      rec_allocator(*this->rec, ort_ctx.env_memory_info()),
+      det_io_binding(*this->det),
+      rec_io_binding(*this->rec),
+      det_input_tensor{nullptr},
+      rec_input_tensor{nullptr},
+      det_input_name(std::string(
+          this->det->GetInputNameAllocated(0, det_allocator).get())),
+      det_output_name(std::string(
+          this->det->GetOutputNameAllocated(0, det_allocator).get())),
+      rec_input_name(std::string(
+          this->rec->GetInputNameAllocated(0, rec_allocator).get())),
+      rec_output_name(std::string(
+          this->rec->GetOutputNameAllocated(0, rec_allocator).get())),
+      det_memory_info(Ort::MemoryInfo::CreateCpu(
+          ort_ctx.env_memory_info().GetAllocatorType(),
+          ort_ctx.env_memory_info().GetMemoryType())),
+      rec_memory_info(Ort::MemoryInfo::CreateCpu(
+          ort_ctx.env_memory_info().GetAllocatorType(),
+          ort_ctx.env_memory_info().GetMemoryType())) {
     det_io_binding.BindOutput(det_output_name.c_str(), det_memory_info);
     rec_io_binding.BindOutput(rec_output_name.c_str(), rec_memory_info);
   }
@@ -116,7 +116,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
                                        double iou_threshold = 0.3f,
                                        double contours_min_area = 12. * 12.,
                                        double rect_min_area = 8 * 8,
-                                       int kernel_size = 6) noexcept {
+                                       int kernel_size = 2) noexcept {
     auto output_shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
     auto output_ptr = output_tensor.GetConst().GetTensorData<float>();
     auto img = cv::Mat{static_cast<int>(output_shape[2]),
@@ -141,7 +141,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
 #endif
     for (const auto& contour : contours) {
       if (contourArea(contour) > contours_min_area) {
-        filtered_contours.push_back(contour);  // 添加满足条件的轮廓
+        filtered_contours.push_back(contour); // 添加满足条件的轮廓
       }
     }
     std::vector<cv::Rect> rects;
@@ -188,7 +188,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
   }
 
   static auto FindMaxValueIndex(const std::span<const float> vec)
-      -> std::pair<float, size_t> {
+    -> std::pair<float, size_t> {
     // 使用std::max_element找到最大值的迭代器
     auto max_it = std::ranges::max_element(vec);
     // 如果vector为空，返回一个无效的值
@@ -236,10 +236,11 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
         ss << c;
         scores.emplace_back(score);
       }
-      auto confidence = !scores.empty() ? std::accumulate(scores.cbegin(),
-                                                          scores.cend(), 0.0f) /
-                                              static_cast<float>(scores.size())
-                                        : 0.0f;
+      auto confidence = !scores.empty()
+                          ? std::accumulate(scores.cbegin(),
+                                            scores.cend(), 0.0f) /
+                            static_cast<float>(scores.size())
+                          : 0.0f;
       results.emplace_back(ss.str(), confidence);
     }
     return results;
@@ -248,7 +249,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
   RunResult Run(const cv::Mat& image, float confidence_threshold) noexcept {
     auto& input_image = DetPreProcess(image);
     const cv::Size input_image_size{input_image.cols, input_image.rows},
-        original_image_size{image.cols, image.rows};
+                   original_image_size{image.cols, image.rows};
     int64_t input_image_shape[4] = {1, 3, input_image.rows, input_image.cols};
     auto input_size_bytes =
         static_cast<unsigned long long>(input_image.channels()) *
@@ -305,11 +306,12 @@ vision_simple::InferOCROrtPaddleImpl::InferOCROrtPaddleImpl(
     InferContextORT& ort_ctx, OCRModelType model_type,
     std::map<int, std::string> char_dict, std::unique_ptr<Ort::Session> det,
     std::unique_ptr<Ort::Session> rec)
-    : impl_(std::make_unique<Impl>(ort_ctx, model_type, char_dict,
-                                   std::move(det), std::move(rec))) {}
+  : impl_(std::make_unique<Impl>(ort_ctx, model_type, char_dict,
+                                 std::move(det), std::move(rec))) {
+}
 
 vision_simple::OCRModelType vision_simple::InferOCROrtPaddleImpl::model_type()
-    const noexcept {
+const noexcept {
   return this->impl_->model_type;
 }
 
