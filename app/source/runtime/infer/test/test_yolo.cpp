@@ -15,8 +15,10 @@ using namespace vision_simple;
 
 void drawYOLOResults(cv::Mat& image, const std::vector<YOLOResult>& results) {
   for (const auto& result : results) {
+    auto font_scale = 1.5;
+    auto thickness = 2;
     // 绘制边界框
-    cv::rectangle(image, result.bbox, cv::Scalar(0, 255, 0), 2);
+    cv::rectangle(image, result.bbox, cv::Scalar(0, 255, 0), thickness);
 
     // 设置标签内容
     std::string label = result.class_name.data() +
@@ -25,7 +27,8 @@ void drawYOLOResults(cv::Mat& image, const std::vector<YOLOResult>& results) {
     // 计算文本背景框大小
     int baseLine = 0;
     cv::Size labelSize =
-        cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
+        cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, font_scale, thickness,
+                        &baseLine);
 
     // 确定文本位置
     int top = std::max(result.bbox.y, labelSize.height);
@@ -37,14 +40,14 @@ void drawYOLOResults(cv::Mat& image, const std::vector<YOLOResult>& results) {
                   cv::Scalar(0, 255, 0), cv::FILLED);
 
     // 绘制文本
-    cv::putText(image, label, labelOrigin, cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                cv::Scalar(0, 0, 0), 1);
+    cv::putText(image, label, labelOrigin, cv::FONT_HERSHEY_SIMPLEX, font_scale,
+                cv::Scalar(0, 0, 0), thickness);
   }
 }
 
 int main(int argc, char* argv[]) {
   std::cout << "Load Model" << std::endl;
-  auto data = ReadAll("assets/hd2-yolo11n-fp16.onnx");
+  auto data = ReadAll("assets/hd2-yolo11n-fp32.onnx");
   std::cout << "Create Infer Context" << std::endl;
 #ifdef VISION_SIMPLE_WITH_DML
   auto ctx = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kDML);
@@ -59,28 +62,28 @@ int main(int argc, char* argv[]) {
   if (!ctx) {
     auto& error = ctx.error();
     std::cout << std::format(
-                     "Failed to create Infer Context code:{} message:{}",
-                     magic_enum::enum_name(error.code), error.message)
-              << std::endl;
+            "Failed to create Infer Context code:{} message:{}",
+            magic_enum::enum_name(error.code), error.message)
+        << std::endl;
     return -1;
   }
   std::cout << std::format("framework:{} EP:{}",
                            magic_enum::enum_name((*ctx)->framework()),
                            magic_enum::enum_name((*ctx)->execution_provider()))
-            << std::endl;
+      << std::endl;
   std::cout << "Create Infer Instance" << std::endl;
   auto infer_yolo = InferYOLO::Create(**ctx, data->span(), YOLOVersion::kV11);
   if (!infer_yolo) {
     auto& error = infer_yolo.error();
     std::cout << std::format(
-                     "Failed to create Infer Instance code:{} message:{}",
-                     magic_enum::enum_name(error.code), error.message)
-              << std::endl;
+            "Failed to create Infer Instance code:{} message:{}",
+            magic_enum::enum_name(error.code), error.message)
+        << std::endl;
     return -1;
   }
   const char* WINDIW_TITLE = "YOLO Detection";
-  cv::namedWindow(WINDIW_TITLE, cv::WINDOW_NORMAL);  // 支持调整大小
-  cv::resizeWindow(WINDIW_TITLE, 1720, 720);         // 设置窗口大小
+  cv::namedWindow(WINDIW_TITLE, cv::WINDOW_NORMAL); // 支持调整大小
+  cv::resizeWindow(WINDIW_TITLE, 1720, 720);        // 设置窗口大小
   // auto image = cv::imread("assets/hd2.png");
   // auto result = infer_yolo->get()->Run(image, 0.625);
   // drawYOLOResults(image, result->results);
@@ -124,7 +127,7 @@ int main(int argc, char* argv[]) {
     decltype(show_queue.PopFrontFor(
         std::chrono::milliseconds(10))) last_img_opt{std::nullopt};
     while (auto show_img_opt =
-               show_queue.PopFrontFor(std::chrono::milliseconds(0))) {
+        show_queue.PopFrontFor(std::chrono::milliseconds(0))) {
       last_img_opt = std::move(show_img_opt);
     }
     if (!last_img_opt) continue;
