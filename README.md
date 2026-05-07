@@ -95,6 +95,54 @@ xmake build server
 xmake run server
 ```
 
+#### linux/arm64 (交叉编译)
+* 交叉编译工具链: `aarch64-linux-gnu-`
+
+```sh
+xmake f -p linux -a arm64 --cross=aarch64-linux-gnu- -m release
+xmake build server
+```
+
+#### linux/riscv64 (交叉编译)
+* 交叉编译工具链: `riscv64-linux-gnu-`
+
+```sh
+xmake f -p linux -a riscv64 --cross=riscv64-linux-gnu- -m release
+xmake build server
+```
+
+### 启用硬件加速 (Execution Provider)
+
+```sh
+# CUDA
+xmake f --with_cuda=y -m release
+xmake build server
+
+# TensorRT
+xmake f --with_tensorrt=y -m release
+xmake build server
+
+# RKNPU (仅 Linux)
+xmake f --with_rknpu=y -m release
+xmake build server
+```
+
+### 运行测试
+
+```sh
+# 构建所有测试
+xmake build test_vision_helper test_cvt test_common
+
+# 运行单元测试 (无模型依赖)
+xmake run test_vision_helper
+xmake run test_cvt
+xmake run test_common
+
+# 运行集成测试 (需要模型文件)
+xmake run test_yolo
+xmake run test_ocr
+```
+
 ### 构建docker镜像
 所有`Dockerfile`位于目录：`docker/`
 
@@ -106,6 +154,22 @@ cd vision-simple
 docker build -t vision-simple:latest -f  docker/Dockerfile.debian-bookworm-x86_64-cpu .
 # 运行容器，默认配置会使用CPU推理并监听11451端口
 docker run -it --rm -p 11451:11451 --name vs vision-simple
+```
+
+#### 其他平台 / 硬件加速
+
+```sh
+# ARM64 CPU
+docker build -t vision-simple:arm64 -f docker/Dockerfile.debian-bookworm-arm64-cpu .
+
+# RISC-V CPU
+docker build -t vision-simple:riscv64 -f docker/Dockerfile.debian-sid-riscv64-cpu .
+
+# x86_64 + CUDA/TensorRT
+docker build -t vision-simple:cuda -f docker/Dockerfile.debian-bookworm-x86_64-cuda_trt .
+
+# ARM64 + Rockchip NPU
+docker build -t vision-simple:rknpu -f docker/Dockerfile.debian-bookworm-arm64-rknpu .
 ```
 
 ### 使用`vision-simple`进行YOLOv11推理

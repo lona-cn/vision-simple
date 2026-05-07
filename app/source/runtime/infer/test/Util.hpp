@@ -11,6 +11,37 @@
 #include <magic_enum.hpp>
 #include "IOUtil.h"
 
+// ===== 测试断言宏 =====
+#define TEST_ASSERT(cond, msg)                                                \
+  do {                                                                        \
+    if (!(cond)) {                                                            \
+      std::cerr << "FAIL: " << (msg) << " (" << __FILE__ << ":" << __LINE__   \
+                << ")\n";                                                     \
+      return 1;                                                               \
+    }                                                                         \
+  } while (0)
+
+#define TEST_ASSERT_EQ(a, b, msg)                                             \
+  do {                                                                        \
+    if ((a) != (b)) {                                                         \
+      std::cerr << "FAIL: " << (msg) << " expected=" << (b) << " got=" << (a) \
+                << " (" << __FILE__ << ":" << __LINE__ << ")\n";              \
+      return 1;                                                               \
+    }                                                                         \
+  } while (0)
+
+#define TEST_ASSERT_FLOAT_EQ(a, b, epsilon, msg)                              \
+  do {                                                                        \
+    if (std::abs((a) - (b)) > (epsilon)) {                                    \
+      std::cerr << "FAIL: " << (msg)                                          \
+                << " absdiff=" << std::abs((a) - (b)) << " (" << __FILE__     \
+                << ":" << __LINE__ << ")\n";                                  \
+      return 1;                                                               \
+    }                                                                         \
+  } while (0)
+
+#define TEST_PASS(msg) std::cout << "  PASS: " << (msg) << std::endl
+
 class DoubleBuffer
 {
 private:

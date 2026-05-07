@@ -87,6 +87,54 @@ cd vision-simple
 xmake build server
 xmake run server
 ```
+
+#### linux/arm64 (Cross-compile)
+- Cross-compile toolchain: `aarch64-linux-gnu-`
+
+```sh
+xmake f -p linux -a arm64 --cross=aarch64-linux-gnu- -m release
+xmake build server
+```
+
+#### linux/riscv64 (Cross-compile)
+- Cross-compile toolchain: `riscv64-linux-gnu-`
+
+```sh
+xmake f -p linux -a riscv64 --cross=riscv64-linux-gnu- -m release
+xmake build server
+```
+
+### Enable Hardware Acceleration (Execution Provider)
+
+```sh
+# CUDA
+xmake f --with_cuda=y -m release
+xmake build server
+
+# TensorRT
+xmake f --with_tensorrt=y -m release
+xmake build server
+
+# RKNPU (Linux only)
+xmake f --with_rknpu=y -m release
+xmake build server
+```
+
+### Run Tests
+
+```sh
+# Build all tests
+xmake build test_vision_helper test_cvt test_common
+
+# Run unit tests (no model dependencies)
+xmake run test_vision_helper
+xmake run test_cvt
+xmake run test_common
+
+# Run integration tests (requires model files)
+xmake run test_yolo
+xmake run test_ocr
+```
 ### Docker Image
 All `Dockerfiles` are located in the `docker/` directory.
 ```sh
@@ -97,6 +145,22 @@ cd vision-simple
 docker build -t vision-simple:latest -f  docker/Dockerfile.debian-bookworm-x86_64-cpu .
 # Run the container, the default configuration will use CPU inference and listen on port 11451
 docker run -it --rm -p 11451:11451 --name vs vision-simple
+```
+
+#### Other Platforms / Hardware Acceleration
+
+```sh
+# ARM64 CPU
+docker build -t vision-simple:arm64 -f docker/Dockerfile.debian-bookworm-arm64-cpu .
+
+# RISC-V CPU
+docker build -t vision-simple:riscv64 -f docker/Dockerfile.debian-sid-riscv64-cpu .
+
+# x86_64 + CUDA/TensorRT
+docker build -t vision-simple:cuda -f docker/Dockerfile.debian-bookworm-x86_64-cuda_trt .
+
+# ARM64 + Rockchip NPU
+docker build -t vision-simple:rknpu -f docker/Dockerfile.debian-bookworm-arm64-rknpu .
 ```
 
 ### dev YOLOv11 Inference with `vision-simple`
