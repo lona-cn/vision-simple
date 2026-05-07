@@ -1,6 +1,7 @@
 #pragma once
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -50,7 +51,7 @@ class LogContext {
   /// RAII 计时器: 构造时开始, 析构时通过回调输出耗时
   class ScopedTimer {
    public:
-    using Callback = void (*)(std::string_view phase, int64_t ms);
+    using Callback = std::function<void(std::string_view phase, int64_t ms)>;
 
     ScopedTimer(std::string_view phase, Callback on_destroy = nullptr)
         : phase_(phase), on_destroy_(on_destroy), start_(std::chrono::steady_clock::now()) {}

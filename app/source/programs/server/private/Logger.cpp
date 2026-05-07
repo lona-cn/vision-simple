@@ -109,26 +109,3 @@ void vision_simple::Logger::Write(std::string_view domain,
       break;
   }
 }
-
-void vision_simple::Logger::Log(std::string_view domain,
-                                std::string_view message,
-                                LogLevel log_level) const noexcept {
-  auto logger = impl_->GetLogger(domain);
-  switch (log_level) {
-    case LogLevel::Debug:
-      LOG4CPLUS_DEBUG(logger, message.data());
-      break;
-    case LogLevel::Info:
-      LOG4CPLUS_INFO(logger, message.data());
-      break;
-    case LogLevel::Warn:
-      LOG4CPLUS_WARN(logger, message.data());
-      break;
-    case LogLevel::Error:
-      LOG4CPLUS_ERROR(logger, message.data());
-      break;
-    case LogLevel::Fatal:
-      LOG4CPLUS_FATAL(logger, message.data());
-      break;
-  }
-}
