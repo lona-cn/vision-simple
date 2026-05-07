@@ -1,4 +1,7 @@
 ﻿#include "InferORT.h"
+
+#include "LogFacade.h"
+
 #ifdef VISION_SIMPLE_WITH_DML
 #include <dml_provider_factory.h>
 #endif
@@ -127,6 +130,8 @@ vision_simple::InferContextORT::CreateSession(std::span<uint8_t> data,
 #endif
   }
   try {
+    LogFacade::Info("ort", std::format("session created: threads={}",
+                                        session_options.GetIntraOpNumThreads()));
     return std::make_unique<Ort::Session>(*env_, data.data(), data.size_bytes(),
                                           session_options);
   } catch (std::exception& e) {

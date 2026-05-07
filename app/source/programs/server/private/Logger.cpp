@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <iostream>
 
+#include "LogFacade.h"
 #include "VisionSimpleCommon.h"
 
 namespace {
@@ -80,9 +81,33 @@ vision_simple::Logger::Instance() noexcept {
         };
       }
       instance = std::unique_ptr<Logger>(new Logger{std::string(CONFIG_PATH)});
+      LogFacade::RegisterSink(instance.get());
     }
   }
   return *instance;
+}
+
+void vision_simple::Logger::Write(std::string_view domain,
+                                   LogLevel level,
+                                   std::string_view message) noexcept {
+  auto& logger = impl_->GetLogger(domain);
+  switch (level) {
+    case LogLevel::Debug:
+      LOG4CPLUS_DEBUG(logger, message.data());
+      break;
+    case LogLevel::Info:
+      LOG4CPLUS_INFO(logger, message.data());
+      break;
+    case LogLevel::Warn:
+      LOG4CPLUS_WARN(logger, message.data());
+      break;
+    case LogLevel::Error:
+      LOG4CPLUS_ERROR(logger, message.data());
+      break;
+    case LogLevel::Fatal:
+      LOG4CPLUS_FATAL(logger, message.data());
+      break;
+  }
 }
 
 void vision_simple::Logger::Log(std::string_view domain,

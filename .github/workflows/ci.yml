@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: '2.9.7'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopencv-dev
+
+      - name: Configure
+        run: xmake f -p linux -a x86_64 --toolchain=gcc -m release -y
+
+      - name: Build server
+        run: xmake build server
+
+      - name: Build unit tests
+        run: xmake build test_vision_helper test_cvt test_common
+
+      - name: Run unit tests
+        run: |
+          xmake run test_vision_helper
+          xmake run test_cvt
+          xmake run test_common

@@ -18,6 +18,8 @@
 #include "IOUtil.h"
 #include "Infer.h"
 #include "Logger.h"
+#include "LogFacade.h"
+#include "LogContext.h"
 #include "VisionSimpleConfig.h"
 #define LOG_DOMAIN_NAME "HTTPServer"
 
@@ -117,6 +119,7 @@ class HTTPServerImpl : public HTTPServer {
                         name, infer_yolo_result.error().message)}};
       }
       yolo_models_cache_.emplace(name, std::move(*infer_yolo_result));
+      LogFacade::Info("http", std::format("yolo model '{}' loaded", name));
       return *yolo_models_cache_[name];
     }
     return MK_VSERROR(VisionSimpleErrorCode::kModelError,
@@ -169,6 +172,7 @@ class HTTPServerImpl : public HTTPServer {
                         infer_ocr_result.error().message)}};
       }
       ocr_models_cache_.emplace(name, std::move(*infer_ocr_result));
+      LogFacade::Info("http", std::format("ocr model loaded (det={}, rec={})", model_info.det_path, model_info.rec_path));
       return *ocr_models_cache_[name];
     }
     return MK_VSERROR(VisionSimpleErrorCode::kModelError,
@@ -285,6 +289,10 @@ public:
   }
 
   int HandleInferYOLO(const HttpContextPtr& ctx) noexcept {
+    auto trace_id = LogContext::GenerateTraceId();
+    LogContext::SetTraceId(trace_id);
+    LogFacade::Info("http", std::format("[{}] POST /v0/infer/yolo", trace_id));
+    auto timer = LogContext::ScopedTimer("HTTP::YOLO::total", LogFacade::TimerCallback("http"));
     // ctx->request
     const auto& str = ctx->body();
     InferYOLORequest parsed_request;
@@ -345,6 +353,7 @@ public:
       std::string json_str;
       struct_json::to_json(std::move(response), json_str);
       ctx->send(json_str, APPLICATION_JSON);
+      LogFacade::Info("http", std::format("[{}] response 200", trace_id));
       //TODO: move to logger thread
       Logger::Instance()->get().Debug(LOG_DOMAIN_NAME,
                                       std::format("{}", json_str));
@@ -356,6 +365,10 @@ public:
   }
 
   int HandleInferOCR(const HttpContextPtr& ctx) noexcept {
+    auto trace_id = LogContext::GenerateTraceId();
+    LogContext::SetTraceId(trace_id);
+    LogFacade::Info("http", std::format("[{}] POST /v0/infer/ocr", trace_id));
+    auto timer = LogContext::ScopedTimer("HTTP::OCR::total", LogFacade::TimerCallback("http"));
     const auto& str = ctx->body();
     InferOCRRequest parsed_request;
     std::error_code error_code;
@@ -411,6 +424,7 @@ public:
       std::string json_str;
       struct_json::to_json(std::move(response), json_str);
       ctx->send(json_str, APPLICATION_JSON);
+      LogFacade::Info("http", std::format("[{}] response 200", trace_id));
       //TODO: move to logger thread
       Logger::Instance()->get().Debug(LOG_DOMAIN_NAME,
                                       std::format("{}", json_str));

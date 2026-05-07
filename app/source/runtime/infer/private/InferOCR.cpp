@@ -1,5 +1,8 @@
 #include "InferOCR.h"
 
+#include "LogContext.h"
+#include "LogFacade.h"
+
 #include <codecvt>
 #include <magic_enum.hpp>
 #include <memory_resource>
@@ -247,6 +250,11 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
   }
 
   RunResult Run(const cv::Mat& image, float confidence_threshold) noexcept {
+    auto total_timer = LogContext::ScopedTimer("OCR::Run::total",
+                                               LogFacade::TimerCallback("ocr"));
+    LogFacade::Info("ocr", "OCR inference started");
+    // det stage
+    auto det_timer = LogContext::ScopedTimer("OCR::det", nullptr);
     auto& input_image = DetPreProcess(image);
     const cv::Size input_image_size{input_image.cols, input_image.rows},
                    original_image_size{image.cols, image.rows};
@@ -268,7 +276,11 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
     auto& output_tensor = ovalues[0];
     auto boxes =
         DetPostProcess(output_tensor, input_image_size, original_image_size);
+    LogFacade::Timing("ocr", "OCR::det", det_timer.elapsed_ms());
+    LogFacade::Info("ocr", std::format("OCR rec processed {} text boxes", boxes.size()));
     OCRFrameResult frame_result;
+    // rec stage
+    auto rec_timer = LogContext::ScopedTimer("OCR::rec", nullptr);
     // Q:为什么不批处理呢？
     // A:因为效果不好
     std::vector<Ort::Value> rec_input_tensors;
@@ -298,6 +310,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
         frame_result.results.emplace_back(box, lines[0].second,
                                           std::move(lines[0].first));
     }
+    LogFacade::Timing("ocr", "OCR::rec", rec_timer.elapsed_ms());
     return frame_result;
   }
 };

@@ -1,0 +1,19 @@
+name: Docker
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t vision-simple:ci \
+            -f docker/Dockerfile.debian-bookworm-x86_64-cpu .

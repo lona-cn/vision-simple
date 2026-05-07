@@ -1,5 +1,7 @@
 #include "Infer.h"
 
+#include "LogFacade.h"
+
 #include <magic_enum.hpp>
 #include <memory>
 #include <ranges>
@@ -51,6 +53,10 @@ const InferArgs& InferContext::args() const noexcept { return args_; }
 InferContext::CreateResult InferContext::Create(const InferFramework framework,
                                                 const InferEP ep,
                                                 InferArgs args) noexcept {
+  LogFacade::Info("infer",
+                  std::format("InferContext::Create framework={} ep={}",
+                              magic_enum::enum_name(framework),
+                              magic_enum::enum_name(ep)));
   if (!IsSupported(framework, ep)) return UNSUPPORTED(framework, ep);
   switch (framework) {
     case InferFramework::kCUSTOM_FRAMEWORK:

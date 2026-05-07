@@ -1,5 +1,8 @@
 #include "InferYOLO.h"
 
+#include "LogContext.h"
+#include "LogFacade.h"
+
 #ifdef VISION_SIMPLE_WITH_DML
 #include <dml_provider_factory.h>
 #endif
@@ -277,10 +280,15 @@ const std::vector<std::string>& InferYOLOOrtImpl::class_names() const noexcept {
 
 InferYOLO::RunResult InferYOLOOrtImpl::Run(
     const cv::Mat& image, float confidence_threshold) noexcept {
+  auto total_timer = LogContext::ScopedTimer("YOLO::Run::total",
+                                              LogFacade::TimerCallback("yolo"));
+  LogFacade::Info("yolo", "YOLO inference started");
   // PreProcess
   if (image.rows == 0 || image.cols == 0)
     return std::unexpected(VisionSimpleError{
         VisionSimpleErrorCode::kParameterError, "image is empty"});
+  auto preprocess_timer =
+      LogContext::ScopedTimer("YOLO::preprocess", nullptr);
   cv::Mat& chw = PreProcess(image);
   // auto hwc_ptr = hwc.ptr<float>();
   // auto hwc_size = hwc.channels() * hwc.cols * hwc.rows;
@@ -307,8 +315,16 @@ InferYOLO::RunResult InferYOLOOrtImpl::Run(
   }
   io_binding_.BindInput(input_name_.data(), input_value_);
   io_binding_.BindOutput(output_name_.data(), output_memory_info_);
+  LogFacade::Timing("yolo", "YOLO::preprocess",
+                    preprocess_timer.elapsed_ms());
+  // Infer
+  auto infer_timer = LogContext::ScopedTimer("YOLO::infer", nullptr);
   Ort::RunOptions run_options;
   session_->Run(run_options, io_binding_);
+  LogFacade::Timing("yolo", "YOLO::infer", infer_timer.elapsed_ms());
+  // PostProcess
+  auto postprocess_timer =
+      LogContext::ScopedTimer("YOLO::postprocess", nullptr);
   auto output_values = io_binding_.GetOutputValues();
   auto& output_value = output_values[0];
   // fp16 fp32
@@ -336,5 +352,7 @@ InferYOLO::RunResult InferYOLOOrtImpl::Run(
   auto result = filter_(std::span(output_data, output_size),
                         confidence_threshold, this->input_size_.width,
                         this->input_size_.height, image.cols, image.rows);
+  LogFacade::Timing("yolo", "YOLO::postprocess",
+                    postprocess_timer.elapsed_ms());
   return result;
 }

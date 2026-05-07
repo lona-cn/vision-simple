@@ -2,47 +2,42 @@
 #include <memory>
 #include <string>
 
+#include "LogSink.h"
 #include "VisionSimpleCommon.h"
 
 namespace vision_simple {
-enum class LogLevel:uint8_t {
-  Debug,
-  Info,
-  Warn,
-  Error,
-  Fatal
-};
 
-class Logger {
+class Logger : public LogSink {
   struct Impl;
   std::unique_ptr<Impl> impl_;
 
   Logger(const std::string& config_path);
 
-public:
+ public:
   static VSResult<std::reference_wrapper<Logger>> Instance() noexcept;
 
-  void Log(std::string_view domain, std::string_view message,
-           LogLevel log_level = LogLevel::Info) const noexcept;
+  // 实现 LogSink 接口
+  void Write(std::string_view domain, LogLevel level,
+             std::string_view message) noexcept override;
 
   void Debug(std::string_view domain, std::string_view message) const noexcept {
-    Log(domain, message, LogLevel::Debug);
+    const_cast<Logger*>(this)->Write(domain, LogLevel::Debug, message);
   }
 
   void Info(std::string_view domain, std::string_view message) const noexcept {
-    Log(domain, message, LogLevel::Info);
+    const_cast<Logger*>(this)->Write(domain, LogLevel::Info, message);
   }
 
   void Warn(std::string_view domain, std::string_view message) const noexcept {
-    Log(domain, message, LogLevel::Warn);
+    const_cast<Logger*>(this)->Write(domain, LogLevel::Warn, message);
   }
 
   void Error(std::string_view domain, std::string_view message) const noexcept {
-    Log(domain, message, LogLevel::Error);
+    const_cast<Logger*>(this)->Write(domain, LogLevel::Error, message);
   }
 
   void Fatal(std::string_view domain, std::string_view message) const noexcept {
-    Log(domain, message, LogLevel::Fatal);
+    const_cast<Logger*>(this)->Write(domain, LogLevel::Fatal, message);
   }
 };
 }
