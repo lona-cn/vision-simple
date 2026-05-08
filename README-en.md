@@ -123,8 +123,10 @@ xmake build server
 ### Run Tests
 
 ```sh
-# Build all tests
-xmake build test_vision_helper test_cvt test_common
+# Build all tests (one at a time to avoid xmake multi-target syntax issues)
+xmake build test_vision_helper
+xmake build test_cvt
+xmake build test_common
 
 # Run unit tests (no model dependencies)
 xmake run test_vision_helper

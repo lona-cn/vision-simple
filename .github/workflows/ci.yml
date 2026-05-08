@@ -33,7 +33,10 @@ jobs:
         run: xmake build server
 
       - name: Build unit tests
-        run: xmake build test_vision_helper test_cvt test_common
+        run: |
+          xmake build test_vision_helper
+          xmake build test_cvt
+          xmake build test_common
 
       - name: Run unit tests
         run: |

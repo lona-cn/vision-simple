@@ -130,8 +130,10 @@ xmake build server
 ### 运行测试
 
 ```sh
-# 构建所有测试
-xmake build test_vision_helper test_cvt test_common
+# 构建所有测试（逐个构建，避免 xmake 多目标语法兼容问题）
+xmake build test_vision_helper
+xmake build test_cvt
+xmake build test_common
 
 # 运行单元测试 (无模型依赖)
 xmake run test_vision_helper
