@@ -21,6 +21,22 @@ jobs:
         with:
           xmake-version: '2.9.7'
 
+      - name: Cache xmake packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.xmake/packages
+          key: xmake-pkgs-${{ runner.os }}-${{ hashFiles('xmake.lua', 'xmake/project.lua') }}
+          restore-keys: xmake-pkgs-${{ runner.os }}-
+
+      - name: Cache build objects
+        uses: actions/cache@v4
+        with:
+          path: build/
+          key: xmake-obj-${{ runner.os }}-${{ hashFiles('xmake.lua', 'xmake/project.lua') }}-${{ github.sha }}
+          restore-keys: |
+            xmake-obj-${{ runner.os }}-${{ hashFiles('xmake.lua', 'xmake/project.lua') }}-
+            xmake-obj-${{ runner.os }}-
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
