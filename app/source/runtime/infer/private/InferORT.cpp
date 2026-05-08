@@ -129,9 +129,8 @@ vision_simple::InferContextORT::CreateSession(std::span<uint8_t> data,
     }
 #endif
   }
+  LogFacade::Info("ort", "session created");
   try {
-    LogFacade::Info("ort", std::format("session created: threads={}",
-                                        session_options.GetIntraOpNumThreads()));
     return std::make_unique<Ort::Session>(*env_, data.data(), data.size_bytes(),
                                           session_options);
   } catch (std::exception& e) {

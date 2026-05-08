@@ -19,7 +19,7 @@ int test_error_ok() {
 int test_error_code() {
   VisionSimpleError err(VisionSimpleErrorCode::kIOError, "file not found");
   TEST_ASSERT(!static_cast<bool>(err), "IOError is falsy");
-  TEST_ASSERT_EQ(err.code, VisionSimpleErrorCode::kIOError, "error code");
+  TEST_ASSERT_EQ(static_cast<int>(err.code), static_cast<int>(VisionSimpleErrorCode::kIOError), "error code");
   TEST_PASS("VisionSimpleError code/bool");
   return 0;
 }
