@@ -90,6 +90,24 @@ int test_invalid_output() {
   TEST_PASS("CTC tensor and dictionary boundaries");
   return 0;
 }
+
+int test_nonfinite_output() {
+  const auto nan = std::numeric_limits<float>::quiet_NaN();
+  const auto infinity = std::numeric_limits<float>::infinity();
+  const std::array<std::array<float, 3>, 3> invalid{{
+      {.1f, nan, .9f},
+      {.1f, infinity, .0f},
+      {.1f, -infinity, .9f},
+  }};
+  for (const auto& logits : invalid) {
+    const auto result = DecodeOCRCTC(logits, 1, 3, dictionary, .5f);
+    TEST_ASSERT(!result, "non-finite OCR logits are rejected");
+    TEST_ASSERT(result.error().code == VisionSimpleErrorCode::kModelError,
+                "non-finite OCR logits are a model error");
+  }
+  TEST_PASS("CTC rejects NaN and infinities");
+  return 0;
+}
 }  // namespace
 
 int main() {
@@ -99,6 +117,7 @@ int main() {
   failures += test_low_confidence_timesteps();
   failures += test_empty_line();
   failures += test_invalid_output();
+  failures += test_nonfinite_output();
   std::cout << (failures ? "\n*** FAILED ***" : "\n*** ALL PASSED ***")
             << std::endl;
   return failures ? 1 : 0;
