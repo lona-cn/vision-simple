@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 
+#include "InferValidation.hpp"
 #include "VisionSimpleCommon.h"
 
 namespace vision_simple {
@@ -34,8 +35,22 @@ inline VSResult<std::pair<std::string, float>> DecodeOCRCTC(
   size_t previous = 0;
   for (size_t t = 0; t < timesteps; ++t) {
     const auto row = logits.subspan(t * classes, classes);
-    const auto maximum = std::max_element(row.begin(), row.end());
-    const size_t index = static_cast<size_t>(maximum - row.begin());
+    size_t index = 0;
+    float maximum = row.front();
+    if (!IsFinite(maximum)) {
+      return MK_VSERROR(VisionSimpleErrorCode::kModelError,
+                        "OCR recognition output contains non-finite values");
+    }
+    for (size_t c = 1; c < classes; ++c) {
+      if (!IsFinite(row[c])) {
+        return MK_VSERROR(VisionSimpleErrorCode::kModelError,
+                          "OCR recognition output contains non-finite values");
+      }
+      if (row[c] > maximum) {
+        maximum = row[c];
+        index = c;
+      }
+    }
     const bool eligible = index != 0 && index != previous;
     previous = index;  // Blank and low-confidence timesteps still fold repeats.
     if (index == 0) continue;
@@ -44,9 +59,9 @@ inline VSResult<std::pair<std::string, float>> DecodeOCRCTC(
       return MK_VSERROR(VisionSimpleErrorCode::kModelError,
                         "OCR recognition class is missing from the dictionary");
     }
-    if (!eligible || !(*maximum > confidence_threshold)) continue;
+    if (!eligible || !(maximum > confidence_threshold)) continue;
     text += character->second;
-    score_sum += *maximum;
+    score_sum += maximum;
     ++emitted;
   }
   return std::pair{std::move(text),
