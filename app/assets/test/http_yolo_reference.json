@@ -1,0 +1,8 @@
+{
+  "image": "app/assets/test/hd2.png",
+  "provenance": "Frozen before repaired C++ inference was built or run. Visually confirmed drone and central human on the 3440x1440 repository image; independent CPU ONNX FP32 pre-fix probe confirmed class IDs 10 (hd-drone) and 11 (hd-mankind). Boxes are rounded manual annotations, not regenerated from repaired output. Minimum IoU 0.65 is fixed for both FP32 and FP16.",
+  "targets": [
+    {"class_id": 10, "bbox": [1910, 365, 285, 220], "min_iou": 0.65},
+    {"class_id": 11, "bbox": [1260, 740, 540, 510], "min_iou": 0.65}
+  ]
+}
