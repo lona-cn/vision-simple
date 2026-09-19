@@ -1,7 +1,7 @@
 ﻿#include "IOUtil.h"
 
-#include <sstream>
 #include <filesystem>
+#include <sstream>
 
 std::expected<vision_simple::DataBuffer<unsigned char>,
               vision_simple::VisionSimpleError>
@@ -26,28 +26,34 @@ vision_simple::ReadAll(const std::string& path) noexcept {
 
 std::expected<std::string, vision_simple::VisionSimpleError>
 vision_simple::ReadAllString(const std::string& path) noexcept {
-  if (!std::filesystem::exists(path)) {
-    return std::unexpected(
-        VisionSimpleError{VisionSimpleErrorCode::kIOError,
-                          std::format("file not exists '{}'", path)});
-  }
-  std::ifstream file(path, std::ios::binary);
-  if (!file) {
-    return std::unexpected(
-        VisionSimpleError{VisionSimpleErrorCode::kIOError,
-                          std::format("unable to open file '{}'", path)});
-  }
-  std::stringstream file_str;
-  std::string line;
-  // TODO: optimize
-  while (std::getline(file, line)) {
-    std::string result;
-    for (char c : line) {
-      if (c != '\r') result.push_back(c);
+  try {
+    if (!std::filesystem::exists(path)) {
+      return std::unexpected(
+          VisionSimpleError{VisionSimpleErrorCode::kIOError,
+                            std::format("file not exists '{}'", path)});
     }
-    file_str << std::format("{}\n", result);
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+      return std::unexpected(
+          VisionSimpleError{VisionSimpleErrorCode::kIOError,
+                            std::format("unable to open file '{}'", path)});
+    }
+    std::stringstream file_str;
+    std::string line;
+    // TODO: optimize
+    while (std::getline(file, line)) {
+      std::string result;
+      for (char c : line) {
+        if (c != '\r') result.push_back(c);
+      }
+      file_str << std::format("{}\n", result);
+    }
+    return file_str.str();
+  } catch (const std::exception& e) {
+    return MK_VSERROR(
+        VisionSimpleErrorCode::kIOError,
+        std::format("unable to read file '{}': {}", path, e.what()));
   }
-  return file_str.str();
 }
 
 std::expected<std::vector<std::string>, vision_simple::VisionSimpleError>
