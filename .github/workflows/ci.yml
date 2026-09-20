@@ -8,13 +8,37 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    name: CPU regression (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-gcc-release
+            os: ubuntu-24.04
+            configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14
+          - name: windows-msvc-release
+            os: windows-latest
+            configure: -p windows -a x64 --toolchain=msvc --with_dml=n
+          - name: linux-gcc-asan-ubsan
+            os: ubuntu-24.04
+            configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 --policies=build.sanitizer.address:y,build.sanitizer.undefined:y
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Third-party prebuilt libraries are not instrumented. Disable only leak
+      # checking of process-global third-party state; bounds/UB checks stay fatal.
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          lfs: true
 
       - name: Setup xmake
         uses: xmake-io/github-action-setup-xmake@v1
@@ -25,25 +49,25 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.xmake/packages
-          key: xmake-pkgs-${{ runner.os }}-${{ hashFiles('xmake.lua', 'xmake/project.lua') }}
-          restore-keys: xmake-pkgs-${{ runner.os }}-
+          key: xmake-pkgs-${{ matrix.name }}-${{ hashFiles('xmake.lua', 'xmake/**/*.lua') }}
+          restore-keys: xmake-pkgs-${{ matrix.name }}-
 
       - name: Cache build objects
         uses: actions/cache@v4
         with:
           path: build/
-          key: xmake-obj-${{ runner.os }}-${{ hashFiles('xmake.lua', 'xmake/project.lua') }}-${{ github.sha }}
+          key: xmake-obj-${{ matrix.name }}-${{ hashFiles('xmake.lua', 'xmake/**/*.lua') }}-${{ github.sha }}
           restore-keys: |
-            xmake-obj-${{ runner.os }}-${{ hashFiles('xmake.lua', 'xmake/project.lua') }}-
-            xmake-obj-${{ runner.os }}-
+            xmake-obj-${{ matrix.name }}-${{ hashFiles('xmake.lua', 'xmake/**/*.lua') }}-
 
       - name: Install system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopencv-dev
+          sudo apt-get install -y g++-14 libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
 
       - name: Configure
-        run: xmake f -p linux -a x86_64 --toolchain=gcc -m release -y
+        run: xmake f ${{ matrix.configure }} -m release --with_cuda=n --with_tensorrt=n -y
 
       - name: Build server
         run: xmake build server
@@ -53,9 +77,21 @@ jobs:
           xmake build test_vision_helper
           xmake build test_cvt
           xmake build test_common
+          xmake build test_yolo_postprocess
+          xmake build test_ocr_decode
+          xmake build test_infer_inputs
 
       - name: Run unit tests
         run: |
           xmake run test_vision_helper
           xmake run test_cvt
           xmake run test_common
+          xmake run test_yolo_postprocess
+          xmake run test_ocr_decode
+          xmake run test_infer_inputs --project-root "$GITHUB_WORKSPACE"
+
+      - name: Run real-server HTTP and startup regression
+        if: matrix.name != 'linux-gcc-asan-ubsan'
+        run: |
+          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+          python scripts/test_http_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE"

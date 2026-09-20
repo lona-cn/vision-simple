@@ -2,7 +2,7 @@
 rule("auto_cp_deps_assets_configs_to_build")
 after_build(function(target)
     local binary_dirs = {"bin","lib"}
-    local binary_suffixes = {"dll","so"}
+    local binary_suffixes = {"dll","so","so.*"}
     local function TargetCopyPkgBinariesToBuild(target --[[table]])
         local target_pkgs = target:get("packages")
         local target_dir = target:targetdir()

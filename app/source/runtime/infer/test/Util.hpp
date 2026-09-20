@@ -1,14 +1,24 @@
 ﻿#pragma once
 #ifndef __VISION_SIMPLE_TEST_UTIL_H__
 #define __VISION_SIMPLE_TEST_UTIL_H__
-#include <filesystem>
-#include <fstream>
-#include <semaphore>
-#include <Infer.h>
-#include <shared_mutex>
+#include <chrono>
 #include <cstddef>
+#include <filesystem>
 #include <format>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <optional>
+#include <queue>
+#include <semaphore>
+#include <shared_mutex>
+#include <string>
+#include <system_error>
+
+#include <Infer.h>
 #include <magic_enum.hpp>
+
 #include "IOUtil.h"
 
 // ===== 测试断言宏 =====

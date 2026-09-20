@@ -1,11 +1,11 @@
 #include "Infer.h"
 
-#include "LogFacade.h"
-
+#include <limits>
 #include <magic_enum.hpp>
 #include <memory>
 #include <ranges>
 
+#include "LogFacade.h"
 #include "private/InferORT.h"
 using namespace std;
 using namespace cv;
@@ -53,20 +53,26 @@ const InferArgs& InferContext::args() const noexcept { return args_; }
 InferContext::CreateResult InferContext::Create(const InferFramework framework,
                                                 const InferEP ep,
                                                 InferArgs args) noexcept {
-  LogFacade::Info("infer",
-                  std::format("InferContext::Create framework={} ep={}",
-                              magic_enum::enum_name(framework),
-                              magic_enum::enum_name(ep)));
-  if (!IsSupported(framework, ep)) return UNSUPPORTED(framework, ep);
-  switch (framework) {
-    case InferFramework::kCUSTOM_FRAMEWORK:
-      return UNSUPPORTED(framework, ep);
-    case InferFramework::kONNXRUNTIME:
-      return std::make_unique<InferContextORT>(ep, std::move(args));
-    case InferFramework::kTVM:
-      return UNSUPPORTED(framework, ep);
-    default:
-      return UNSUPPORTED(framework, ep);
+  try {
+    LogFacade::Info("infer",
+                    std::format("InferContext::Create framework={} ep={}",
+                                magic_enum::enum_name(framework),
+                                magic_enum::enum_name(ep)));
+    if (!IsSupported(framework, ep)) return UNSUPPORTED(framework, ep);
+    switch (framework) {
+      case InferFramework::kCUSTOM_FRAMEWORK:
+        return UNSUPPORTED(framework, ep);
+      case InferFramework::kONNXRUNTIME:
+        return std::make_unique<InferContextORT>(ep, std::move(args));
+      case InferFramework::kTVM:
+        return UNSUPPORTED(framework, ep);
+      default:
+        return UNSUPPORTED(framework, ep);
+    }
+  } catch (const std::exception& e) {
+    return MK_VSERROR(
+        VisionSimpleErrorCode::kRuntimeError,
+        std::format("unable to create inference context: {}", e.what()));
   }
 }
 
@@ -74,9 +80,14 @@ InferYOLO::CreateResult InferYOLO::Create(InferContext& context,
                                           const std::string& path,
                                           YOLOVersion version,
                                           size_t device_id) noexcept {
-  auto data_result = ReadAll(path);
-  if (!data_result) return std::unexpected(std::move(data_result.error()));
-  return Create(context, data_result->span(), version, device_id);
+  try {
+    auto data_result = ReadAll(path);
+    if (!data_result) return std::unexpected(std::move(data_result.error()));
+    return Create(context, data_result->span(), version, device_id);
+  } catch (const std::exception& e) {
+    return MK_VSERROR(VisionSimpleErrorCode::kModelError,
+                      std::format("unable to load YOLO model: {}", e.what()));
+  }
 }
 
 InferOCR::CreateResult InferOCR::Create(InferContext& context,
@@ -85,19 +96,32 @@ InferOCR::CreateResult InferOCR::Create(InferContext& context,
                                         const std::string& rec_path,
                                         OCRModelType model_type,
                                         size_t device_id) noexcept {
-  auto char_dict_result = ReadAllLines(char_dict_path);
-  if (!char_dict_result)
-    return std::unexpected(std::move(char_dict_result.error()));
-  auto det_data_result = ReadAll(det_path);
-  if (!det_data_result)
-    return std::unexpected(std::move(det_data_result.error()));
-  auto rec_data_rect = ReadAll(rec_path);
-  if (!rec_data_rect) return std::unexpected(std::move(rec_data_rect.error()));
-  std::map<int, std::string> char_dict;
-  for (auto [idx, c] : std::views::enumerate(*char_dict_result))
-    char_dict.emplace(idx, c);
-  return Create(context, char_dict, det_data_result->span(),
-                rec_data_rect->span(), model_type, device_id);
+  try {
+    auto char_dict_result = ReadAllLines(char_dict_path);
+    if (!char_dict_result)
+      return std::unexpected(std::move(char_dict_result.error()));
+    auto det_data_result = ReadAll(det_path);
+    if (!det_data_result)
+      return std::unexpected(std::move(det_data_result.error()));
+    auto rec_data_rect = ReadAll(rec_path);
+    if (!rec_data_rect)
+      return std::unexpected(std::move(rec_data_rect.error()));
+    if (char_dict_result->size() >
+        static_cast<size_t>(std::numeric_limits<int>::max()))
+      return MK_VSERROR(VisionSimpleErrorCode::kModelError,
+                        "OCR character dictionary is too large");
+    std::map<int, std::string> char_dict;
+    for (size_t idx = 0; idx < char_dict_result->size(); ++idx)
+      char_dict.emplace(static_cast<int>(idx), (*char_dict_result)[idx]);
+    // Paddle's character file excludes CTC blank and the trailing space class.
+    // Blank is handled by the decoder; complete the nonblank mapping here.
+    char_dict.emplace(static_cast<int>(char_dict.size()), " ");
+    return Create(context, char_dict, det_data_result->span(),
+                  rec_data_rect->span(), model_type, device_id);
+  } catch (const std::exception& e) {
+    return MK_VSERROR(VisionSimpleErrorCode::kModelError,
+                      std::format("unable to load OCR model: {}", e.what()));
+  }
 }
 
 // InferOCR::DetResult InferOCR::Det(const cv::Mat* images, size_t count)
