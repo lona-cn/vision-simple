@@ -37,6 +37,7 @@ jobs:
 
           - name: Linux x86_64 / Clang 18 / Release
             os: ubuntu-24.04
+            xmake_version: '3.1.1'
             cache_key: linux-x86_64-clang18-libcxx-release
             package_key: linux-x86_64-clang18-libcxx-cpu
             policy: build.ccache:y
@@ -144,9 +145,9 @@ jobs:
       - name: Setup xmake and package cache
         uses: xmake-io/github-action-setup-xmake@v1
         with:
-          xmake-version: '3.1.1'
+          xmake-version: ${{ matrix.xmake_version || '2.9.7' }}
           actions-cache-folder: .xmake-tool-cache
-          actions-cache-key: xmake-3.1.1
+          actions-cache-key: xmake-${{ matrix.xmake_version || '2.9.7' }}
           package-cache: true
           package-cache-key: ${{ matrix.package_key }}
           project-path: .
