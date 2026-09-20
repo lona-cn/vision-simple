@@ -169,7 +169,7 @@ jobs:
         run: xmake f ${{ matrix.configure }} --policies=${{ matrix.policy }} -y
 
       - name: Build server
-        run: xmake build server
+        run: xmake build server || xmake -vD build server
 
       - name: Build unit tests
         if: matrix.build_tests
