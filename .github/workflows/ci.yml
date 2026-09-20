@@ -136,29 +136,42 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           submodules: recursive
           lfs: ${{ matrix.build_tests }}
 
-      - name: Setup xmake and package cache
-        uses: xmake-io/github-action-setup-xmake@v1
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a # v1
         with:
           xmake-version: ${{ matrix.xmake_version || '2.9.7' }}
           actions-cache-folder: .xmake-tool-cache
           actions-cache-key: xmake-${{ matrix.xmake_version || '2.9.7' }}
-          package-cache: true
-          package-cache-key: ${{ matrix.package_key }}
-          project-path: .
+
+      - name: Resolve xmake package path
+        id: package-path
+        run: |
+          package_path="$(xmake l -c 'import("core.package.package"); io.write(package.installdir())')"
+          printf 'path=%s\n' "$package_path" >> "$GITHUB_OUTPUT"
+
+      - name: Restore package cache
+        id: package-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.package-path.outputs.path }}
+          key: xmake-package-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package_key }}-xmake-${{ matrix.xmake_version || '2.9.7' }}--${{ hashFiles('xmake.lua', 'xmake/**/*.lua', 'app/**/xmake.lua') }}
+          restore-keys: |
+            xmake-package-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package_key }}-xmake-${{ matrix.xmake_version || '2.9.7' }}--
 
       - name: Restore compiler cache
-        uses: actions/cache@v6
+        id: compiler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: build/.build_cache
-          key: xmake-build-${{ matrix.cache_key }}-${{ hashFiles('xmake.lua', 'xmake/**/*.lua', 'app/**/xmake.lua', 'app/source/**/*.c', 'app/source/**/*.cpp', 'app/source/**/*.h', 'app/source/**/*.hpp') }}
+          key: xmake-build-v2-${{ matrix.cache_key }}--${{ hashFiles('xmake.lua', 'xmake/**/*.lua', 'app/**/xmake.lua', 'app/source/**/*.c', 'app/source/**/*.cpp', 'app/source/**/*.h', 'app/source/**/*.hpp') }}
           restore-keys: |
-            xmake-build-${{ matrix.cache_key }}-
+            xmake-build-v2-${{ matrix.cache_key }}--
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -208,3 +221,45 @@ jobs:
             *"${{ matrix.verify_pattern }}"*) ;;
             *) printf 'Expected architecture marker: %s\n' "${{ matrix.verify_pattern }}" >&2; exit 1 ;;
           esac
+
+      - name: Save package cache
+        if: github.event_name != 'pull_request' && success() && steps.package-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.package-path.outputs.path }}
+          key: ${{ steps.package-cache.outputs.cache-primary-key }}
+
+      - name: Save compiler cache
+        if: github.event_name != 'pull_request' && success() && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: build/.build_cache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Report cache restoration
+        if: always()
+        env:
+          MATRIX_NAME: ${{ matrix.name }}
+          PACKAGE_HIT: ${{ steps.package-cache.outputs.cache-hit }}
+          PACKAGE_MATCHED: ${{ steps.package-cache.outputs.cache-matched-key }}
+          COMPILER_HIT: ${{ steps.compiler-cache.outputs.cache-hit }}
+          COMPILER_MATCHED: ${{ steps.compiler-cache.outputs.cache-matched-key }}
+        run: |
+          cache_status() {
+            if [[ "$1" == "true" ]]; then
+              printf 'exact'
+            elif [[ -n "$2" ]]; then
+              printf 'fallback'
+            else
+              printf 'miss'
+            fi
+          }
+          package_status="$(cache_status "$PACKAGE_HIT" "$PACKAGE_MATCHED")"
+          compiler_status="$(cache_status "$COMPILER_HIT" "$COMPILER_MATCHED")"
+          {
+            printf '### Cache restoration — %s\n\n' "$MATRIX_NAME"
+            printf '| Cache | Status | Matched key |\n'
+            printf '| --- | --- | --- |\n'
+            printf '| Package | `%s` | `%s` |\n' "$package_status" "${PACKAGE_MATCHED:-none}"
+            printf '| Compiler | `%s` | `%s` |\n' "$compiler_status" "${COMPILER_MATCHED:-none}"
+          } >> "$GITHUB_STEP_SUMMARY"
