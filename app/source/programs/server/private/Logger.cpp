@@ -59,6 +59,7 @@ struct vision_simple::Logger::Impl {
     return loggers.find(logger_name)->second;
   }
 };
+vision_simple::Logger::~Logger() = default;
 
 vision_simple::Logger::Logger(const std::string& config_path)
   : impl_(std::make_unique<Impl>()) {

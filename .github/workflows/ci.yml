@@ -5,74 +5,175 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
-    name: CPU regression (${{ matrix.name }})
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 240
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
         include:
-          - name: linux-gcc-release
+          - name: Linux x86_64 / GCC 14 / Release
             os: ubuntu-24.04
-            configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14
-          - name: windows-msvc-release
-            os: windows-latest
-            configure: -p windows -a x64 --toolchain=msvc --with_dml=n
-          - name: linux-gcc-asan-ubsan
+            cache_key: linux-x86_64-gcc14-release
+            package_key: linux-x86_64-gcc14-release-cpu
+            policy: build.ccache:y
+            apt_packages: g++-14 libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
+            configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 -m release --with_cuda=n --with_tensorrt=n --with_rknpu=n
+            build_tests: true
+            run_http: true
+            verify_pattern: ''
+
+          - name: Linux x86_64 / Clang 18 / Release
             os: ubuntu-24.04
-            configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 --policies=build.sanitizer.address:y,build.sanitizer.undefined:y
+            xmake_version: '3.1.1'
+            cache_key: linux-x86_64-clang18-libcxx-release
+            package_key: linux-x86_64-clang18-libcxx-cpu
+            policy: build.ccache:y
+            apt_packages: clang-18 libc++-18-dev libc++abi-18-dev libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
+            configure: -p linux -a x86_64 --toolchain=clang --cc=clang-18 --cxx=clang++-18 -m release --runtimes=c++_shared --with_cuda=n --with_tensorrt=n --with_rknpu=n
+            build_tests: true
+            run_http: false
+            verify_pattern: ''
+
+          - name: Linux x86_64 / GCC 14 / ASan + UBSan
+            os: ubuntu-24.04
+            cache_key: linux-x86_64-gcc14-asan-ubsan
+            package_key: linux-x86_64-gcc14-asan-ubsan
+            policy: build.ccache:y,build.sanitizer.address:y,build.sanitizer.undefined:y
+            apt_packages: g++-14 libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
+            configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 -m release --with_cuda=n --with_tensorrt=n --with_rknpu=n
+            build_tests: true
+            run_http: false
+            verify_pattern: ''
+
+          - name: Windows x64 / MSVC / Release
+            os: windows-2022
+            cache_key: windows-x64-msvc-release
+            package_key: windows-x64-msvc-cpu
+            policy: build.ccache:y
+            apt_packages: ''
+            configure: -p windows -a x64 --toolchain=msvc -m release --runtimes=MD --with_dml=n --with_cuda=n --with_tensorrt=n
+            build_tests: true
+            run_http: true
+            verify_pattern: ''
+
+          - name: Windows x64 / MSVC / DirectML
+            os: windows-2022
+            cache_key: windows-x64-msvc-directml
+            package_key: windows-x64-msvc-directml
+            policy: build.ccache:y
+            apt_packages: ''
+            configure: -p windows -a x64 --toolchain=msvc -m release --runtimes=MD --with_dml=y --with_cuda=n --with_tensorrt=n
+            build_tests: true
+            run_http: false
+            verify_pattern: ''
+
+
+          - name: Linux ARM64 / GCC cross-build
+            os: ubuntu-24.04
+            cache_key: linux-arm64-gcc-cross
+            package_key: linux-arm64-gcc-cross
+            policy: build.ccache:y
+            apt_packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3-dev python3-numpy python3-pip python3-setuptools python3-wheel
+            configure: -p linux -a arm64 --cross=aarch64-linux-gnu- -k binary -m release --runtimes=stdc++_static --with_cuda=n --with_tensorrt=n --with_rknpu=n
+            build_tests: false
+            run_http: false
+            verify_pattern: ARM aarch64
+
+          - name: Linux ARM64 / GCC cross-build / RKNPU
+            os: ubuntu-24.04
+            cache_key: linux-arm64-gcc-cross-rknpu
+            package_key: linux-arm64-gcc-cross-rknpu
+            policy: build.ccache:y
+            apt_packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3-dev python3-numpy python3-pip python3-setuptools python3-wheel
+            configure: -p linux -a arm64 --cross=aarch64-linux-gnu- -k binary -m release --runtimes=stdc++_static --with_cuda=n --with_tensorrt=n --with_rknpu=y
+            build_tests: false
+            run_http: false
+            verify_pattern: ARM aarch64
+
+          - name: Linux ARMv7 / GCC cross-build
+            os: ubuntu-24.04
+            cache_key: linux-armv7-gcc-cross
+            package_key: linux-armv7-gcc-cross
+            policy: build.ccache:y
+            apt_packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf python3-dev python3-numpy python3-pip python3-setuptools python3-wheel
+            configure: -p linux -a arm --cross=arm-linux-gnueabihf- -k binary -m release --runtimes=stdc++_static --with_cuda=n --with_tensorrt=n --with_rknpu=n
+            build_tests: false
+            run_http: false
+            verify_pattern: ARM
+
+          - name: Linux RISC-V 64 / GCC cross-build
+            os: ubuntu-24.04
+            cache_key: linux-riscv64-gcc-cross
+            package_key: linux-riscv64-gcc-cross
+            policy: build.ccache:y
+            apt_packages: gcc-riscv64-linux-gnu g++-riscv64-linux-gnu python3-dev python3-numpy python3-pip python3-setuptools python3-wheel
+            configure: -p linux -a riscv64 --cross=riscv64-linux-gnu- -k binary -m release --runtimes=stdc++_static --with_cuda=n --with_tensorrt=n --with_rknpu=n
+            build_tests: false
+            run_http: false
+            verify_pattern: RISC-V
+
     defaults:
       run:
         shell: bash
+
     env:
-      # Third-party prebuilt libraries are not instrumented. Disable only leak
-      # checking of process-global third-party state; bounds/UB checks stay fatal.
       ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      XMAKE_ROOT: y
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
+          persist-credentials: false
           submodules: recursive
-          lfs: true
+          lfs: ${{ matrix.build_tests }}
 
-      - name: Setup xmake
+      - name: Setup xmake and package cache
         uses: xmake-io/github-action-setup-xmake@v1
         with:
-          xmake-version: '2.9.7'
+          xmake-version: ${{ matrix.xmake_version || '2.9.7' }}
+          actions-cache-folder: .xmake-tool-cache
+          actions-cache-key: xmake-${{ matrix.xmake_version || '2.9.7' }}
+          package-cache: true
+          package-cache-key: ${{ matrix.package_key }}
+          project-path: .
 
-      - name: Cache xmake packages
-        uses: actions/cache@v4
+      - name: Restore compiler cache
+        uses: actions/cache@v6
         with:
-          path: ~/.xmake/packages
-          key: xmake-pkgs-${{ matrix.name }}-${{ hashFiles('xmake.lua', 'xmake/**/*.lua') }}
-          restore-keys: xmake-pkgs-${{ matrix.name }}-
-
-      - name: Cache build objects
-        uses: actions/cache@v4
-        with:
-          path: build/
-          key: xmake-obj-${{ matrix.name }}-${{ hashFiles('xmake.lua', 'xmake/**/*.lua') }}-${{ github.sha }}
+          path: build/.build_cache
+          key: xmake-build-${{ matrix.cache_key }}-${{ hashFiles('xmake.lua', 'xmake/**/*.lua', 'app/**/xmake.lua', 'app/source/**/*.c', 'app/source/**/*.cpp', 'app/source/**/*.h', 'app/source/**/*.hpp') }}
           restore-keys: |
-            xmake-obj-${{ matrix.name }}-${{ hashFiles('xmake.lua', 'xmake/**/*.lua') }}-
+            xmake-build-${{ matrix.cache_key }}-
 
-      - name: Install system dependencies
+      - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-14 libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
+          sudo apt-get install --no-install-recommends -y ${{ matrix.apt_packages }}
 
       - name: Configure
-        run: xmake f ${{ matrix.configure }} -m release --with_cuda=n --with_tensorrt=n -y
+        run: xmake f ${{ matrix.configure }} --policies=${{ matrix.policy }} -y
 
       - name: Build server
-        run: xmake build server
+        run: xmake build server || xmake build -vD server
 
       - name: Build unit tests
+        if: matrix.build_tests
         run: |
           xmake build test_vision_helper
           xmake build test_cvt
@@ -82,6 +183,7 @@ jobs:
           xmake build test_infer_inputs
 
       - name: Run unit tests
+        if: matrix.build_tests
         run: |
           xmake run test_vision_helper
           xmake run test_cvt
@@ -91,7 +193,18 @@ jobs:
           xmake run test_infer_inputs --project-root "$GITHUB_WORKSPACE"
 
       - name: Run real-server HTTP and startup regression
-        if: matrix.name != 'linux-gcc-asan-ubsan'
+        if: matrix.run_http
         run: |
           server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
           python scripts/test_http_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE"
+
+      - name: Verify cross-built server architecture
+        if: matrix.verify_pattern != ''
+        run: |
+          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+          description="$(file "$server")"
+          printf '%s\n' "$description"
+          case "$description" in
+            *"${{ matrix.verify_pattern }}"*) ;;
+            *) printf 'Expected architecture marker: %s\n' "${{ matrix.verify_pattern }}" >&2; exit 1 ;;
+          esac
