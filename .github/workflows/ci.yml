@@ -79,16 +79,6 @@ jobs:
             run_http: false
             verify_pattern: ''
 
-          - name: Linux x86_64 / GCC 14 / CUDA + TensorRT
-            os: ubuntu-24.04
-            cache_key: linux-x86_64-gcc14-cuda-tensorrt
-            package_key: linux-x86_64-gcc14-cuda-tensorrt
-            policy: build.ccache:y
-            apt_packages: g++-14 libopencv-dev python3-dev python3-pip python3-setuptools python3-wheel
-            configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 -m release --with_cuda=y --with_tensorrt=y --with_rknpu=n
-            build_tests: false
-            run_http: false
-            verify_pattern: ''
 
           - name: Linux ARM64 / GCC cross-build
             os: ubuntu-24.04
