@@ -14,6 +14,8 @@ class Logger : public LogSink {
   Logger(const std::string& config_path);
 
  public:
+  ~Logger() override;
+
   static VSResult<std::reference_wrapper<Logger>> Instance() noexcept;
 
   // 实现 LogSink 接口

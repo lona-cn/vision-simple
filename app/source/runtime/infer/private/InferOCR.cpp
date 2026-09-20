@@ -313,6 +313,7 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
     return frame_result;
   }
 };
+vision_simple::InferOCROrtPaddleImpl::~InferOCROrtPaddleImpl() = default;
 
 vision_simple::InferOCROrtPaddleImpl::InferOCROrtPaddleImpl(
     InferContextORT& ort_ctx, OCRModelType model_type,
