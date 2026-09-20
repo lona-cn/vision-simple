@@ -15,8 +15,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-context:
+    name: Prepare release context
+    runs-on: ubuntu-24.04
+    outputs:
+      release_date: ${{ steps.release.outputs.release_date }}
+      release_time: ${{ steps.release.outputs.release_time }}
+      release_timestamp: ${{ steps.release.outputs.release_timestamp }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - name: Generate release identifiers
+        id: release
+        run: |
+          timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          release_date="${timestamp:0:4}${timestamp:5:2}${timestamp:8:2}"
+          release_time="${timestamp:11:2}${timestamp:14:2}"
+          release_tag="build-${release_date}-${release_time}-${GITHUB_SHA:0:8}-r${GITHUB_RUN_ATTEMPT}"
+          {
+            printf 'release_date=%s\n' "$release_date"
+            printf 'release_time=%s\n' "$release_time"
+            printf 'release_timestamp=%s\n' "$timestamp"
+            printf 'release_tag=%s\n' "$release_tag"
+          } >> "$GITHUB_OUTPUT"
+
   build-and-test:
     name: ${{ matrix.name }}
+    needs: release-context
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
     strategy:
@@ -34,6 +58,10 @@ jobs:
             build_tests: true
             run_http: true
             verify_pattern: ''
+            publish: true
+            release_platform: linux
+            release_arch: x86_64
+            release_variant: gcc14-cpu
 
           - name: Linux x86_64 / Clang 18 / Release
             os: ubuntu-24.04
@@ -46,6 +74,7 @@ jobs:
             build_tests: true
             run_http: false
             verify_pattern: ''
+            publish: false
 
           - name: Linux x86_64 / GCC 14 / ASan + UBSan
             os: ubuntu-24.04
@@ -57,6 +86,7 @@ jobs:
             build_tests: true
             run_http: false
             verify_pattern: ''
+            publish: false
 
           - name: Windows x64 / MSVC / Release
             os: windows-2022
@@ -68,6 +98,10 @@ jobs:
             build_tests: true
             run_http: true
             verify_pattern: ''
+            publish: true
+            release_platform: windows
+            release_arch: x64
+            release_variant: msvc-cpu
 
           - name: Windows x64 / MSVC / DirectML
             os: windows-2022
@@ -79,6 +113,10 @@ jobs:
             build_tests: true
             run_http: false
             verify_pattern: ''
+            publish: true
+            release_platform: windows-directml
+            release_arch: x64
+            release_variant: msvc-directml
 
 
           - name: Linux ARM64 / GCC cross-build
@@ -91,6 +129,10 @@ jobs:
             build_tests: false
             run_http: false
             verify_pattern: ARM aarch64
+            publish: true
+            release_platform: linux
+            release_arch: arm64
+            release_variant: gcc-cpu
 
           - name: Linux ARM64 / GCC cross-build / RKNPU
             os: ubuntu-24.04
@@ -102,6 +144,10 @@ jobs:
             build_tests: false
             run_http: false
             verify_pattern: ARM aarch64
+            publish: true
+            release_platform: linux-rknpu
+            release_arch: arm64
+            release_variant: gcc-rknpu
 
           - name: Linux ARMv7 / GCC cross-build
             os: ubuntu-24.04
@@ -113,6 +159,10 @@ jobs:
             build_tests: false
             run_http: false
             verify_pattern: ARM
+            publish: true
+            release_platform: linux
+            release_arch: armv7
+            release_variant: gcc-cpu
 
           - name: Linux RISC-V 64 / GCC cross-build
             os: ubuntu-24.04
@@ -124,6 +174,10 @@ jobs:
             build_tests: false
             run_http: false
             verify_pattern: RISC-V
+            publish: true
+            release_platform: linux
+            release_arch: riscv64
+            release_variant: gcc-cpu
 
     defaults:
       run:
@@ -141,6 +195,10 @@ jobs:
           persist-credentials: false
           submodules: recursive
           lfs: ${{ matrix.build_tests }}
+
+      - name: Test release tooling
+        if: matrix.cache_key == 'linux-x86_64-gcc14-release'
+        run: python scripts/test_release_artifacts.py
 
       - name: Setup xmake
         uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a # v1
@@ -222,6 +280,42 @@ jobs:
             *) printf 'Expected architecture marker: %s\n' "${{ matrix.verify_pattern }}" >&2; exit 1 ;;
           esac
 
+      - name: Package release artifacts
+        if: matrix.publish && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          ARCHIVE_NAME: vision_simple-${{ matrix.release_platform }}-${{ matrix.release_arch }}-${{ needs.release-context.outputs.release_date }}-${{ needs.release-context.outputs.release_time }}-UTF8.zip
+          BUILD_NAME: ${{ matrix.name }}
+          CONFIGURE_ARGS: ${{ matrix.configure }}
+          RELEASE_ARCH: ${{ matrix.release_arch }}
+          RELEASE_PLATFORM: ${{ matrix.release_platform }}
+          RELEASE_TIMESTAMP: ${{ needs.release-context.outputs.release_timestamp }}
+          RELEASE_VARIANT: ${{ matrix.release_variant }}
+          XMAKE_VERSION: ${{ matrix.xmake_version || '2.9.7' }}
+        run: |
+          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+          runtime="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('runtime'):targetfile()))")"
+          python scripts/release_artifacts.py pack \
+            --server "$server" \
+            --runtime "$runtime" \
+            --output "$GITHUB_WORKSPACE/release-assets/$ARCHIVE_NAME" \
+            --platform "$RELEASE_PLATFORM" \
+            --arch "$RELEASE_ARCH" \
+            --variant "$RELEASE_VARIANT" \
+            --commit "$GITHUB_SHA" \
+            --timestamp "$RELEASE_TIMESTAMP" \
+            --build-name "$BUILD_NAME" \
+            --xmake-version "$XMAKE_VERSION" \
+            --configure "$CONFIGURE_ARGS"
+
+      - name: Upload release archive
+        if: matrix.publish && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          path: release-assets/vision_simple-${{ matrix.release_platform }}-${{ matrix.release_arch }}-${{ needs.release-context.outputs.release_date }}-${{ needs.release-context.outputs.release_time }}-UTF8.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Save package cache
         if: github.event_name != 'pull_request' && success() && steps.package-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -263,3 +357,56 @@ jobs:
             printf '| Package | `%s` | `%s` |\n' "$package_status" "${PACKAGE_MATCHED:-none}"
             printf '| Compiler | `%s` | `%s` |\n' "$compiler_status" "${COMPILER_MATCHED:-none}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Publish release
+    needs: [release-context, build-and-test]
+    if: success() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: vision_simple-*-UTF8.zip
+          path: release-assets
+          merge-multiple: true
+          skip-decompress: true
+
+      - name: Generate release notes and checksums
+        env:
+          RELEASE_TIMESTAMP: ${{ needs.release-context.outputs.release_timestamp }}
+        run: |
+          git log -1 --format=%B "$GITHUB_SHA" > release-assets/commit-message.txt
+          python scripts/release_artifacts.py notes \
+            --assets-dir release-assets \
+            --commit-message release-assets/commit-message.txt \
+            --output release-notes.md \
+            --checksums release-assets/SHA256SUMS.txt \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --timestamp "$RELEASE_TIMESTAMP" \
+            --commit "$GITHUB_SHA" \
+            --expected-count 7
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DATE: ${{ needs.release-context.outputs.release_date }}
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          RELEASE_TIME: ${{ needs.release-context.outputs.release_time }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            release-assets/vision_simple-*-UTF8.zip \
+            release-assets/SHA256SUMS.txt \
+            --target "$GITHUB_SHA" \
+            --title "vision-simple ${RELEASE_DATE} ${RELEASE_TIME} UTC" \
+            --notes-file release-notes.md \
+            --latest
