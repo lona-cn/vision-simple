@@ -144,9 +144,9 @@ jobs:
       - name: Setup xmake and package cache
         uses: xmake-io/github-action-setup-xmake@v1
         with:
-          xmake-version: '2.9.7'
+          xmake-version: '3.1.1'
           actions-cache-folder: .xmake-tool-cache
-          actions-cache-key: xmake-2.9.7
+          actions-cache-key: xmake-3.1.1
           package-cache: true
           package-cache-key: ${{ matrix.package_key }}
           project-path: .
