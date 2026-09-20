@@ -33,7 +33,7 @@ package("onnxruntime-git")
         local build_type = package:debug() and "Debug" or "Release"
         local build_cmd = format('./build.sh --config %s --parallel --compile_no_warning_as_error --skip_submodule_sync --allow_running_as_root --skip_tests --build_dir build',build_type)
         local install_to = package:installdir()
-        local common_cmake_defines = "onnxruntime_ENABLE_PYTHON=OFF onnxruntime_ENABLE_CPUINFO=OFF onnxruntime_BUILD_SHARED_LIB=ON onnxruntime_DEV_MODE=OFF onnxruntime_GCC_STATIC_CPP_RUNTIME=ON protobuf_BUILD_SHARED_LIBS=OFF protobuf_WITH_ZLIB=OFF CMAKE_INSTALL_PREFIX="..install_to
+        local common_cmake_defines = "onnxruntime_ENABLE_PYTHON=OFF onnxruntime_ENABLE_CPUINFO=OFF onnxruntime_BUILD_SHARED_LIB=ON onnxruntime_BUILD_UNIT_TESTS=OFF onnxruntime_DEV_MODE=OFF onnxruntime_GCC_STATIC_CPP_RUNTIME=ON protobuf_BUILD_SHARED_LIBS=OFF protobuf_WITH_ZLIB=OFF CMAKE_INSTALL_PREFIX="..install_to
         if package:config("training_api") then
             common_cmake_defines = common_cmake_defines.." --enable_training_apis --enable_training_ops"
         end
