@@ -1,177 +1,35 @@
 ﻿#pragma once
-#include <span>
-#if defined(__x86_64__)
-#include <immintrin.h>
-#endif
 #include <onnxruntime_cxx_api.h>
 
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <opencv2/opencv.hpp>
+#include <span>
 
 namespace vision_simple {
-template <typename From, typename To>
-  requires std::is_default_constructible_v<From> &&
-           std::is_default_constructible_v<To>
-class DataConverter {
-  uint8_t step_;
-  std::function<void(const From* from_ptr, To* to_ptr)> block_cvt_;
-  std::vector<std::remove_const_t<From>> temp_input_;
-  std::vector<std::remove_const_t<To>> temp_output_;
+class Cvt {
+  Cvt() = delete;
 
  public:
-  using CVT_FUNC = decltype(block_cvt_);
+  static void cvt(std::span<const float> from,
+                  Ort::Float16_t* output) noexcept {
+    for (size_t i = 0; i < from.size(); ++i)
+      output[i] = Ort::Float16_t(from[i]);
+  }
 
-  DataConverter(uint8_t step_, CVT_FUNC batch_cvt)
-      : step_(step_),
-        block_cvt_(std::move(batch_cvt)),
-        temp_input_(step_),
-        temp_output_(step_) {}
-
-  void operator()(std::span<const From> from, To* output) noexcept {
-    const auto size = from.size();
-    auto* from_ptr = from.data();
-    // 主体并行处理部分
-    // #pragma omp parallel for schedule(guided)
-    for (int64_t i = 0; i < static_cast<int64_t>(size / step_) * step_;
-         i += step_) {
-      block_cvt_(from_ptr + i, output + i);
-    }
-    // 边界处理部分，单线程完成，避免多线程争用资源
-    const int remaining = size % step_;
-    if (remaining > 0) {
-      const int64_t offset = size - remaining;
-      // 拷贝剩余元素
-      // std::copy_n(from_ptr + offset, remaining, temp_input_.data());
-      std::memcpy(temp_input_.data(), from_ptr + offset,
-                  remaining * sizeof(From));
-      // 转换剩余元素
-      block_cvt_(temp_input_.data(), temp_output_.data());
-      // 拷贝结果
-      // std::copy_n(temp_output_.data(), remaining,
-      // reinterpret_cast<To*>(output + offset));
-      std::memcpy(output + offset, temp_output_.data(), remaining * sizeof(To));
-    }
+  static void cvt(std::span<const Ort::Float16_t> from,
+                  float* output) noexcept {
+    for (size_t i = 0; i < from.size(); ++i) output[i] = from[i].ToFloat();
   }
 };
 
-class Cvt {
-  Cvt() = delete;
-  static inline DataConverter<float, Ort::Float16_t> fp32tofp16{
-      16, [](const float* from, Ort::Float16_t* to) {
-#if defined(__x86_64__)
-        _mm_prefetch(reinterpret_cast<char const*>(from) + 64, _MM_HINT_T0);
-        for (uint8_t i = 0, offset = 0; i < 2; ++i, offset = i * 8) {
-          __m256 float32_vec = _mm256_loadu_ps(from + offset);  // 加载8个float
-          __m128i float16_vec = _mm256_cvtps_ph(
-              float32_vec, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-          _mm_storeu_si128(reinterpret_cast<__m128i*>(to + offset),
-                           float16_vec);  // 存储8个Float16
-        }
-#endif
-      }};
-
-  static inline DataConverter<Ort::Float16_t, float> fp16tofp32{
-      32, [](const Ort::Float16_t* from, float* to) {
-#if defined(__x86_64__)
-        _mm_prefetch(reinterpret_cast<char const*>(from) + 64, _MM_HINT_T0);
-        for (uint8_t i = 0, offset = 0; i < 4; ++i, offset = i * 8) {
-          // 加载8个Float16
-          __m128i float16_vec =
-              _mm_loadu_si128(reinterpret_cast<const __m128i*>(from + offset));
-          __m256 float32_vec = _mm256_cvtph_ps(float16_vec);  // 转换为Float32
-          _mm256_storeu_ps(to + offset, float32_vec);         // 存储结果
-        }
-#endif
-      }};
-
-  static inline DataConverter<uint8_t, Ort::Float16_t> u8tofp16_normalized{
-      16, [scale_factor = 1.0f / 255.0f](const uint8_t* from,
-                                                  Ort::Float16_t* to) {
-#if defined(__x86_64__)
-        auto scale = _mm256_set1_ps(scale_factor);
-        // TODO: fixit
-        //  加载16个uint8
-        __m128i v0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(from));
-        // 扩展为uint16
-        __m256i v0_lo = _mm256_cvtepu8_epi16(v0);
-        // 转换为浮点数
-        __m256 f0 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_unpacklo_epi16(
-                                      v0_lo, _mm256_setzero_si256())),
-                                  scale);
-        __m256 f1 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_unpackhi_epi16(
-                                      v0_lo, _mm256_setzero_si256())),
-                                  scale);
-        // 转换为fp16 (F16C指令)
-        __m128i h0 = _mm256_cvtps_ph(f0, 0);
-        __m128i h1 = _mm256_cvtps_ph(f1, 0);
-        // 存储结果
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(to), h0);
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(to + 8), h1);
-#endif
-      }};
-  static inline DataConverter<uint8_t, float> u8tofp32_normalized{
-      32,
-      [scale_factor = 1.0f / 255.0f](const uint8_t* from, float* to) {
-#if defined(__x86_64__)
-        auto scale = _mm256_set1_ps(1.0f / 255.0f);
-        // TODO: fixit
-        //  加载32字节数据
-        __m256i v0 = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(from));  // 低16字节
-        __m256i v1 = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(from + 16));  // 高16字节
-
-        // 将uint8扩展为uint16
-        __m256i v0_lo = _mm256_unpacklo_epi8(v0, _mm256_setzero_si256());
-        __m256i v0_hi = _mm256_unpackhi_epi8(v0, _mm256_setzero_si256());
-        __m256i v1_lo = _mm256_unpacklo_epi8(v1, _mm256_setzero_si256());
-        __m256i v1_hi = _mm256_unpackhi_epi8(v1, _mm256_setzero_si256());
-
-        // 转换为浮点数
-        __m256 f0_lo = _mm256_cvtepi32_ps(
-            _mm256_unpacklo_epi16(v0_lo, _mm256_setzero_si256()));
-        __m256 f0_hi = _mm256_cvtepi32_ps(
-            _mm256_unpackhi_epi16(v0_hi, _mm256_setzero_si256()));
-        __m256 f1_lo = _mm256_cvtepi32_ps(
-            _mm256_unpacklo_epi16(v1_lo, _mm256_setzero_si256()));
-        __m256 f1_hi = _mm256_cvtepi32_ps(
-            _mm256_unpackhi_epi16(v1_hi, _mm256_setzero_si256()));
-
-        // 缩放到[0.0, 1.0]
-        f0_lo = _mm256_mul_ps(f0_lo, scale);
-        f0_hi = _mm256_mul_ps(f0_hi, scale);
-        f1_lo = _mm256_mul_ps(f1_lo, scale);
-        f1_hi = _mm256_mul_ps(f1_hi, scale);
-
-        // 存储结果
-        _mm256_storeu_ps(to, f0_lo);
-        _mm256_storeu_ps(to + 8, f0_hi);
-        _mm256_storeu_ps(to + 16, f1_lo);
-        _mm256_storeu_ps(to + 24, f1_hi);
-#endif
-      }};
-
- public:
-  // uint8_t->fp16
-  static void cvt(std::span<const uint8_t> from,
-                  Ort::Float16_t* output) noexcept {
-    // TODO
-  }
-
-  static void cvt(std::span<const uint8_t> from, float* output) noexcept {
-    // TODO
-  }
-
-  // fp32->fp16
-  static void cvt(std::span<const float> from,
-                  Ort::Float16_t* output) noexcept {
-    return fp32tofp16(from, output);
-  }
-
-  // fp16->fp32
-  static void cvt(std::span<const Ort::Float16_t> from,
-                  float* output) noexcept {
-    return fp16tofp32(from, output);
-  }
+struct LetterboxTransform {
+  cv::Size original_size{}, target_size{}, resized_size{};
+  double gain_x = 0, gain_y = 0;
+  int left = 0, top = 0;
 };
 
 class VisionHelper {
@@ -182,32 +40,42 @@ class VisionHelper {
   VisionHelper() = default;
 
   cv::Mat& Letterbox(const cv::Mat& src, const cv::Size& target_size,
-                     const cv::Scalar& color = cv::Scalar(0, 0, 0)) noexcept {
-    const float scale = std::min(
-        static_cast<float>(target_size.width) / static_cast<float>(src.cols),
-        static_cast<float>(target_size.height) / static_cast<float>(src.rows));
-    const int new_width =
-        static_cast<int>(static_cast<float>(src.cols) * scale);
-    const int new_height =
-        static_cast<int>(static_cast<float>(src.rows) * scale);
-    resize(src, letterbox_resized_image_, {new_width, new_height});
-    if (letterbox_dst_image_.rows != target_size.height ||
-        letterbox_dst_image_.cols != target_size.width) {
-      letterbox_dst_image_ =
-          cv::Mat::zeros(target_size.height, target_size.width, src.type());
+                     LetterboxTransform& transform,
+                     const cv::Scalar& color = cv::Scalar(0, 0, 0)) {
+    transform = {};
+    if (src.empty() || src.dims != 2 || src.cols <= 0 || src.rows <= 0 ||
+        target_size.width <= 0 || target_size.height <= 0) {
+      letterbox_dst_image_.release();
+      return letterbox_dst_image_;
     }
+    const double scale =
+        std::min(static_cast<double>(target_size.width) / src.cols,
+                 static_cast<double>(target_size.height) / src.rows);
+    const int new_width = static_cast<int>(src.cols * scale);
+    const int new_height = static_cast<int>(src.rows * scale);
+    if (new_width <= 0 || new_height <= 0) {
+      letterbox_dst_image_.release();
+      return letterbox_dst_image_;
+    }
+    resize(src, letterbox_resized_image_, {new_width, new_height});
+    letterbox_dst_image_.create(target_size, src.type());
     letterbox_dst_image_.setTo(color);
-    int top = (target_size.height - new_height) / 2;
-    int left = (target_size.width - new_width) / 2;
+    const int top = (target_size.height - new_height) / 2;
+    const int left = (target_size.width - new_width) / 2;
     letterbox_resized_image_.copyTo(
-        letterbox_dst_image_(cv::Rect(left, top, letterbox_resized_image_.cols,
-                                      letterbox_resized_image_.rows)));
-
+        letterbox_dst_image_(cv::Rect(left, top, new_width, new_height)));
+    transform = {src.size(),
+                 target_size,
+                 {new_width, new_height},
+                 static_cast<double>(new_width) / src.cols,
+                 static_cast<double>(new_height) / src.rows,
+                 left,
+                 top};
     return letterbox_dst_image_;
   }
 
   template <typename T>
-  void HWC2CHW_BGR2RGB(const cv::Mat& from, cv::Mat& to) noexcept {
+  void HWC2CHW_BGR2RGB(const cv::Mat& from, cv::Mat& to) {
     constexpr int channel_mapper[3] = {2, 1, 0};
     size_t width = from.cols, height = from.rows;
     split(from, channels_);
@@ -220,51 +88,55 @@ class VisionHelper {
     }
   }
 
-  static cv::Rect ScaleCoords(const cv::Size& image_shape, cv::Rect coords,
-                              const cv::Size& image_original_shape,
-                              bool clip) noexcept {
-    cv::Rect result;
-    float gain = std::min(static_cast<float>(image_shape.height) /
-                              static_cast<float>(image_original_shape.height),
-                          static_cast<float>(image_shape.width) /
-                              static_cast<float>(image_original_shape.width));
-
-    int padX = static_cast<int>(std::round(
-        (image_shape.width - image_original_shape.width * gain) / 2.0f));
-    int padY = static_cast<int>(std::round(
-        (image_shape.height - image_original_shape.height * gain) / 2.0f));
-
-    result.x = static_cast<int>(std::round((coords.x - padX) / gain));
-    result.y = static_cast<int>(std::round((coords.y - padY) / gain));
-    result.width = static_cast<int>(std::round(coords.width / gain));
-    result.height = static_cast<int>(std::round(coords.height / gain));
-
-    if (clip) {
-      result.x = std::clamp(result.x, 0, image_original_shape.width);
-      result.y = std::clamp(result.y, 0, image_original_shape.height);
-      result.width =
-          std::clamp(result.width, 0, image_original_shape.width - result.x);
-      result.height =
-          std::clamp(result.height, 0, image_original_shape.height - result.y);
-    }
-    return result;
+  static cv::Rect ScaleCoords(const LetterboxTransform& transform,
+                              const cv::Vec4f& xyxy) noexcept {
+    // Bit checks remain reliable under the release fast floating-point mode.
+    const auto finite = [](double value) {
+      return (std::bit_cast<uint64_t>(value) & UINT64_C(0x7ff0000000000000)) !=
+             UINT64_C(0x7ff0000000000000);
+    };
+    if (transform.original_size.width <= 0 ||
+        transform.original_size.height <= 0 || !finite(transform.gain_x) ||
+        !finite(transform.gain_y) || transform.gain_x <= 0 ||
+        transform.gain_y <= 0)
+      return {};
+    for (float value : xyxy.val)
+      if ((std::bit_cast<uint32_t>(value) & 0x7f800000u) == 0x7f800000u)
+        return {};
+    if (xyxy[2] <= xyxy[0] || xyxy[3] <= xyxy[1]) return {};
+    const auto restore = [](float value, int pad, double gain, int limit) {
+      return static_cast<int>(
+          std::round(std::clamp((static_cast<double>(value) - pad) / gain, 0.0,
+                                static_cast<double>(limit))));
+    };
+    const int left = restore(xyxy[0], transform.left, transform.gain_x,
+                             transform.original_size.width);
+    const int top = restore(xyxy[1], transform.top, transform.gain_y,
+                            transform.original_size.height);
+    const int right = restore(xyxy[2], transform.left, transform.gain_x,
+                              transform.original_size.width);
+    const int bottom = restore(xyxy[3], transform.top, transform.gain_y,
+                               transform.original_size.height);
+    if (right <= left || bottom <= top) return {};
+    return {left, top, right - left, bottom - top};
   }
 
-  double ComputeIOU(const cv::Rect& rect1, const cv::Rect& rect2) {
-    // 计算交集
-    cv::Rect intersection = rect1 & rect2;
-
-    // 计算并集
-    cv::Rect union_rect = rect1 | rect2;
-
-    // 交集面积
-    double intersectionArea = intersection.area();
-
-    // 并集面积
-    double unionArea = union_rect.area();
-
-    // 计算IOU
-    return intersectionArea / unionArea;
+  double ComputeIOU(const cv::Rect& rect1, const cv::Rect& rect2) noexcept {
+    if (rect1.width <= 0 || rect1.height <= 0 || rect2.width <= 0 ||
+        rect2.height <= 0)
+      return 0;
+    const int64_t left = std::max<int64_t>(rect1.x, rect2.x);
+    const int64_t top = std::max<int64_t>(rect1.y, rect2.y);
+    const int64_t right = std::min(int64_t{rect1.x} + rect1.width,
+                                   int64_t{rect2.x} + rect2.width);
+    const int64_t bottom = std::min(int64_t{rect1.y} + rect1.height,
+                                    int64_t{rect2.y} + rect2.height);
+    const double intersection =
+        static_cast<double>(std::max<int64_t>(0, right - left)) *
+        static_cast<double>(std::max<int64_t>(0, bottom - top));
+    const double area1 = static_cast<double>(rect1.width) * rect1.height;
+    const double area2 = static_cast<double>(rect2.width) * rect2.height;
+    return intersection / (area1 + area2 - intersection);
   }
 
   // 根据IOU阈值进行过滤

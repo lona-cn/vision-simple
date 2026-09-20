@@ -9,10 +9,15 @@ paths:
     post:
       summary: YOLO推理
       deprecated: false
-      description: ''
+      description: >-
+        整批成功或整批失败。按请求校验、模型查找/加载、全部图片解码、逐图推理、
+        序列化的顺序处理，仅返回首先失败的阶段及该阶段最小图片索引。
+        HTTP 200 的 results 长度与 images 相同且顺序一致；无目标返回该图的空数组。
+        有效模型允许 images 为空数组。错误响应不含部分结果。
       tags: []
       parameters: []
       requestBody:
+        required: true
         content:
           application/json:
             schema:
@@ -87,6 +92,18 @@ paths:
                             - 394
                             - 478
           headers: {}
+        '400':
+          description: invalid_request、unknown_model 或带图片索引的 invalid_image。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+        '500':
+          description: model_config_failed、model_load_failed、带图片索引的 inference_failed 或 internal_error。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
       security: []
   /v0/infer/models:
     get:
@@ -109,18 +126,29 @@ paths:
                     yolo:
                       - hd2-yolo11n-fp16
                       - hd2-yolo11n-fp32
-                    ppocr:
+                    ocr:
                       - ppocr-v4
           headers: {}
+        '500':
+          description: model_config_failed 或序列化失败的 internal_error。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
       security: []
   /v0/infer/ocr:
     post:
       summary: OCR推理
       deprecated: false
-      description: ''
+      description: >-
+        整批成功或整批失败。按请求校验、模型查找/加载、全部图片解码、逐图推理、
+        序列化的顺序处理，仅返回首先失败的阶段及该阶段最小图片索引。
+        HTTP 200 的 results 长度与 images 相同且顺序一致；每张图片对应的结果数组可为空。
+        有效模型允许 images 为空数组。错误响应不含部分结果。
       tags: []
       parameters: []
       requestBody:
+        required: true
         content:
           application/json:
             schema:
@@ -167,9 +195,61 @@ paths:
                             - 1001
                             - 25
           headers: {}
+        '400':
+          description: invalid_request、unknown_model 或带图片索引的 invalid_image。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+        '500':
+          description: model_config_failed、model_load_failed、带图片索引的 inference_failed 或 internal_error。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
       security: []
 components:
   schemas:
+    InferError:
+      type: object
+      description: >-
+        v0 错误状态和正文统一为此结构，替代旧版 HTTP 200/纯文本错误。
+        客户端应按 code 分支，不依赖 message 文案。第三方异常和内部路径仅记录日志。
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - image_index
+          properties:
+            code:
+              type: string
+              enum:
+                - invalid_request
+                - unknown_model
+                - invalid_image
+                - model_load_failed
+                - model_config_failed
+                - inference_failed
+                - internal_error
+            message:
+              type: string
+              description: 人类可读的通用错误说明，不作为稳定判断依据。
+            image_index:
+              type: integer
+              minimum: 0
+              nullable: true
+              description: >-
+                invalid_image 和 inference_failed 为原始 images 的零起始索引，
+                同阶段多个失败时取最小索引。其他错误固定为 null。
+      example:
+        error:
+          code: invalid_image
+          message: Image cannot be decoded
+          image_index: 1
     YOLODetectedObject:
       type: object
       properties:
@@ -198,6 +278,7 @@ components:
             type: string
         results:
           type: array
+          description: 与输入 images 等长、同序；每项对应一张图片，可为空数组。
           items:
             type: array
             items:
@@ -223,11 +304,13 @@ components:
       properties:
         model:
           type: string
+          minLength: 1
         images:
           type: array
+          description: 允许空数组；必须提供此字段，且所有元素必须为字符串。
           items:
             type: string
-            description: base64编码的图片
+            description: 标准 Base64 图片编码；不接受空串、空白、data URI、URL-safe 字符或不规范 padding。
       required:
         - model
         - images
@@ -237,6 +320,7 @@ components:
       properties:
         results:
           type: array
+          description: 与输入 images 等长、同序；每项对应一张图片，可为空数组。
           items:
             type: array
             items:
