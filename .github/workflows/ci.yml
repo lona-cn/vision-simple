@@ -40,8 +40,8 @@ jobs:
             cache_key: linux-x86_64-clang18-release
             package_key: linux-x86_64-clang18-cpu
             policy: build.ccache:y
-            apt_packages: clang-18 libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
-            configure: -p linux -a x86_64 --toolchain=clang --cc=clang-18 --cxx=clang++-18 -m release --with_cuda=n --with_tensorrt=n --with_rknpu=n
+            apt_packages: clang-18 libc++-18-dev libc++abi-18-dev libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
+            configure: -p linux -a x86_64 --toolchain=clang --cc=clang-18 --cxx=clang++-18 -m release --runtimes=c++_shared --with_cuda=n --with_tensorrt=n --with_rknpu=n
             build_tests: true
             run_http: false
             verify_pattern: ''
@@ -63,7 +63,7 @@ jobs:
             package_key: windows-x64-msvc-cpu
             policy: build.ccache:y
             apt_packages: ''
-            configure: -p windows -a x64 --toolchain=msvc -m release --with_dml=n --with_cuda=n --with_tensorrt=n
+            configure: -p windows -a x64 --toolchain=msvc -m release --runtimes=MD --with_dml=n --with_cuda=n --with_tensorrt=n
             build_tests: true
             run_http: true
             verify_pattern: ''
@@ -74,7 +74,7 @@ jobs:
             package_key: windows-x64-msvc-directml
             policy: build.ccache:y
             apt_packages: ''
-            configure: -p windows -a x64 --toolchain=msvc -m release --with_dml=y --with_cuda=n --with_tensorrt=n
+            configure: -p windows -a x64 --toolchain=msvc -m release --runtimes=MD --with_dml=y --with_cuda=n --with_tensorrt=n
             build_tests: true
             run_http: false
             verify_pattern: ''
