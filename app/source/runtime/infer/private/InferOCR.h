@@ -15,6 +15,7 @@ namespace vision_simple
                                        std::map<int, std::string> char_dict,
                                        std::unique_ptr<Ort::Session> det,
                                        std::unique_ptr<Ort::Session> rec);
+        ~InferOCROrtPaddleImpl() override;
 
         OCRModelType model_type() const noexcept override;
         RunResult Run(const cv::Mat& image, float confidence_threshold) noexcept override;
