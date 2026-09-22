@@ -31,6 +31,8 @@
 
 `vision-simple` 是一个基于 C++23 的跨平台视觉推理库，旨在提供 **开箱即用** 的推理功能。通过 Docker用户可以快速搭建推理服务。该库目前支持常见的 YOLO 系列（包括 YOLOv10、YOLOv11 和 YOLO26），以及部分 OCR 模型（如 `PaddleOCR`）。**内建 HTTP API** 使得服务更加便捷。此外，`vision-simple` 采用 `ONNXRuntime` 引擎，支持多种 Execution Provider，如 `DirectML`、`CUDA`、`TensorRT`，并可与特定硬件设备（如 RockChip 的 RKNPU）兼容，提供更高效的推理性能。
 
+**快速入口**：[YOLO26 上手与兼容性](#yolo26yolov26) · [模型配置](#任务注册与统一模型配置) · [构建项目](#构建项目) · [运行测试](#运行测试)
+
 
 ## <div align="center">🚀 特性 </div>
 
@@ -38,6 +40,7 @@
 - **多计算设备**：支持CPU、GPU、RKNPU
 - **嵌入式设备**：目前已支持`rk3568`、`rv1106G3`（Luckfox Pico 1T算力版本）
 - **小体积**：静态编译版本体积不到20MiB，推理YOLO和OCR占用300MiB内存
+- **YOLO26 多任务**：检测、实例分割、姿态与旋转框均支持 raw 和 NMS-free ONNX 输出；CPU 已验证 FP32/FP16，DirectML 的精度限制见下方支持矩阵。
 - **快速部署**：
   - **一键编译**：提供各个平台已验证的编译脚本
   - **[容器部署](https://hub.docker.com/r/lonacn/vision_simple)**：使用`docker`、`podman`、`containerd`一键部署
@@ -167,6 +170,8 @@ models:
 
 `kV26 = 26` 支持检测、实例分割、姿态与旋转框，保留 YOLOv10/YOLO11 的既有行为。模型须为单张、静态尺寸的 ONNX，输入/输出张量支持 FP32 或 FP16；FP16 权重不意味着所有 I/O 都是 FP16。
 
+首次使用建议选择 **FP32 + NMS-free**，先跑通单个检测模型，再扩展其他任务。需要包含 YOLO26 实现的服务构建；快速使用中的历史 Docker 镜像标签不代表已包含此功能。
+
 | 服务 task | 原始输出（外部 NMS） | NMS-free 输出（不再执行 NMS） |
 |---|---|---|
 | `yolo` | `[1,4+nc,A]`，`xywh` + 类别分数 | `[1,K,6]`，`xyxy,score,class_id` |
@@ -176,16 +181,30 @@ models:
 
 `A`、`K` 不固定为 8400、300。YOLO26 必须保留 `names`、正确的 `task`、显式 `end2end` 和 `args.nms` 元数据；pose 还必须有 `kpt_shape`。缺失、矛盾、非法 shape、内嵌 NMS 均明确拒绝，不根据文件名或仅凭 `[1,K,6]` 猜测模式。
 
-**可复现导出**（开发工具，不是服务运行依赖；首次下载官方 nano 权重）：
+#### 导出模型
+
+在仓库根目录执行。导出依赖仅用于开发，不是服务运行依赖；首次运行会下载官方 nano 权重。
 
 ```bash
 python -m pip install ultralytics==8.4.159 onnx==1.20.1 onnxruntime==1.24.3 torch==2.14.0 torchvision==0.29.0
 python scripts/export_yolo26.py --output build/yolo26 --imgsz 640
 ```
 
-脚本导出四任务 × raw/e2e × FP32/FP16 共 16 个模型，固定 batch=1、opset=17、dynamic=False、simplify=False；生成的 `manifest.json` 记录依赖版本、权重与 ONNX SHA256、导出参数及实际张量元数据。该版本用 `nms=None` 选择 raw，`nms=False` 选择 NMS-free，`quantize=16` 选择半精度。CPU 半精度转换后会拓扑排序节点，修正转换器追加 I/O Cast 的顺序，然后执行 ONNX checker 和 CPU ORT 加载验证。不要删除模式元数据，也不要把旧导出器的同名参数语义直接套用。
+仅使用目标检测时，无需导出其余任务或半精度模型：
 
-复制所需 ONNX 到部署目录后配置：
+```bash
+python scripts/export_yolo26.py --output build/yolo26 --imgsz 640 --tasks detect --precisions 32
+```
+
+此命令生成 `detect_raw_fp32.onnx` 和 `detect_e2e_fp32.onnx`。导出参数 `detect` 对应服务配置中的 `task: yolo`；其余任务均使用 `seg`、`pose`、`obb`。可在 `--tasks` 后指定多个任务，在 `--precisions` 后指定 `32`、`16` 或两者。
+
+不指定 `--tasks`、`--precisions` 时，脚本默认导出四任务 × raw/e2e × FP32/FP16 共 16 个模型，固定 batch=1、opset=17、dynamic=False、simplify=False；生成的 `manifest.json` 记录依赖版本、权重与 ONNX SHA256、导出参数及实际张量元数据。该版本用 `nms=None` 选择 raw，`nms=False` 选择 NMS-free，`quantize=16` 选择半精度。CPU 半精度转换后会拓扑排序节点，修正转换器追加 I/O Cast 的顺序，然后执行 ONNX checker 和 CPU ORT 加载验证。不要删除模式元数据，也不要把旧导出器的同名参数语义直接套用。
+
+#### 配置与启动
+
+服务从**工作目录**读取 `config/server.yaml` 和 `config/models.yaml`，模型的相对路径也以工作目录为基准。将所需 ONNX 放入该目录的 `assets/`，在 `config/models.yaml` 的 `models` 列表中添加以下条目；只保留实际导出的模型，不要重复声明同一个 `(task,name)`。
+
+源码构建会复制基础配置到可执行文件旁的 `config/`。Windows x64 Release 默认输出目录为 `build/windows/x64/release/`；部署时从包含 `config/`、`assets/` 的目录启动服务。再次构建可能重新复制基础配置，正式部署建议使用独立目录。
 
 ```yaml
 models:
@@ -207,9 +226,52 @@ models:
     files: {model: assets/obb_e2e_fp32.onnx}
 ```
 
+在 `config/server.yaml` 中选择已验证的执行提供者，例如 CPU：
+
+```yaml
+host: "127.0.0.1"
+port: 11451
+options:
+  infer_framework: "kONNXRUNTIME"
+  infer_ep: "kCPU"
+  infer_device: "0"
+```
+
+启动构建出的 `vision_simple-server`（Windows 为 `.exe`）。模型在首次推理时加载；配置或模型文件变更后重启服务。只在可信网络或受鉴权代理保护的环境中开放非回环监听地址。
+
+#### 发起推理
+
+以下客户端仅依赖 Python 标准库。将 `image.jpg` 替换为本地图片路径；`model` 必须与上方配置的 `name` 一致：
+
+```python
+import base64
+import json
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+image_path = Path("image.jpg")
+endpoint = "http://127.0.0.1:11451/v1/infer/yolo"
+payload = {
+    "model": "yolo26n",
+    "images": [base64.b64encode(image_path.read_bytes()).decode("ascii")],
+}
+request = Request(
+    endpoint,
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urlopen(request, timeout=120) as response:
+    print(json.dumps(json.load(response), ensure_ascii=False, indent=2))
+```
+
+`images` 使用原始 base64，**不是** `data:image/...;base64,...` URL。分割、姿态、旋转框分别改用 `/v1/infer/seg`、`/v1/infer/pose`、`/v1/infer/obb`，并选择对应模型名。检测结果中的 `bbox` 为原图像素 `[x,y,width,height]`；空检测返回该图片对应的空数组。
+
 使用现有 `POST /v1/infer/{task}`；检测也支持原有 `/v0/infer/yolo`。响应结构、模型缓存、批次顺序与整批失败语义不变。C++ 检测仍使用 `InferYOLO::Create(context, path, YOLOVersion::kV26)`；其他任务改为显式版本，例如 `InferYOLOTask::Create(context, path, YOLOTask::kPose, YOLOVersion::kV26)`。旧任务调用者在 `task` 后补 `YOLOVersion::kV11`，可选 device_id 顺延。
 
 后处理沿用本项目契约：raw 检测 NMS IoU 为 0.3，其他 raw 任务为 0.45；OBB 使用多边形 IoU，**不同于 Ultralytics 的概率 IoU**。NMS-free 不作二次抑制。Letterbox 使用黑色 padding，关键点保留图外坐标；mask 先插值 logits 再二值化、裁剪至整数 bbox。因此直接与 Ultralytics 默认 padding、mask 缩放、关键点裁剪比较不会逐像素一致，应统一预处理并明确这些差异。
+
+#### 已验证兼容性与限制
 
 **已验证范围**：Windows x64 Release，C++ ORT 1.20.0 / DirectML 1.15.4，对照端 Python ORT 1.24.3。
 
@@ -329,6 +391,7 @@ v0、原生 v1、OpenAI-like 和 MCP 共用 `InferenceService`，不重复加载
 
 - `InferYOLO/InferOCR::Create/Run` 签名不变。Run 接受非空二维 `CV_8UC3`，支持非连续 ROI；灰度、BGRA、浮点图像以及非有限或超出 `[0,1]` 的 confidence 返回参数错误。
 - YOLO v11 默认按类别 NMS；v10 仅支持端到端 `[1,N,6]`，不再重复 NMS。原 confidence、黑色 Letterbox 填充和 OCR 检测归一化不变。
+- YOLO26 检测使用 `YOLOVersion::kV26`；`InferYOLOTask::Create` 的路径和内存重载现在都要求在 `task` 后显式传入版本。旧分割／姿态／OBB 调用补 `YOLOVersion::kV11`，YOLO26 调用传 `YOLOVersion::kV26`，可选 `device_id` 放在版本之后。
 - PP-OCR CTC 文件路径 Create 使用 Paddle 字典文件约定：文件不含 blank 和末尾空格类别，由加载器补空格；直接传入 map 时，调用者须提供全部非 blank 类别，键为 `class_id - 1`。SAR 使用上述独立字典约定。
 - `HTTPServer::Run/StartAsync` 现在返回 `HTTPServerResult<void>`，调用者必须检查错误。空/超长 host、监听失败会受控失败，不会静默绑定 wildcard。仓库显式 `0.0.0.0` 默认配置未改变。
 - helper 使用者必须重新编译并迁移到单一几何路径：
