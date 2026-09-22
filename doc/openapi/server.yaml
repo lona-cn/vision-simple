@@ -2,7 +2,7 @@ openapi: 3.0.1
 info:
   title: vision-simple
   description: ''
-  version: 0.3.0
+  version: 0.4.1
 tags: []
 paths:
   /v0/infer/yolo:
@@ -10,7 +10,7 @@ paths:
       summary: YOLO推理
       deprecated: false
       description: >-
-        整批成功或整批失败。按请求校验、模型查找/加载、全部图片解码、逐图推理、
+        整批成功或整批失败。按请求校验、模型查找/加载、全部图片解码、有界流水线推理、
         序列化的顺序处理，仅返回首先失败的阶段及该阶段最小图片索引。
         HTTP 200 的 results 长度与 images 相同且顺序一致；无目标返回该图的空数组。
         有效模型允许 images 为空数组。错误响应不含部分结果。
@@ -100,6 +100,23 @@ paths:
                 $ref: '#/components/schemas/InferError'
         '500':
           description: model_config_failed、model_load_failed、带图片索引的 inference_failed 或 internal_error。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+        '503': &pipeline_unavailable
+          description: service_overloaded、request_cancelled 或 service_unavailable；image_index 为 null。
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: 建议重试等待秒数
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+        '504': &pipeline_timeout
+          description: request_timeout；合作式取消，等待原生阶段结束后返回，image_index 为 null。
           content:
             application/json:
               schema:
@@ -207,9 +224,1210 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InferError'
+        '503': *pipeline_unavailable
+        '504': *pipeline_timeout
       security: []
+  /v0/infer/unload:
+    post:
+      summary: 卸载空闲模型
+      description: >-
+        不删除活动请求正在使用的实例（包括等待 Run、解码和序列化）。
+        未加载返回 404；活动实例返回 409；下次推理会重新加载。
+        逻辑卸载不保证 ORT/provider 立即归还 RSS 或显存。
+        无内建认证，必须由可信网络或代理限制访问。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, model]
+              properties:
+                kind:
+                  type: string
+                  enum: [yolo, ocr, seg, pose, obb]
+                model:
+                  type: string
+                  minLength: 1
+      responses:
+        '200':
+          description: 模型已卸载
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind, model, unloaded]
+                properties:
+                  kind:
+                    type: string
+                    enum: [yolo, ocr, seg, pose, obb]
+                  model:
+                    type: string
+                  unloaded:
+                    type: boolean
+                    enum: [true]
+        '400':
+          description: invalid_request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+        '404':
+          description: model_not_loaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+        '409':
+          description: model_busy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+        '500':
+          description: internal_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+  /v0/infer/stats:
+    get:
+      summary: 查看已加载实例状态
+      description: >-
+        按 kind/name 排序的瞬时分页快照。加载/卸载时各页可能变化。
+        实例计数在重新加载后重置；加载前的错误不计入实例。
+        总耗时为已结束请求的毫秒数，包含等待 Run 的时间。
+      security: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: 当前模型缓存状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [models, total, limit, offset, idle_timeout_ms]
+                properties:
+                  total:
+                    type: integer
+                    minimum: 0
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+                  idle_timeout_ms:
+                    type: integer
+                    description: 空闲自动卸载阈值；0 表示禁用
+                  models:
+                    type: array
+                    maxItems: 200
+                    items:
+                      type: object
+                      required: [kind, name, active_requests, requests, failures, total_duration_ms, last_used]
+                      properties:
+                        kind:
+                          type: string
+                          enum: [yolo, ocr, seg, pose, obb]
+                        name:
+                          type: string
+                        active_requests:
+                          type: integer
+                          minimum: 0
+                        requests:
+                          type: integer
+                          description: 已获得实例租约的请求数（含活动请求）
+                        failures:
+                          type: integer
+                        total_duration_ms:
+                          type: number
+                        last_used:
+                          type: integer
+                          format: int64
+                          description: 上次请求完成的 Unix 毫秒；未完成过请求时为加载时间
+        '400':
+          description: invalid_request（分页参数无效）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+        '500':
+          description: internal_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferError'
+  /v1/infer/{task}:
+    post:
+      summary: 原生注册任务推理
+      description: >-
+        使用未限定的 model 名称；task 决定任务类型。整批原子成功，results 与 images 等长同序，
+        无目标为该图的空数组；空批次允许。响应由 task 决定；空 results 可能匹配多个结构，
+        因此使用 anyOf。v0 的 yolo/ocr 路由及结果不变，不新增 v0 seg/pose/obb 路由。
+        正文上限 64 MiB（包括分块传输），要求 application/json。
+        Expect 仅接受 100-continue，其他期望返回 417。
+      security: []
+      parameters:
+        - name: task
+          in: path
+          required: true
+          schema: {type: string, enum: [yolo, ocr, seg, pose, obb]}
+      requestBody:
+        required: true
+        x-max-body-bytes: 67108864
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/InferYOLORequest'}
+      responses:
+        '200':
+          description: 对应 task 的完整批次结果
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - {$ref: '#/components/schemas/InferYOLOResponse'}
+                  - {$ref: '#/components/schemas/InferOCRResponse'}
+                  - {$ref: '#/components/schemas/InferSegmentationResponse'}
+                  - {$ref: '#/components/schemas/InferPoseResponse'}
+                  - {$ref: '#/components/schemas/InferOBBResponse'}
+        '400': &native_error
+          description: invalid_request 或 invalid_image；按 code 分支
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InferError'}
+        '404':
+          <<: *native_error
+          description: unknown_model
+        '413':
+          <<: *native_error
+          description: request_too_large
+        '415':
+          <<: *native_error
+          description: unsupported_media_type
+        '417':
+          <<: *native_error
+          description: expectation_failed
+        '500':
+          <<: *native_error
+          description: model_load_failed、model_config_failed、inference_failed 或 internal_error
+        '503':
+          <<: *native_error
+          description: service_overloaded、request_cancelled 或 service_unavailable
+        '504':
+          <<: *native_error
+          description: request_timeout
+  /v1/tracking/sessions:
+    description: >-
+      与推理分离的有状态跟踪服务，调用方提供检测结果；不自动运行检测模型。
+      无内建认证，仅供可信网络或鉴权代理使用。所有跟踪响应带 Cache-Control: no-store。
+      所有路由拒绝非空 Origin（403）；仅支持 Expect: 100-continue，其他值返回 417。
+      POST 必须使用精确的 Content-Type: application/json，正文最多 4194304 字节（含分块传输）；
+      GET/DELETE 不接受正文或 Transfer-Encoding。协议校验失败为 invalid_request，
+      超限为 413；POST 非法 Content-Length 也为 413，GET/DELETE 非法长度为 400。
+    post:
+      summary: 创建独立跟踪流
+      description: 最多32会话；创建或最后一次成功 frames/reset 后闲置300秒可被清理。读取和列表不续期。
+      security: []
+      requestBody:
+        required: true
+        x-max-body-bytes: 4194304
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TrackingCreateRequest'}
+      responses:
+        '201':
+          description: 已创建；初始时间字段为 null，计数为0
+          headers:
+            Location: {schema: {type: string}, description: 新会话的相对资源地址}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TrackingSession'}
+        '400': {$ref: '#/components/responses/TrackingInvalid'}
+        '403': {$ref: '#/components/responses/TrackingOrigin'}
+        '413': {$ref: '#/components/responses/TrackingBodyLimit'}
+        '417': {$ref: '#/components/responses/TrackingExpectation'}
+        '500': {$ref: '#/components/responses/TrackingFailed'}
+        '503': {$ref: '#/components/responses/TrackingUnavailable'}
+    get:
+      summary: 按会话 ID 字典序分页
+      description: 无正文。瞬时目录，跨页可能发生创建、删除或过期。
+      security: []
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 100}
+        - name: cursor
+          in: query
+          description: 传回 next_cursor；空字符串表示从头开始
+          schema: {type: string, pattern: '^(t1\.[0-9a-f]{32})?$'}
+      responses:
+        '200':
+          description: 会话 ID 页；无后续页时 next_cursor 为 null
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TrackingSessionPage'}
+        '400': {$ref: '#/components/responses/TrackingInvalid'}
+        '403': {$ref: '#/components/responses/TrackingOrigin'}
+        '417': {$ref: '#/components/responses/TrackingExpectation'}
+        '500': {$ref: '#/components/responses/TrackingFailed'}
+        '503': {$ref: '#/components/responses/TrackingUnavailable'}
+  /v1/tracking/sessions/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/TrackingSessionId'}
+    get:
+      summary: 获取跟踪状态
+      description: 无正文；不刷新闲置期限。同一会话操作并发冲突时返回409，不排队。
+      security: []
+      responses:
+        '200':
+          description: 当前已接受帧及轨迹计数
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TrackingSession'}
+        '400': {$ref: '#/components/responses/TrackingInvalid'}
+        '403': {$ref: '#/components/responses/TrackingOrigin'}
+        '404': {$ref: '#/components/responses/TrackingMissing'}
+        '409': {$ref: '#/components/responses/TrackingConflict'}
+        '417': {$ref: '#/components/responses/TrackingExpectation'}
+        '500': {$ref: '#/components/responses/TrackingFailed'}
+        '503': {$ref: '#/components/responses/TrackingUnavailable'}
+    delete:
+      summary: 删除跟踪会话
+      description: 无正文；重复删除返回404；活动操作冲突返回409。
+      security: []
+      responses:
+        '204': {description: 已删除，无响应正文}
+        '400': {$ref: '#/components/responses/TrackingInvalid'}
+        '403': {$ref: '#/components/responses/TrackingOrigin'}
+        '404': {$ref: '#/components/responses/TrackingMissing'}
+        '409': {$ref: '#/components/responses/TrackingConflict'}
+        '417': {$ref: '#/components/responses/TrackingExpectation'}
+        '500': {$ref: '#/components/responses/TrackingFailed'}
+        '503': {$ref: '#/components/responses/TrackingUnavailable'}
+  /v1/tracking/sessions/{id}/frames:
+    parameters:
+      - {$ref: '#/components/parameters/TrackingSessionId'}
+    post:
+      summary: 提交下一帧检测
+      description: >-
+        frame_index 和 timestamp 必须分别严格递增，索引间隔计入丢失过期；
+        时间单位为秒，相邻已接受时间差乘30必须在 (0,1000000]。
+        拒绝的帧不推进状态。每会话串行准入，冲突返回409。只返回本帧观测到的已确认轨迹，
+        不输出丢失轨迹预测。成功提交刷新闲置期限。
+      security: []
+      requestBody:
+        required: true
+        x-max-body-bytes: 4194304
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TrackingFrameRequest'}
+      responses:
+        '200':
+          description: 带稳定会话内 track_id 的本帧轨迹
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TrackingFrameResponse'}
+        '400': {$ref: '#/components/responses/TrackingInvalid'}
+        '403': {$ref: '#/components/responses/TrackingOrigin'}
+        '404': {$ref: '#/components/responses/TrackingMissing'}
+        '409': {$ref: '#/components/responses/TrackingFrameConflict'}
+        '413': {$ref: '#/components/responses/TrackingBodyLimit'}
+        '417': {$ref: '#/components/responses/TrackingExpectation'}
+        '500': {$ref: '#/components/responses/TrackingFailed'}
+        '503': {$ref: '#/components/responses/TrackingUnavailable'}
+  /v1/tracking/sessions/{id}/reset:
+    parameters:
+      - {$ref: '#/components/parameters/TrackingSessionId'}
+    post:
+      summary: 重置流状态
+      description: 保留会话和选项，清除轨迹、ID序列、时间、运动及外观状态；刷新闲置期限。必须发送空 JSON 对象。
+      security: []
+      requestBody:
+        required: true
+        x-max-body-bytes: 4194304
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, maxProperties: 0}
+            example: {}
+      responses:
+        '200':
+          description: 已重置；状态时间字段恢复 null，轨迹计数恢复0
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reset]
+                properties:
+                  reset: {type: boolean, enum: [true]}
+        '400': {$ref: '#/components/responses/TrackingInvalid'}
+        '403': {$ref: '#/components/responses/TrackingOrigin'}
+        '404': {$ref: '#/components/responses/TrackingMissing'}
+        '409': {$ref: '#/components/responses/TrackingConflict'}
+        '413': {$ref: '#/components/responses/TrackingBodyLimit'}
+        '417': {$ref: '#/components/responses/TrackingExpectation'}
+        '500': {$ref: '#/components/responses/TrackingFailed'}
+        '503': {$ref: '#/components/responses/TrackingUnavailable'}
+  /v1/models:
+    get:
+      summary: OpenAI-like 模型发现
+      description: 配置目录，不保证文件可加载。ID 为 task:原名，task 为 yolo、ocr、seg、pose 或 obb；按 ID 排序。v0 目录仍只返回 yolo/ocr。
+      security: []
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 100}
+        - name: after
+          in: query
+          description: 上一页 next_cursor 原样传回；不支持自行构造游标。
+          schema: {type: string}
+      responses:
+        '200':
+          description: 模型目录分页
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data, has_more]
+                properties:
+                  object: {type: string, enum: [list]}
+                  has_more: {type: boolean}
+                  next_cursor: {type: string}
+                  data:
+                    type: array
+                    maxItems: 200
+                    items:
+                      type: object
+                      required: [id, object, created, owned_by, task]
+                      properties:
+                        id: {type: string}
+                        object: {type: string, enum: [model]}
+                        created: {type: integer, enum: [0], description: 未提供模型创建时间}
+                        owned_by: {type: string, enum: [vision-simple]}
+                        task: {type: string, enum: [yolo, ocr, seg, pose, obb]}
+        '400': &openai_error
+          description: OpenAI-like 错误；按 code 分支，不依赖 message。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OpenAIError'}
+        '500': *openai_error
+  /v1/chat/completions:
+    post:
+      summary: 视觉任务 Chat Completions 适配
+      description: >-
+        非语言模型；文本不改变视觉任务。图片按消息/content 顺序处理，不抓取远程 URL。
+        content 是对应任务的完整 JSON：yolo/ocr 检测或文字、seg 二值 PNG ROI、
+        pose 原图像素关键点、obb 有序四角及首边弧度角；不转换为自然语言。
+        stream 在整批成功后发送 role/content/finish_reason 三个 chunk 及 [DONE]；
+        不是逐 token/逐图流。错误在 SSE 头提交之前以 JSON 返回。
+        不支持 Responses API、任意生成参数、工具调用或 json_schema 输出。
+      security: []
+      requestBody:
+        required: true
+        x-max-body-bytes: 67108864
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/VisualChatRequest'}
+      responses:
+        '200':
+          description: 完整结果；不编造 token usage
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VisualChatResponse'}
+            text/event-stream:
+              schema:
+                type: string
+                description: data 事件为 chat.completion.chunk JSON，最后为 data [DONE]。
+        '400': *openai_error
+        '413': *openai_error
+        '415': *openai_error
+        '500': *openai_error
+        '503':
+          <<: *openai_error
+          headers:
+            Retry-After: {schema: {type: integer, enum: [1]}}
+        '504': *openai_error
+  /mcp/sse:
+    get:
+      summary: 建立传统 MCP HTTP+SSE 会话
+      description: >-
+        首个 endpoint 事件给出包含 session_id 的相对 POST 地址，其后 message 事件承载 JSON-RPC。
+        初始化版本支持 2024-11-05、2025-03-26、2025-06-18、2025-11-25。
+        每15秒注释心跳；无活动调用且5分钟无消息时关闭会话；最多32会话。
+        Host/Origin 必须匹配回环或显式监听 host 及端口。没有用户认证，须使用可信网络/鉴权代理。
+        此端点不是 Streamable HTTP。
+      security: []
+      responses:
+        '200':
+          description: 长连接事件流；断连合作式取消本会话任务。
+          content:
+            text/event-stream:
+              schema: {type: string}
+        '403': {description: 不可信 Host 或 Origin}
+        '503': {description: 会话容量已满或服务正在停止}
+  /mcp/messages:
+    post:
+      summary: 向已有 MCP SSE 会话提交 JSON-RPC
+      description: >-
+        先 initialize，再 notifications/initialized；支持 ping、tools/list、tools/call、
+        notifications/cancelled。工具为 list_models、infer_yolo、infer_ocr、infer_seg、infer_pose、infer_obb；
+        推理工具由任务注册表生成，输入 Schema 经 tools/list 返回。跟踪会话不通过 MCP 暴露。
+        每会话最多8个活动工具请求、全局2个执行worker/16个排队任务。
+        工具结果通过 SSE 返回：新版含 structuredContent 及等价 text，旧版为完整 JSON text。
+        执行失败 isError:true，error 包含 code/message/image_index；协议错误使用 JSON-RPC error。
+        notification 不产生应答。取消 ID 仅作用于本会话，原生阶段合作式退出。
+        待发送消息/写缓冲上限8MiB，超限或持续积压约30秒时关闭会话。
+      security: []
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          description: endpoint 事件提供的会话标识；不可跨会话复用或写入日志。
+          schema: {type: string}
+      requestBody:
+        required: true
+        x-max-body-bytes: 67108864
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MCPRequest'}
+      responses:
+        '202': {description: 已接受；JSON-RPC 应答在对应 SSE 流上，通知无应答。}
+        '403': {description: 不可信 Host 或 Origin}
+        '404': {description: 会话不存在或已关闭；需重新建立 SSE}
+        '413': {description: 正文超过64MiB}
+        '415': {description: 要求 application/json，字符集仅支持 UTF-8}
+        '503': {description: 服务正在停止}
+  /v1/subtitle/jobs:
+    description: >-
+      异步视频字幕 OCR：先以 JSON 创建作业，再 PUT 原始视频字节到 /{id}/video，
+      轮询 /{id}，仅 completed 可下载 SRT/VTT。与同步图片 OCR 分离，不接受 URL 或用户文件路径。
+      以下规则适用于全部字幕路由：无内建认证，仅供可信网络或鉴权代理使用；拒绝非空 Origin（403），
+      响应带 Cache-Control: no-store。POST/PUT 仅支持 Expect: 100-continue，其他期望返回417；
+      GET/DELETE 不接受任何 Expect 头（417），必须无正文（非零 Content-Length 或任何 Transfer-Encoding 返回400）。
+      Content-Length 必须是非负十进制整数，否则400。POST Content-Type 必须精确为 application/json，
+      PUT 必须精确为 application/octet-stream（不接受 charset 参数），否则415。
+      创建/取消 JSON 正文最多65536字节；视频流最多67108864字节；声明长度及实际接收字节均受限，超限413。
+      早期拒绝可能关闭连接。最多8个作业（含等待上传和保留的终态结果），一个处理工作线程；
+      created/uploading 闲置60秒后清理，上传非空分块刷新闲置时间；终态保留300秒，查询/下载不续期。
+      输入放在服务私有临时目录，终止处理、取消、上传中断、删除、过期和停服时尝试清理；
+      清理失败不会提前释放文件占用的容量。限制为1800秒、1000000解码帧、每帧16777216像素，
+      单次 OCR 文本4096 UTF-8字节、10000条字幕、累计字幕文本2 MiB。
+      Windows 通过 Media Foundation 读取 ftyp 开头的 MP4族或 ASF 容器，依赖已安装的本机编解码器；
+      另有可移植 MJPEG AVI 读取器，仅接受单个 MJPG/mjpg 视频流、零起始时间和有效 rate/scale，
+      支持 AVI/AVIX，要求完整的声明帧数。容器识别不保证编解码器可用，不支持任意编码或 MKV。
+      原生样本需有效正时长和严格递增时间戳；开始时间向下取整到毫秒、结束时间向上取整，
+      AVI 使用零起点固定帧率时间。解码与 OCR 在进程内运行，不是安全沙箱。
+      取消是协作式的，不能立即中断正在执行的本机解码/OCR 调用。
+    post:
+      summary: 创建待上传字幕作业
+      description: >-
+        严格校验选项及 OCR 模型目录名称，但创建成功不保证随后模型加载或视频处理成功。
+        返回 created 和 Location；不接收视频、文件名、URL 或嵌套 options。
+      security: []
+      requestBody:
+        required: true
+        x-max-body-bytes: 65536
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SubtitleCreateRequest'}
+      responses:
+        '201':
+          description: 已创建；使用返回 ID 上传
+          headers:
+            Location:
+              schema: {type: string}
+              description: /v1/subtitle/jobs/{id}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubtitleJob'}
+        '400': {$ref: '#/components/responses/SubtitleInvalid'}
+        '403': {$ref: '#/components/responses/SubtitleOrigin'}
+        '404': {$ref: '#/components/responses/SubtitleModelMissing'}
+        '413': {$ref: '#/components/responses/SubtitleBodyLimit'}
+        '415': {$ref: '#/components/responses/SubtitleMedia'}
+        '417': {$ref: '#/components/responses/SubtitleExpectation'}
+        '500': {$ref: '#/components/responses/SubtitleFailed'}
+        '503': {$ref: '#/components/responses/SubtitleUnavailable'}
+    get:
+      summary: 按字幕作业 ID 字典序分页
+      description: 无正文；瞬时目录，跨页可能创建、删除或过期。读取不续期。
+      security: []
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 100}
+        - name: cursor
+          in: query
+          description: 原样传回 next_cursor；首请求省略，不能传空字符串。按 ID 排序而非创建时间。
+          schema: {type: string, pattern: '^s1\.[0-9a-f]{32}$'}
+      responses:
+        '200':
+          description: 作业快照；末页 next_cursor 为 null
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubtitleJobPage'}
+        '400': {$ref: '#/components/responses/SubtitleInvalid'}
+        '403': {$ref: '#/components/responses/SubtitleOrigin'}
+        '417': {$ref: '#/components/responses/SubtitleExpectation'}
+        '500': {$ref: '#/components/responses/SubtitleFailed'}
+  /v1/subtitle/jobs/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/SubtitleJobId'}
+    get:
+      summary: 轮询字幕作业状态
+      description: 无正文；不续期。异步失败仍返回200，检查 state 和 error_code；过期后404。
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/SubtitleStatus'}
+        '400': {$ref: '#/components/responses/SubtitleInvalid'}
+        '403': {$ref: '#/components/responses/SubtitleOrigin'}
+        '404': {$ref: '#/components/responses/SubtitleMissing'}
+        '417': {$ref: '#/components/responses/SubtitleExpectation'}
+        '500': {$ref: '#/components/responses/SubtitleFailed'}
+    delete:
+      summary: 删除未上传或终态字幕作业
+      description: >-
+        无正文。仅 created、cancelled、completed、failed 可删除，其他状态409；
+        活动作业须先取消并轮询至终态，再删除。成功删除结果和输入；再次删除404。
+      security: []
+      responses:
+        '204': {description: 已删除，无正文}
+        '400': {$ref: '#/components/responses/SubtitleInvalid'}
+        '403': {$ref: '#/components/responses/SubtitleOrigin'}
+        '404': {$ref: '#/components/responses/SubtitleMissing'}
+        '409': {$ref: '#/components/responses/SubtitleBusy'}
+        '417': {$ref: '#/components/responses/SubtitleExpectation'}
+        '500': {$ref: '#/components/responses/SubtitleFailed'}
+  /v1/subtitle/jobs/{id}/video:
+    parameters:
+      - {$ref: '#/components/parameters/SubtitleJobId'}
+    put:
+      summary: 流式上传单个视频并排队
+      description: >-
+        仅 created 可上传一次，不支持续传、multipart、Base64 或覆盖。原始字节分块写入私有文件，
+        不把整个视频累积在 HTTP 正文内存；允许 chunked，累计上限同 Content-Length。
+        上传结束识别容器；202只表示已接受，快照可能已进入 running/终态，仍须轮询。
+        容器头不合法返回415并使作业 failed；受支持容器的解码错误在异步 error_code 中报告。
+        上传中断使作业 failed 并清理源文件；重新尝试需创建新作业。
+      security: []
+      requestBody:
+        required: true
+        x-max-body-bytes: 67108864
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary, maxLength: 67108864}
+      responses:
+        '202': {$ref: '#/components/responses/SubtitleStatus'}
+        '400': {$ref: '#/components/responses/SubtitleInvalid'}
+        '403': {$ref: '#/components/responses/SubtitleOrigin'}
+        '404': {$ref: '#/components/responses/SubtitleMissing'}
+        '409': {$ref: '#/components/responses/SubtitleBusy'}
+        '413': {$ref: '#/components/responses/SubtitleBodyLimit'}
+        '415': {$ref: '#/components/responses/SubtitleMedia'}
+        '417': {$ref: '#/components/responses/SubtitleExpectation'}
+        '500': {$ref: '#/components/responses/SubtitleFailed'}
+        '503': {$ref: '#/components/responses/SubtitleUnavailable'}
+  /v1/subtitle/jobs/{id}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/SubtitleJobId'}
+    post:
+      summary: 请求协作式取消
+      description: >-
+        必须发送空 JSON 对象。created/uploading/queued 可直接 cancelled；
+        running 先变为 cancelling，工作线程退出后 cancelled。终态取消是无操作，保留原状态。
+        202不保证取消已经完成；轮询终态后才能删除。取消不提供部分字幕下载。
+      security: []
+      requestBody:
+        required: true
+        x-max-body-bytes: 65536
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, maxProperties: 0}
+            example: {}
+      responses:
+        '202': {$ref: '#/components/responses/SubtitleStatus'}
+        '400': {$ref: '#/components/responses/SubtitleInvalid'}
+        '403': {$ref: '#/components/responses/SubtitleOrigin'}
+        '404': {$ref: '#/components/responses/SubtitleMissing'}
+        '413': {$ref: '#/components/responses/SubtitleBodyLimit'}
+        '415': {$ref: '#/components/responses/SubtitleMedia'}
+        '417': {$ref: '#/components/responses/SubtitleExpectation'}
+        '500': {$ref: '#/components/responses/SubtitleFailed'}
+  /v1/subtitle/jobs/{id}/subtitles.srt:
+    parameters:
+      - {$ref: '#/components/parameters/SubtitleJobId'}
+    get:
+      summary: 下载已完成字幕 SRT
+      description: >-
+        无正文；仅 completed 可下载，其他所有状态（包括 failed/cancelled）409。
+        UTF-8、毫秒时间戳、转义文本标记；成功但无字幕时为空文件。不续期，无部分结果。
+      security: []
+      responses:
+        '200':
+          description: 'Content-Type: text/plain; charset=utf-8'
+          headers:
+            Content-Disposition:
+              description: '固定为 attachment; filename="{id}.srt"，id 为该作业的32位小写十六进制 ID'
+              schema: {type: string}
+          content:
+            text/plain:
+              schema: {type: string}
+        '400': {$ref: '#/components/responses/SubtitleInvalid'}
+        '403': {$ref: '#/components/responses/SubtitleOrigin'}
+        '404': {$ref: '#/components/responses/SubtitleMissing'}
+        '409': {$ref: '#/components/responses/SubtitleNotReady'}
+        '417': {$ref: '#/components/responses/SubtitleExpectation'}
+        '500': {$ref: '#/components/responses/SubtitleFailed'}
+  /v1/subtitle/jobs/{id}/subtitles.vtt:
+    parameters:
+      - {$ref: '#/components/parameters/SubtitleJobId'}
+    get:
+      summary: 下载已完成字幕 WebVTT
+      description: >-
+        无正文；仅 completed 可下载，其他所有状态（包括 failed/cancelled）409。
+        UTF-8、毫秒时间戳、转义文本标记；无字幕时仅包含 WEBVTT 头。不续期，无部分结果。
+      security: []
+      responses:
+        '200':
+          description: 'Content-Type: text/vtt; charset=utf-8'
+          headers:
+            Content-Disposition:
+              description: '固定为 attachment; filename="{id}.vtt"，id 为该作业的32位小写十六进制 ID'
+              schema: {type: string}
+          content:
+            text/vtt:
+              schema: {type: string}
+        '400': {$ref: '#/components/responses/SubtitleInvalid'}
+        '403': {$ref: '#/components/responses/SubtitleOrigin'}
+        '404': {$ref: '#/components/responses/SubtitleMissing'}
+        '409': {$ref: '#/components/responses/SubtitleNotReady'}
+        '417': {$ref: '#/components/responses/SubtitleExpectation'}
+        '500': {$ref: '#/components/responses/SubtitleFailed'}
 components:
+  parameters:
+    SubtitleJobId:
+      name: id
+      in: path
+      required: true
+      description: 创建返回的32位小写十六进制 ID；格式错误400，未知、删除或过期404
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    TrackingSessionId:
+      name: id
+      in: path
+      required: true
+      description: 创建时返回的32位小写十六进制 ID；未知或过期 ID 返回404
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+  responses:
+    SubtitleStatus:
+      description: 当前作业快照；异步失败通过 state/error_code 报告，不改变轮询 HTTP 状态
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleJob'}
+    SubtitleInvalid:
+      description: invalid_request；JSON、严格字段/数值/ROI约束、ID、分页参数、Content-Length 或无正文策略无效
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleOrigin:
+      description: invalid_request；拒绝非空 Origin
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleModelMissing:
+      description: model_not_found；目录没有指定名称的 OCR 模型
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleMissing:
+      description: subtitle_job_not_found；作业未知、已删除或已过期
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleBusy:
+      description: subtitle_job_busy；当前状态不允许上传或删除
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleNotReady:
+      description: subtitle_not_ready；仅 completed 提供下载
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleBodyLimit:
+      description: payload_too_large；JSON超过64 KiB、视频超过64 MiB或服务资源上限
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleMedia:
+      description: unsupported_media_type（Content-Type不精确匹配）或 invalid_video（上传容器头无效）
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleExpectation:
+      description: invalid_request；不支持的 Expect，或 GET/DELETE 携带任何 Expect 头
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleFailed:
+      description: subtitle_failed；同步操作失败
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    SubtitleUnavailable:
+      description: service_unavailable（正在停止）；创建达到8作业上限时为 subtitle_capacity
+      headers:
+        Retry-After: {schema: {type: integer, enum: [1]}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SubtitleError'}
+    TrackingInvalid:
+      description: invalid_request（JSON、字段、选项、数值、帧约束或传输格式无效）；frames 的解码失败为 invalid_image
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TrackingError'}
+    TrackingOrigin:
+      description: invalid_request；不接受非空 Origin
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TrackingError'}
+    TrackingBodyLimit:
+      description: invalid_request；正文超过4 MiB或 POST Content-Length 无效
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TrackingError'}
+    TrackingExpectation:
+      description: invalid_request；不支持的 Expect
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TrackingError'}
+    TrackingMissing:
+      description: tracking_session_not_found
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TrackingError'}
+    TrackingConflict:
+      description: tracking_session_busy；同一会话已有活动操作
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TrackingError'}
+    TrackingFrameConflict:
+      description: tracking_session_busy 或 frame_out_of_order（索引或时间未严格递增）
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TrackingError'}
+    TrackingFailed:
+      description: tracking_failed
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TrackingError'}
+    TrackingUnavailable:
+      description: service_unavailable；创建达到32会话上限时为 tracking_capacity
+      headers:
+        Retry-After: {schema: {type: integer, enum: [1]}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TrackingError'}
   schemas:
+    SubtitleError:
+      type: object
+      required: [error]
+      description: HTTP错误；按稳定 code 分支，不依赖 message。与作业异步 error_code 分开。
+      properties:
+        error:
+          type: object
+          required: [code, message, image_index]
+          properties:
+            code:
+              type: string
+              enum: [invalid_request, subtitle_job_not_found, model_not_found, subtitle_job_busy, subtitle_not_ready, payload_too_large, invalid_video, unsupported_media_type, subtitle_capacity, service_unavailable, subtitle_failed]
+            message: {type: string}
+            image_index: {type: integer, nullable: true, enum: [null]}
+    SubtitleCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [model]
+      description: >-
+        字段均为顶层且不接受未知字段或 null；数值必须有限，整数字段不接受 JSON 浮点表示。
+        ROI 为归一化 [x,y,width,height]，每项在[0,1]，width/height必须>0，
+        x+width<=1 且 y+height<=1；不是像素坐标。默认下半画面。
+        从实际视频帧的毫秒时间戳采样，选择达到下一采样时间的首帧，下一采样时间为本帧时间加 interval；
+        不是按理想帧号强行插值。字幕边界取采样观测时间，不保证逐帧精度。
+        连续 stable_samples 次相同规范化文本确认变化并回溯到首个观测；
+        连续 gap_samples 次空文本在首个空观测处关闭字幕，短暂误识别/空隙不拆分字幕。
+      properties:
+        model:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: 'OCR目录的未限定模型名称（不加 ocr: 前缀）；实际按UTF-8字节限制为1..256'
+        sample_interval_ms: {type: integer, minimum: 100, maximum: 5000, default: 200}
+        roi:
+          type: array
+          minItems: 4
+          maxItems: 4
+          default: [0, 0.5, 1, 0.5]
+          items: {type: number, minimum: 0, maximum: 1}
+        min_confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.5
+          description: 仅保留置信度大于等于阈值的非空 OCR 行，按画面阅读顺序合并
+        stable_samples: {type: integer, minimum: 2, maximum: 10, default: 2}
+        gap_samples: {type: integer, minimum: 2, maximum: 10, default: 2}
+    SubtitleJob:
+      type: object
+      required: [id, state, uploaded_bytes, decoded_frames, sampled_frames, position_ms, duration_ms, cue_count, error_code]
+      properties:
+        id: {type: string, pattern: '^[0-9a-f]{32}$'}
+        state:
+          type: string
+          enum: [created, uploading, queued, running, cancelling, cancelled, completed, failed]
+          description: 正常流程 created→uploading→queued→running→completed；cancelled/completed/failed 为终态
+        uploaded_bytes: {type: integer, format: int64, minimum: 0, maximum: 67108864, description: 已成功写入的源视频字节数}
+        decoded_frames: {type: integer, format: int64, minimum: 0, maximum: 1000000, description: 已处理解码帧计数}
+        sampled_frames: {type: integer, format: int64, minimum: 0, maximum: 1000000, description: 已完成 OCR 的采样帧计数，不大于 decoded_frames}
+        position_ms: {type: integer, format: int64, minimum: 0, description: 最新已处理帧的媒体时间戳，尚无帧时为0}
+        duration_ms:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+          description: 毫秒；未知为null。AVI可提供时长提示；完成时为实际视频帧末端的最大值，不含音频尾部，不是进度保证
+        cue_count: {type: integer, minimum: 0, maximum: 10000, description: 已关闭的字幕条数；completed时为最终下载条数，不含尚未关闭的活动字幕}
+        error_code:
+          type: string
+          nullable: true
+          description: >-
+            异步失败的稳定、无路径代码，非failed时为null；failed时可能为null（例如异常报告自身失败）。
+            不作为封闭枚举：例如 invalid_container、unsupported_video、upload_interrupted、storage_failed、
+            frame_limit、frame_dimensions、invalid_timestamps、duration_limit、ocr_failed、ocr_text_limit、
+            subtitle_limit、processing_failed。不是异常文本、文件路径或HTTP错误对象；调用方须容忍新增代码。
+    SubtitleJobPage:
+      type: object
+      required: [jobs, next_cursor]
+      properties:
+        jobs:
+          type: array
+          maxItems: 8
+          items: {$ref: '#/components/schemas/SubtitleJob'}
+        next_cursor: {type: string, nullable: true, pattern: '^s1\.[0-9a-f]{32}$'}
+    SegmentedObject:
+      allOf:
+        - {$ref: '#/components/schemas/YOLODetectedObject'}
+        - type: object
+          required: [mask_png_base64]
+          properties:
+            mask_png_base64:
+              type: string
+              format: byte
+              description: 标准 Base64 PNG（无 data URI 前缀）；单通道8位二值0/255，宽高等于 bbox 的 width/height，原图 ROI 原点为 bbox 的 x/y，并非全图 mask
+    PoseKeypoint:
+      type: object
+      required: [x, y, confidence]
+      properties:
+        x: {type: number, description: 原图像素横坐标}
+        y: {type: number, description: 原图像素纵坐标}
+        confidence: {type: number}
+    PoseObject:
+      allOf:
+        - {$ref: '#/components/schemas/YOLODetectedObject'}
+        - type: object
+          required: [keypoints]
+          properties:
+            keypoints:
+              type: array
+              description: 按模型关键点顺序；不将关键点转换为检测框
+              items: {$ref: '#/components/schemas/PoseKeypoint'}
+    RotatedObject:
+      type: object
+      required: [class_id, confidence, corners, angle]
+      properties:
+        class_id: {type: integer}
+        confidence: {type: number}
+        corners:
+          type: array
+          minItems: 4
+          maxItems: 4
+          description: 原图像素中有序四角，每角为 [x,y]；可超出图像，不裁剪、不替换为轴对齐外接框
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: {type: number}
+        angle: {type: number, description: 'corners[0] 指向 corners[1] 的首边方向，单位弧度'}
+    InferSegmentationResponse:
+      type: object
+      required: [class_names, results]
+      properties:
+        class_names:
+          type: array
+          items: {type: string}
+        results:
+          type: array
+          description: 与 images 等长同序；每图可为空数组
+          items:
+            type: array
+            items: {$ref: '#/components/schemas/SegmentedObject'}
+    InferPoseResponse:
+      type: object
+      required: [class_names, results]
+      properties:
+        class_names:
+          type: array
+          items: {type: string}
+        results:
+          type: array
+          description: 与 images 等长同序；每图可为空数组
+          items:
+            type: array
+            items: {$ref: '#/components/schemas/PoseObject'}
+    InferOBBResponse:
+      type: object
+      required: [class_names, results]
+      properties:
+        class_names:
+          type: array
+          items: {type: string}
+        results:
+          type: array
+          description: 与 images 等长同序；每图可为空数组
+          items:
+            type: array
+            items: {$ref: '#/components/schemas/RotatedObject'}
+    TrackingError:
+      type: object
+      required: [error]
+      description: 稳定分支使用 code，不依赖 message；所有跟踪错误的 image_index 固定为 null
+      properties:
+        error:
+          type: object
+          required: [code, message, image_index]
+          properties:
+            code:
+              type: string
+              enum: [invalid_request, invalid_image, tracking_session_not_found, tracking_session_busy, frame_out_of_order, tracking_capacity, service_unavailable, tracking_failed]
+            message: {type: string}
+            image_index: {type: integer, nullable: true, enum: [null]}
+    TrackingCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [algorithm]
+      properties:
+        algorithm: {type: string, enum: [bytetrack, botsort]}
+        options: {$ref: '#/components/schemas/TrackingOptions'}
+    TrackingOptions:
+      type: object
+      additionalProperties: false
+      description: >-
+        所有数值必须有限。low_threshold < high_threshold <= new_track_threshold。
+        match_threshold 是最大匹配代价（1-相似度），不是最小 IoU；
+        proximity_threshold 是外观匹配的最大几何代价，appearance_threshold 是最大外观代价。
+        appearance 仅支持 botsort；camera_motion 对 bytetrack 不生效。
+      properties:
+        high_threshold: {type: number, minimum: 0, maximum: 1, default: 0.5}
+        low_threshold: {type: number, minimum: 0, maximum: 1, default: 0.1}
+        new_track_threshold: {type: number, minimum: 0, maximum: 1, default: 0.6}
+        match_threshold: {type: number, minimum: 0, maximum: 1, default: 0.8}
+        max_lost_frames: {type: integer, minimum: 0, maximum: 10000, default: 30}
+        min_hits: {type: integer, minimum: 1, maximum: 10000, default: 2}
+        max_tracks: {type: integer, minimum: 1, maximum: 256, default: 256}
+        max_detections: {type: integer, minimum: 1, maximum: 256, default: 256}
+        camera_motion: {type: boolean, default: true, description: botsort 开启时每帧必须提供同尺寸、至少8x8的可解码彩色图}
+        appearance: {type: boolean, default: false, description: 开启时每个 detection 必须提供非零且整个会话维度一致的 embedding；不会隐式运行特征模型}
+        proximity_threshold: {type: number, minimum: 0, maximum: 1, default: 0.5}
+        appearance_threshold: {type: number, minimum: 0, maximum: 1, default: 0.25}
+    TrackingStatus:
+      type: object
+      required: [last_frame_index, last_timestamp, active_tracks, lost_tracks]
+      properties:
+        last_frame_index: {type: integer, minimum: 0, maximum: 9007199254740991, nullable: true, description: 创建或重置后为 null}
+        last_timestamp: {type: number, minimum: 0, nullable: true, description: 最近接受帧的秒数；创建或重置后为 null}
+        active_tracks: {type: integer, minimum: 0, maximum: 256}
+        lost_tracks: {type: integer, minimum: 0, maximum: 256}
+    TrackingSession:
+      type: object
+      required: [id, algorithm, status]
+      properties:
+        id: {type: string, pattern: '^[0-9a-f]{32}$'}
+        algorithm: {type: string, enum: [bytetrack, botsort]}
+        status: {$ref: '#/components/schemas/TrackingStatus'}
+    TrackingSessionPage:
+      type: object
+      required: [sessions, next_cursor]
+      properties:
+        sessions:
+          type: array
+          maxItems: 100
+          items: {type: string, pattern: '^[0-9a-f]{32}$'}
+        next_cursor: {type: string, nullable: true, pattern: '^t1\.[0-9a-f]{32}$'}
+    TrackingDetection:
+      type: object
+      additionalProperties: false
+      required: [class_id, confidence, bbox]
+      properties:
+        class_id: {type: integer, minimum: 0, maximum: 2147483647}
+        confidence: {type: number, minimum: 0, maximum: 1}
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          description: 浮点原图像素 [x,y,width,height]；abs(x/y) <= 10000000，width/height 在 [0.0001,10000000]；全部有限，x+width 和 y+height 必须为有限 float
+          items: {type: number, minimum: -10000000, maximum: 10000000}
+        embedding:
+          type: array
+          minItems: 1
+          maxItems: 512
+          description: 可选；提供时不得为零向量，每个数为有限 float。appearance=true 时必需且维度在会话内保持一致
+          items: {type: number, format: float, minimum: -3.4028234663852886e+38, maximum: 3.4028234663852886e+38}
+    TrackingFrameRequest:
+      type: object
+      additionalProperties: false
+      required: [frame_index, timestamp, detections]
+      properties:
+        frame_index: {type: integer, minimum: 0, maximum: 9007199254740991}
+        timestamp: {type: number, minimum: 0, maximum: 1.7976931348623157e+308, description: 有限、非负秒数；后续帧必须严格递增且符合时间差限制}
+        detections:
+          type: array
+          maxItems: 256
+          description: 可为空；同时受会话 max_detections 限制
+          items: {$ref: '#/components/schemas/TrackingDetection'}
+        image:
+          type: string
+          format: byte
+          maxLength: 4194304
+          description: 标准 Base64 PNG/JPEG，无 data URI 前缀；解码图像最多16777216像素，忽略 EXIF 方向。botsort camera_motion=true 时必需且每帧尺寸相同、至少8x8；提供的图像即使不用于运动估计也会解码校验
+    TrackedObject:
+      type: object
+      required: [track_id, class_id, confidence, bbox]
+      properties:
+        track_id: {type: integer, minimum: 1, description: 会话内轨迹 ID；reset 开始新的 ID 序列}
+        class_id: {type: integer, minimum: 0}
+        confidence: {type: number}
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          description: 浮点原图像素 [x,y,width,height]
+          items: {type: number}
+    TrackingFrameResponse:
+      type: object
+      required: [frame_index, timestamp, tracks]
+      properties:
+        frame_index: {type: integer, minimum: 0, maximum: 9007199254740991}
+        timestamp: {type: number, minimum: 0}
+        tracks:
+          type: array
+          maxItems: 256
+          description: 仅本帧观测到的已确认轨迹
+          items: {$ref: '#/components/schemas/TrackedObject'}
+    OpenAIError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type, code, message, param, image_index]
+          properties:
+            type: {type: string, enum: [invalid_request_error, server_error]}
+            code: {type: string, description: 推理代码同 v0；另有 invalid_json、unsupported_media_type、request_too_large、response_too_large。}
+            message: {type: string}
+            param: {type: string, nullable: true}
+            image_index: {type: integer, minimum: 0, nullable: true}
+    VisualChatRequest:
+      type: object
+      additionalProperties: false
+      required: [model, messages]
+      properties:
+        model: {type: string, pattern: '^(yolo|ocr|seg|pose|obb):.+$', description: 从 /v1/models 获取任务限定的模型ID}
+        stream: {type: boolean, default: false}
+        n: {type: integer, enum: [1]}
+        timeout_ms: {type: integer, minimum: 1, maximum: 300000}
+        response_format:
+          type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type: {type: string, enum: [text, json_object]}
+        messages:
+          type: array
+          minItems: 1
+          description: 至少包含一张 user 图片；图片总数受 infer_max_batch_images 限制。
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role: {type: string, enum: [user, system, developer, assistant]}
+              content:
+                oneOf:
+                  - {type: string}
+                  - type: array
+                    items:
+                      oneOf:
+                        - type: object
+                          required: [type, text]
+                          properties:
+                            type: {type: string, enum: [text]}
+                            text: {type: string}
+                        - type: object
+                          required: [type, image_url]
+                          properties:
+                            type: {type: string, enum: [image_url]}
+                            image_url:
+                              type: object
+                              required: [url]
+                              properties:
+                                url: {type: string, pattern: '^data:image/(png|jpeg|webp|bmp);base64,', description: 只允许 user 消息中的内联图片}
+                                detail: {type: string, enum: [auto]}
+    VisualChatResponse:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id: {type: string}
+        object: {type: string, enum: [chat.completion]}
+        created: {type: integer, description: Unix秒}
+        model: {type: string}
+        choices:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            required: [index, message, finish_reason]
+            properties:
+              index: {type: integer, enum: [0]}
+              finish_reason: {type: string, enum: [stop]}
+              message:
+                type: object
+                required: [role, content]
+                properties:
+                  role: {type: string, enum: [assistant]}
+                  content: {type: string, description: InferYOLOResponse、InferOCRResponse、InferSegmentationResponse、InferPoseResponse 或 InferOBBResponse 的完整 JSON 字符串}
+    MCPRequest:
+      type: object
+      additionalProperties: false
+      required: [jsonrpc, method]
+      properties:
+        jsonrpc: {type: string, enum: ['2.0']}
+        id:
+          description: 请求必须提供；通知省略。字符串和整数不是同一个 ID。
+          oneOf:
+            - {type: string}
+            - {type: integer}
+        method: {type: string}
+        params: {type: object, additionalProperties: true}
     InferError:
       type: object
       description: >-
@@ -235,6 +1453,15 @@ components:
                 - model_config_failed
                 - inference_failed
                 - internal_error
+                - model_busy
+                - model_not_loaded
+                - service_overloaded
+                - request_cancelled
+                - request_timeout
+                - service_unavailable
+                - request_too_large
+                - unsupported_media_type
+                - expectation_failed
             message:
               type: string
               description: 人类可读的通用错误说明，不作为稳定判断依据。
@@ -261,6 +1488,7 @@ components:
             - 0.114514
         bbox:
           type: array
+          description: 原图像素整数 [x,y,width,height]
           items:
             type: integer
           minItems: 4
@@ -302,12 +1530,20 @@ components:
     InferYOLORequest: &ref_0
       type: object
       properties:
+        timeout_ms:
+          type: integer
+          minimum: 1
+          maximum: 300000
+          description: >-
+            可选推理截止时间（毫秒）。默认由服务配置决定（60000）。
+            包含模型加载与解码，原生阶段合作式退出，不保证硬实时响应。
         model:
           type: string
           minLength: 1
         images:
           type: array
-          description: 允许空数组；必须提供此字段，且所有元素必须为字符串。
+          maxItems: 4096
+          description: 允许空数组；所有元素必须为字符串；部署可设更小批次上限（默认 128）。
           items:
             type: string
             description: 标准 Base64 图片编码；不接受空串、空白、data URI、URL-safe 字符或不规范 padding。

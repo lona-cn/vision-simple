@@ -1,0 +1,2 @@
+# Preserve the checksum of the local dependency patch on every platform.
+xmake/repo/packages/l/libhv/no-header-body-reserve.patch text eol=lf

@@ -2,29 +2,19 @@
 
 #include <memory_resource>
 
-namespace {
-constexpr uint32_t MAX_THREADS = 256;
-constexpr uint32_t MAX_STACK_CALLS = 256;
-constexpr uint32_t MSG_SIZE = 32;
-constexpr uint32_t MEMORY_SIZE = MSG_SIZE * MAX_STACK_CALLS * MAX_THREADS;
-std::unique_ptr<uint8_t[]> memory = std::make_unique<uint8_t[]>(MEMORY_SIZE);
-std::pmr::monotonic_buffer_resource resource{memory.get(), MEMORY_SIZE};
-std::pmr::polymorphic_allocator<int> allocator{&resource};
-}  // namespace
-
 vision_simple::VisionSimpleError::VisionSimpleError(
     VisionSimpleErrorCode code, const std::string& message,
     std::unique_ptr<void*> user_data)
     : code(code),
       user_data(std::move(user_data)),
-      message{message, allocator} {}
+      message{message, std::pmr::new_delete_resource()} {}
 
 vision_simple::VisionSimpleError::VisionSimpleError(
     VisionSimpleErrorCode code, const char* message,
     std::unique_ptr<void*> user_data)
     : code(code),
       user_data(std::move(user_data)),
-      message{message, allocator} {}
+      message{message, std::pmr::new_delete_resource()} {}
 
 vision_simple::VisionSimpleError::VisionSimpleError(
     VisionSimpleErrorCode code, std::pmr::string message,

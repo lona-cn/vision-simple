@@ -16,12 +16,34 @@ constexpr std::string_view HTTPSERVER_OPT_KEY_INFER_FRAMEWORK{
     "infer_framework"};
 constexpr std::string_view HTTPSERVER_OPT_KEY_INFER_EP{"infer_ep"};
 constexpr std::string_view HTTPSERVER_OPT_KEY_INFER_DEVICE{"infer_device"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_INFER_IDLE_TIMEOUT_MS{
+    "infer_idle_timeout_ms"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_INFER_SWEEP_INTERVAL_MS{
+    "infer_sweep_interval_ms"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_PIPELINE_CAPACITY{
+    "infer_pipeline_capacity"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_PIPELINE_BATCHES{
+    "infer_pipeline_max_batches"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_MAX_BATCH_IMAGES{
+    "infer_max_batch_images"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_TIMEOUT_MS{"infer_timeout_ms"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_OCR_REC_BATCH_SIZE{
+    "ocr_rec_batch_size"};
 
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_STATIC_DIR{"assets/static"};
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_INFER_FRAMEWORK{
     "kONNXRUNTIME"};
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_INFER_EP{"kCPU"};
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_INFER_DEVICE{"0"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_INFER_IDLE_TIMEOUT_MS{
+    "300000"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_INFER_SWEEP_INTERVAL_MS{
+    "1000"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_PIPELINE_CAPACITY{"4"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_PIPELINE_BATCHES{"4"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_MAX_BATCH_IMAGES{"128"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_TIMEOUT_MS{"60000"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_OCR_REC_BATCH_SIZE{"1"};
 
 struct HTTPServerOptions {
   using ServerOptions = std::map<std::string, std::string>;

@@ -4,29 +4,109 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the selected version tag to Docker Hub
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
 
+# Serialize all registry writers, including manually dispatched releases.
+concurrency:
+  group: docker-cpu-publication
+  cancel-in-progress: false
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'lonacn/vision_simple' }}
+      MANUAL_PUBLISH: ${{ inputs.publish == true && 'true' || 'false' }}
+      # Only our final step may report end-to-end success.
+      DOCKER_BUILD_SUMMARY: 'false'
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          submodules: recursive
+          lfs: true
+
+      - name: Test release policy boundaries
+        run: python3 -m unittest discover -s scripts -p test_docker_release.py
+
+      - name: Resolve release policy
+        id: release
+        run: python3 scripts/docker_release.py plan
+
+      - name: Require publishing credentials
+        if: steps.release.outputs.publish == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "::error::Publishing requires DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets."
+            exit 1
+          fi
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build Docker image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile.debian-bookworm-x86_64-cpu
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          sbom: false
           load: true
           tags: vision-simple:ci
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=vision-simple-linux-x86_64-cpu
           cache-to: type=gha,mode=max,scope=vision-simple-linux-x86_64-cpu
+
+      - name: Pin the local image identity
+        id: tested-image
+        shell: bash
+        run: |
+          image_id="$(docker image inspect --format '{{.Id}}' vision-simple:ci)"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test HTTP container and clean shutdown
+        timeout-minutes: 5
+        env:
+          TEST_IMAGE_ID: ${{ steps.tested-image.outputs.id }}
+        run: python3 scripts/test_docker_smoke.py --image "$TEST_IMAGE_ID"
+
+      - name: Log in to Docker Hub
+        if: steps.release.outputs.publish == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Push the loaded, tested image, not a second build with push:true.
+      - name: Publish tested image and verify registry digests
+        if: steps.release.outputs.publish == 'true'
+        timeout-minutes: 15
+        env:
+          TEST_IMAGE_ID: ${{ steps.tested-image.outputs.id }}
+        run: python3 scripts/docker_release.py publish --local-image "$TEST_IMAGE_ID"
+
+      - name: Summarize build-only verification
+        if: steps.release.outputs.publish == 'false'
+        run: |
+          echo "## Docker build verified (not published)" >> "$GITHUB_STEP_SUMMARY"
+          echo 'The linux/amd64 image passed the HTTP container smoke test and clean shutdown. No registry login or push was performed.' >> "$GITHUB_STEP_SUMMARY"

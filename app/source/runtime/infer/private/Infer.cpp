@@ -6,6 +6,7 @@
 #include <ranges>
 
 #include "LogFacade.h"
+#include "OCRPostProcess.hpp"
 #include "private/InferORT.h"
 using namespace std;
 using namespace cv;
@@ -64,8 +65,6 @@ InferContext::CreateResult InferContext::Create(const InferFramework framework,
         return UNSUPPORTED(framework, ep);
       case InferFramework::kONNXRUNTIME:
         return std::make_unique<InferContextORT>(ep, std::move(args));
-      case InferFramework::kTVM:
-        return UNSUPPORTED(framework, ep);
       default:
         return UNSUPPORTED(framework, ep);
     }
@@ -97,6 +96,10 @@ InferOCR::CreateResult InferOCR::Create(InferContext& context,
                                         OCRModelType model_type,
                                         size_t device_id) noexcept {
   try {
+    const auto* postprocessor = FindOCRPostProcessor(model_type);
+    if (!postprocessor)
+      return MK_VSERROR(VisionSimpleErrorCode::kUnimplementedError,
+                        "Unsupported OCR model type");
     auto char_dict_result = ReadAllLines(char_dict_path);
     if (!char_dict_result)
       return std::unexpected(std::move(char_dict_result.error()));
@@ -113,9 +116,10 @@ InferOCR::CreateResult InferOCR::Create(InferContext& context,
     std::map<int, std::string> char_dict;
     for (size_t idx = 0; idx < char_dict_result->size(); ++idx)
       char_dict.emplace(static_cast<int>(idx), (*char_dict_result)[idx]);
-    // Paddle's character file excludes CTC blank and the trailing space class.
-    // Blank is handled by the decoder; complete the nonblank mapping here.
-    char_dict.emplace(static_cast<int>(char_dict.size()), " ");
+    // File-based PP-OCR keeps its historical trailing space class. SAR's
+    // dictionary is exact; its three special tokens belong to the decoder.
+    if (postprocessor->append_dictionary_space)
+      char_dict.emplace(static_cast<int>(char_dict.size()), " ");
     return Create(context, char_dict, det_data_result->span(),
                   rec_data_rect->span(), model_type, device_id);
   } catch (const std::exception& e) {
@@ -124,27 +128,4 @@ InferOCR::CreateResult InferOCR::Create(InferContext& context,
   }
 }
 
-// InferOCR::DetResult InferOCR::Det(const cv::Mat* images, size_t count)
-// noexcept
-// {
-//     std::vector<std::reference_wrapper<const cv::Mat>> images_vec;
-//     images_vec.reserve(count);
-//     for (decltype(count) i = 0u; i < count; ++i)
-//     {
-//         images_vec.emplace_back(std::cref(images[i]));
-//     }
-//     return Det(images_vec);
-// }
-//
-// InferOCR::RecResult InferOCR::Rec(const cv::Mat* images, size_t count, float
-// confidence_threshold) noexcept
-// {
-//     std::vector<std::reference_wrapper<const cv::Mat>> images_vec;
-//     images_vec.reserve(count);
-//     for (decltype(count) i = 0u; i < count; ++i)
-//     {
-//         images_vec.emplace_back(std::cref(images[i]));
-//     }
-//     return Rec(images_vec, confidence_threshold);
-// }
 }  // namespace vision_simple

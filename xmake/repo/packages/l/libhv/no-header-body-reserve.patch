@@ -1,0 +1,37 @@
+--- a/http/Http1Parser.cpp
++++ b/http/Http1Parser.cpp
+@@ -1,7 +1,5 @@
+ #include "Http1Parser.h"
+ 
+-#define MAX_CONTENT_LENGTH  (1 << 24)   // 16M
+-
+ static int on_url(http_parser* parser, const char *at, size_t length);
+ static int on_status(http_parser* parser, const char *at, size_t length);
+ static int on_header_field(http_parser* parser, const char *at, size_t length);
+@@ -119,10 +117,8 @@
+     if (iter != hp->parsed->headers.end()) {
+         size_t content_length = atoll(iter->second.c_str());
+         hp->parsed->content_length = content_length;
+-        size_t reserve_length = MIN(content_length + 1, MAX_CONTENT_LENGTH);
+-        if ((!skip_body) && reserve_length > hp->parsed->body.capacity()) {
+-            hp->parsed->body.reserve(reserve_length);
+-        }
++        // Stream handlers validate headers before allocating body storage.
++        // Grow only for actual accepted body bytes, never a declared length.
+     }
+     hp->state = HP_HEADERS_COMPLETE;
+     hp->invokeHttpCb();
+@@ -140,11 +136,8 @@
+     printd("on_chunk_header:%llu\n", parser->content_length);
+     Http1Parser* hp = (Http1Parser*)parser->data;
+-    int chunk_size = parser->content_length;
+-    int reserve_size = MIN(chunk_size + 1, MAX_CONTENT_LENGTH);
+-    if (reserve_size > hp->parsed->body.capacity()) {
+-        hp->parsed->body.reserve(reserve_size);
+-    }
++    // Chunk headers are untrusted too; no body bytes have arrived yet.
++    const auto chunk_size = parser->content_length;
+     hp->state = HP_CHUNK_HEADER;
+     hp->invokeHttpCb(NULL, chunk_size);
+     return 0;
+ }

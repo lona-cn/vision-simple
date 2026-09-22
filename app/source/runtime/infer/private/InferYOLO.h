@@ -1,9 +1,12 @@
 #pragma once
 #include <magic_enum.hpp>
 #include <opencv2/opencv.hpp>
+#include <mutex>
+#include <array>
 
 #include "../Infer.h"
 #include "InferORT.h"
+#include "InferTask.h"
 #include "VisionHelper.hpp"
 
 namespace vision_simple {
@@ -44,24 +47,34 @@ class InferYOLOOrtImpl : public InferYOLO {
   ONNXTensorElementDataType input_value_type_, output_value_type_;
   std::string input_name_, output_name_;
   cv::Size2i input_size_;
-  std::vector<int64_t> output_shape_;
-  Ort::Value input_value_;
-  Ort::MemoryInfo output_memory_info_;
+  std::vector<int64_t> input_shape_, output_shape_;
   std::vector<std::string> class_names_;
 
-  VisionHelper vision_helper_;
-  cv::Mat preprocessed_image_;
-  LetterboxTransform transform_;
-  std::vector<float> output_fp32_cache_;
+  struct Workspace;
+  class Task;
+  std::unique_ptr<Workspace> legacy_workspace_;
+  std::array<std::unique_ptr<Workspace>, 2> idle_workspaces_;
+  std::mutex run_mutex_;
+  std::mutex session_mutex_;
+  std::mutex pool_mutex_;
 
- protected:
-  cv::Mat& PreProcess(const cv::Mat& image);
+  std::unique_ptr<Workspace> AcquireWorkspace();
+  void ReleaseWorkspace(std::unique_ptr<Workspace> workspace) noexcept;
+  VSResult<void> PreProcess(Workspace& workspace, const cv::Mat& image,
+                            float confidence_threshold);
+  void Execute(Workspace& workspace);
+  RunResult PostProcess(Workspace& workspace, float confidence_threshold);
+
+  friend VSResult<std::unique_ptr<detail::FrameTask>> detail::MakeFrameTask(
+      InferYOLO& model, const cv::Mat& image,
+      float confidence_threshold) noexcept;
 
  public:
   InferYOLOOrtImpl(InferContextORT& ort_ctx,
                    std::unique_ptr<Ort::Session>&& session,
                    Ort::Allocator&& allocator, YOLOVersion version,
                    std::vector<std::string> class_names);
+  ~InferYOLOOrtImpl() override;
 
   YOLOVersion version() const noexcept override;
 

@@ -28,14 +28,28 @@
     }                                                      \
   }
 
+namespace {
+std::shared_ptr<Ort::Env> SharedEnvironment() {
+  // ORT itself shares the native environment across Env handles. Register its
+  // allocator once, rather than registering it again for each InferContext.
+  static const auto environment = [] {
+    auto env =
+        std::make_shared<Ort::Env>(INFER_CTX_LOG_LEVEL, INFER_CTX_LOG_ID);
+    const auto memory =
+        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    env->CreateAndRegisterAllocator(memory, nullptr);
+    return env;
+  }();
+  return environment;
+}
+}  // namespace
+
 vision_simple::InferContextORT::InferContextORT(const InferEP ep,
                                                 InferArgs args)
     : InferContext(InferFramework::kONNXRUNTIME, ep, std::move(args)),
-      env_(std::make_unique<Ort::Env>(INFER_CTX_LOG_LEVEL, INFER_CTX_LOG_ID)),
+      env_(SharedEnvironment()),
       env_memory_info_(
-          Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)) {
-  env_->CreateAndRegisterAllocator(env_memory_info_, nullptr);
-}
+          Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)) {}
 
 Ort::Env& vision_simple::InferContextORT::env() const noexcept { return *env_; }
 

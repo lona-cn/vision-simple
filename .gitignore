@@ -8,3 +8,4 @@ cmake-build/
 compile_commands.json
 .cache/
 docs/superpowers/
+.mcp.json

@@ -1,29 +1,29 @@
 #pragma once
-#include <optional>
-#include <expected>
 #include <onnxruntime_cxx_api.h>
+
+#include <expected>
+#include <opencv2/opencv.hpp>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
-#include <opencv2/opencv.hpp>
 #ifdef _WIN32
 #include "DXInfo.hpp"
 #endif
+#include "IOUtil.h"
 #include "VisionSimpleCommon.h"
 #include "config.h"
-#include "IOUtil.h"
 
 namespace vision_simple {
 template <typename T>
 using InferResult = VSResult<T>;
 
-enum class InferFramework:uint8_t {
+enum class InferFramework : uint8_t {
   kCUSTOM_FRAMEWORK = 0,
   kONNXRUNTIME = 1,
-  kTVM
 };
 
-enum class InferEP:uint8_t {
+enum class InferEP : uint8_t {
   kCUSTOM_EP = 0,
   kCPU = 1,
   kDML,
@@ -38,12 +38,12 @@ enum class InferEP:uint8_t {
 using InferArgs = std::unordered_map<std::string, std::string>;
 
 class VISION_SIMPLE_API InferContext {
-protected:
+ protected:
   InferFramework framework_;
   InferEP ep_;
   InferArgs args_;
 
-public:
+ public:
   using CreateResult = InferResult<std::unique_ptr<InferContext>>;
   using CtxFactory = std::function<CreateResult(InferFramework framework,
                                                 InferEP ep, InferArgs)>;
@@ -58,11 +58,10 @@ public:
   virtual const InferArgs& args() const noexcept;
   static CreateResult Create(InferFramework framework, InferEP ep,
                              InferArgs args = InferArgs{}) noexcept;
-  // static void RegisterFramework(InferFramework framework, CtxFactory factory) noexcept;
 };
 
 //--------YOLO--------
-enum class YOLOVersion:uint8_t {
+enum class YOLOVersion : uint8_t {
   kVCustom = 0,
   kV10 = 10,
   kV11,
@@ -80,7 +79,7 @@ struct YOLOFrameResult {
 };
 
 class VISION_SIMPLE_API InferYOLO {
-public:
+ public:
   using CreateResult = InferResult<std::unique_ptr<InferYOLO>>;
   using RunResult = InferResult<YOLOFrameResult>;
   InferYOLO() = default;
@@ -90,7 +89,7 @@ public:
   InferYOLO& operator=(const InferYOLO&) = delete;
   InferYOLO& operator=(InferYOLO&&) = default;
   virtual YOLOVersion version() const noexcept = 0;
-  virtual const std::vector<std::string>& class_names() const noexcept =0;
+  virtual const std::vector<std::string>& class_names() const noexcept = 0;
   virtual RunResult Run(const cv::Mat& image,
                         float confidence_threshold) noexcept = 0;
   static CreateResult Create(InferContext& context, std::span<uint8_t> data,
@@ -102,10 +101,10 @@ public:
   static CreateResult Create(InferContext& context, std::span<T> data,
                              YOLOVersion version,
                              size_t device_id = 0) noexcept {
-    return Create(context,
-                  std::span(reinterpret_cast<uint8_t*>(data.data()),
-                            data.size_bytes()),
-                  version, device_id);
+    return Create(
+        context,
+        std::span(reinterpret_cast<uint8_t*>(data.data()), data.size_bytes()),
+        version, device_id);
   }
 
   static CreateResult Create(InferContext& context, const std::string& path,
@@ -114,10 +113,11 @@ public:
 };
 
 //--------OCR--------
-enum class OCRModelType:uint8_t {
+enum class OCRModelType : uint8_t {
   kPPOCRv3 = 0,
   kPPOCRv4,
-  kEasyOCR
+  kEasyOCR,
+  kPaddleSAR
 };
 
 struct OCRResult {
@@ -131,7 +131,7 @@ struct OCRFrameResult {
 };
 
 class VISION_SIMPLE_API InferOCR {
-public:
+ public:
   using CreateResult = InferResult<std::unique_ptr<InferOCR>>;
   using RunResult = InferResult<OCRFrameResult>;
   InferOCR() = default;
@@ -140,7 +140,7 @@ public:
   InferOCR(InferOCR&&) = default;
   InferOCR& operator=(const InferOCR&) = delete;
   InferOCR& operator=(InferOCR&&) = default;
-  virtual OCRModelType model_type() const noexcept =0;
+  virtual OCRModelType model_type() const noexcept = 0;
   virtual RunResult Run(const cv::Mat& image,
                         float confidence_threshold) noexcept = 0;
   static CreateResult Create(InferContext& context,
@@ -157,14 +157,13 @@ public:
                              std::span<T> det_data, std::span<T> rec_data,
                              OCRModelType model_type,
                              size_t device_id = 0) noexcept {
-    return Create(context, std::move(char_dict),
-                  std::span<uint8_t>{
-                      reinterpret_cast<uint8_t*>(det_data.data()),
-                      det_data.size_bytes()},
-                  std::span<uint8_t>{
-                      reinterpret_cast<uint8_t*>(rec_data.data()),
-                      rec_data.size_bytes()},
-                  model_type, device_id);
+    return Create(
+        context, std::move(char_dict),
+        std::span<uint8_t>{reinterpret_cast<uint8_t*>(det_data.data()),
+                           det_data.size_bytes()},
+        std::span<uint8_t>{reinterpret_cast<uint8_t*>(rec_data.data()),
+                           rec_data.size_bytes()},
+        model_type, device_id);
   }
 
   static CreateResult Create(InferContext& context,
@@ -174,4 +173,4 @@ public:
                              OCRModelType model_type,
                              size_t device_id = 0) noexcept;
 };
-}
+}  // namespace vision_simple

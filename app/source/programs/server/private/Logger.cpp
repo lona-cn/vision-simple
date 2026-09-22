@@ -1,32 +1,20 @@
 #include "Logger.h"
-#include <atomic>
-#include <log4cplus/logger.h>
-#include <log4cplus/loggingmacros.h>
+
 #include <log4cplus/configurator.h>
 #include <log4cplus/initializer.h>
-#include <algorithm>
+#include <log4cplus/logger.h>
+#include <log4cplus/loggingmacros.h>
+
 #include <filesystem>
 #include <iostream>
+#include <mutex>
+#include <unordered_map>
 
 #include "LogFacade.h"
 #include "VisionSimpleCommon.h"
 
 namespace {
-std::unique_ptr<log4cplus::Initializer> log4cplus_init{nullptr};
-std::unique_ptr<vision_simple::Logger> instance = nullptr;
-std::mutex instance_mutex{};
-std::string_view CONFIG_PATH = "config/log.properties";
-auto LogSystemInitialize = [mutex = std::make_shared<std::mutex>(),
-      should_run = std::make_shared<std::atomic<bool>>(true)] {
-  if (should_run->load()) {
-    std::lock_guard lock(*mutex);
-    if (should_run->load()) {
-      should_run->store(false);
-      std::cout << "    initialize log system" << std::endl;
-      log4cplus_init = std::make_unique<log4cplus::Initializer>();
-    }
-  }
-};
+constexpr std::string_view CONFIG_PATH = "config/log.properties";
 }
 
 struct StringHash {
@@ -46,10 +34,15 @@ struct StringHash {
 };
 
 struct vision_simple::Logger::Impl {
+  // Construct the runtime before cached loggers and destroy it after them.
+  log4cplus::Initializer initializer;
   std::unordered_map<std::string, log4cplus::Logger, StringHash,
-                     std::equal_to<>> loggers{};
+                     std::equal_to<>>
+      loggers{};
+  std::mutex loggers_mutex;
 
   log4cplus::Logger& GetLogger(std::string_view logger_name) noexcept {
+    std::lock_guard lock{loggers_mutex};
     if (auto it = loggers.find(logger_name); it != loggers.end()) {
       return it->second;
     }
@@ -59,38 +52,37 @@ struct vision_simple::Logger::Impl {
     return loggers.find(logger_name)->second;
   }
 };
-vision_simple::Logger::~Logger() = default;
+vision_simple::Logger::~Logger() { LogFacade::RegisterSink(nullptr); }
 
 vision_simple::Logger::Logger(const std::string& config_path)
-  : impl_(std::make_unique<Impl>()) {
-  LogSystemInitialize();
+    : impl_(std::make_unique<Impl>()) {
+  std::cout << "    initialize log system" << std::endl;
   log4cplus::PropertyConfigurator::doConfigure(
       LOG4CPLUS_STRING_TO_TSTRING(config_path));
 }
 
 vision_simple::VSResult<std::reference_wrapper<vision_simple::Logger>>
 vision_simple::Logger::Instance() noexcept {
+  static std::mutex instance_mutex;
+  static Logger* instance = nullptr;
+  std::lock_guard lock{instance_mutex};
   if (!instance) {
-    auto lock = std::lock_guard{instance_mutex};
-    if (!instance) {
-      if (!std::filesystem::exists(CONFIG_PATH)) {
-        return std::unexpected{
-            VisionSimpleError{VisionSimpleErrorCode::kIOError,
-                              std::format("Configuration file not found:{}",
-                                          CONFIG_PATH)
-            }
-        };
-      }
-      instance = std::unique_ptr<Logger>(new Logger{std::string(CONFIG_PATH)});
-      LogFacade::RegisterSink(instance.get());
+    if (!std::filesystem::exists(CONFIG_PATH)) {
+      return std::unexpected{VisionSimpleError{
+          VisionSimpleErrorCode::kIOError,
+          std::format("Configuration file not found:{}", CONFIG_PATH)}};
     }
+    // Function-local construction registers destruction after log4cplus's
+    // own lazy context. A global unique_ptr registers too early.
+    static Logger singleton{std::string(CONFIG_PATH)};
+    instance = &singleton;
+    LogFacade::RegisterSink(instance);
   }
   return *instance;
 }
 
-void vision_simple::Logger::Write(std::string_view domain,
-                                   LogLevel level,
-                                   std::string_view message) noexcept {
+void vision_simple::Logger::Write(std::string_view domain, LogLevel level,
+                                  std::string_view message) noexcept {
   auto& logger = impl_->GetLogger(domain);
   switch (level) {
     case LogLevel::Debug:

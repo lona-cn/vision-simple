@@ -3,39 +3,39 @@
 #include <hv/HttpServer.h>
 #include <hv/hlog.h>
 #include <hv/hv.h>
-#include <turbobase64/turbob64.h>
-#include <ylt/struct_json/json_writer.h>
 
-#include <nlohmann/json.hpp>
+#include <algorithm>
+#include <charconv>
+#include <chrono>
+#include <format>
 #include <magic_enum.hpp>
-#include <opencv2/core.hpp>
-#include <opencv2/imgcodecs.hpp>
+#include <nlohmann/json.hpp>
 #include <optional>
-#include <shared_mutex>
 #include <string_view>
 
-#include "IOUtil.h"
-#include "Infer.h"
+#include "HTTPExpectation.h"
+#include "InferenceProtocol.h"
 #include "LogFacade.h"
 #include "Logger.h"
-#include "VisionSimpleConfig.h"
+#include "MCPAdapter.h"
+#include "OpenAIAdapter.h"
+#include "SubtitleAdapter.h"
+#include "TrackingAdapter.h"
 #define LOG_DOMAIN_NAME "HTTPServer"
-
 namespace vision_simple {
 namespace {
 struct InferRequest {
   std::string model;
   std::vector<std::string> images;
+  std::optional<std::chrono::milliseconds> timeout;
 };
 
 enum class FailureStage {
   Request,
-  UnknownModel,
-  Image,
-  ModelLoad,
   ModelConfig,
-  Inference,
-  Serialization
+  Serialization,
+  LifecycleRequest,
+  Pagination
 };
 
 struct RequestStage {
@@ -52,53 +52,34 @@ void LogFailure(std::string_view detail) noexcept {
   LogFacade::Error("http", detail);
 }
 
-PreparedResponse ErrorResponse(const RequestStage& stage) {
-  std::string_view code;
-  std::string_view message;
-  http_status status = HTTP_STATUS_INTERNAL_SERVER_ERROR;
-  switch (stage.failure) {
-    case FailureStage::Request:
-      code = "invalid_request";
-      message =
-          "Request must contain a nonempty model and an array of image strings";
-      status = HTTP_STATUS_BAD_REQUEST;
-      break;
-    case FailureStage::UnknownModel:
-      code = "unknown_model";
-      message = "Model is not configured";
-      status = HTTP_STATUS_BAD_REQUEST;
-      break;
-    case FailureStage::Image:
-      code = "invalid_image";
-      message = "Image cannot be decoded";
-      status = HTTP_STATUS_BAD_REQUEST;
-      break;
-    case FailureStage::ModelLoad:
-      code = "model_load_failed";
-      message = "Model cannot be loaded";
-      break;
-    case FailureStage::ModelConfig:
-      code = "model_config_failed";
-      message = "Model configuration cannot be read";
-      break;
-    case FailureStage::Inference:
-      code = "inference_failed";
-      message = "Image inference failed";
-      break;
-    case FailureStage::Serialization:
-      code = "internal_error";
-      message = "Response cannot be serialized";
-      break;
-  }
-  // Only fixed server-owned strings and an integer are interpolated here.
-  // Error responses do not depend on the serializer which may have just failed.
-  return {status,
+PreparedResponse ServiceErrorResponse(const ServiceError& error) {
+  const auto description = DescribeError(error.kind);
+  // Fixed strings only: error output must survive serializer failures.
+  return {static_cast<http_status>(description.status),
           std::format(
               R"({{"error":{{"code":"{}","message":"{}","image_index":{}}}}})",
-              code, message,
-              stage.image_index ? std::to_string(*stage.image_index) : "null")};
+              description.code, description.message,
+              error.image_index ? std::to_string(*error.image_index) : "null")};
 }
-
+PreparedResponse ErrorResponse(const RequestStage& stage) {
+  switch (stage.failure) {
+    case FailureStage::Request:
+      return ServiceErrorResponse({ServiceFailure::kInvalidRequest, {}});
+    case FailureStage::ModelConfig:
+      return ServiceErrorResponse({ServiceFailure::kModelConfig, {}});
+    case FailureStage::Serialization:
+      return ServiceErrorResponse({ServiceFailure::kInternal, {}});
+    case FailureStage::LifecycleRequest:
+      return {
+          HTTP_STATUS_BAD_REQUEST,
+          R"({"error":{"code":"invalid_request","message":"Request must contain a registered task kind and a nonempty model","image_index":null}})"};
+    case FailureStage::Pagination:
+      return {
+          HTTP_STATUS_BAD_REQUEST,
+          R"({"error":{"code":"invalid_request","message":"Limit must be 1 to 200 and offset must be nonnegative integers","image_index":null}})"};
+  }
+  return ServiceErrorResponse({ServiceFailure::kInternal, {}});
+}
 template <typename Handler>
 int HandleRequest(const HttpContextPtr& ctx, RequestStage stage,
                   Handler&& handler) {
@@ -108,236 +89,77 @@ int HandleRequest(const HttpContextPtr& ctx, RequestStage stage,
   } catch (const std::exception& error) {
     LogFailure(error.what());
     response = ErrorResponse(stage);
+  } catch (...) {
+    LogFailure("Unknown HTTP request failure");
+    response = ErrorResponse(stage);
   }
   // This is the only response owner. All processing and serialization finish
   // before libhv's send() ends the response; its returned status is not a
   // setter.
   ctx->setStatus(response.status);
   ctx->setContentType(APPLICATION_JSON);
+  if (response.status == HTTP_STATUS_SERVICE_UNAVAILABLE)
+    ctx->setHeader("Retry-After", "1");
   ctx->response->body = std::move(response.body);
   return ctx->send();
 }
 
-std::optional<InferRequest> ParseRequest(const std::string& body) {
+std::optional<InferRequest> ParseRequest(const std::string& body,
+                                         size_t max_images) {
   const auto json = nlohmann::json::parse(body);
   if (!json.is_object()) return std::nullopt;
   const auto model = json.find("model");
   const auto images = json.find("images");
   if (model == json.end() || !model->is_string() ||
       model->get_ref<const std::string&>().empty() || images == json.end() ||
-      !images->is_array()) {
+      !images->is_array() || images->size() > max_images) {
     return std::nullopt;
   }
   // Validate every field before model lookup, including later image entries.
   for (const auto& image : *images) {
     if (!image.is_string()) return std::nullopt;
   }
+  std::optional<std::chrono::milliseconds> timeout;
+  if (const auto it = json.find("timeout_ms"); it != json.end()) {
+    if (!it->is_number_integer()) return std::nullopt;
+    const auto value = it->get<int64_t>();
+    if (value <= 0 || value > 300000) return std::nullopt;
+    timeout = std::chrono::milliseconds(value);
+  }
   return InferRequest{model->get<std::string>(),
-                      images->get<std::vector<std::string>>()};
+                      images->get<std::vector<std::string>>(), timeout};
 }
-
-int Base64Digit(unsigned char value) noexcept {
-  if (value >= 'A' && value <= 'Z') return value - 'A';
-  if (value >= 'a' && value <= 'z') return value - 'a' + 26;
-  if (value >= '0' && value <= '9') return value - '0' + 52;
-  if (value == '+') return 62;
-  if (value == '/') return 63;
-  return -1;
-}
-
-bool IsBase64(std::string_view text) noexcept {
-  if (text.empty() || text.size() % 4 != 0) return false;
-  const size_t padding =
-      text.back() == '=' ? (text[text.size() - 2] == '=' ? 2 : 1) : 0;
-  const size_t digits = text.size() - padding;
-  for (size_t i = 0; i < digits; ++i) {
-    if (Base64Digit(static_cast<unsigned char>(text[i])) < 0) return false;
-  }
-  // Reject non-canonical padding bits as well as interior/excess '='.
-  const int last = Base64Digit(static_cast<unsigned char>(text[digits - 1]));
-  return (padding != 2 || (last & 15) == 0) &&
-         (padding != 1 || (last & 3) == 0);
-}
-
-std::optional<std::vector<cv::Mat>> DecodeImages(
-    const std::vector<std::string>& encoded, RequestStage& stage) {
-  stage = {FailureStage::Image, std::nullopt};
-  std::vector<cv::Mat> images;
-  images.reserve(encoded.size());
-  for (size_t i = 0; i < encoded.size(); ++i) {
-    stage.image_index = i;
-    const auto& text = encoded[i];
-    if (!IsBase64(text)) return std::nullopt;
-    const auto* data = reinterpret_cast<const unsigned char*>(text.data());
-    const size_t length = tb64declen(data, text.size());
-    if (length == 0) return std::nullopt;
-    std::vector<uint8_t> bytes(length);
-    const size_t decoded = tb64dec(data, text.size(), bytes.data());
-    if (decoded == 0 || decoded != length) return std::nullopt;
-    auto image = cv::imdecode(bytes, cv::IMREAD_COLOR);
-    if (image.empty() || image.dims != 2 || image.rows <= 0 ||
-        image.cols <= 0 || image.type() != CV_8UC3) {
-      return std::nullopt;
-    }
-    images.emplace_back(std::move(image));
-  }
-  return images;
+template <typename T>
+bool ParseInteger(std::string_view text, T& value) {
+  if (text.empty()) return false;
+  const auto result =
+      std::from_chars(text.data(), text.data() + text.size(), value);
+  return result.ec == std::errc{} && result.ptr == text.data() + text.size();
 }
 }  // namespace
-
-struct YOLODetectedObject {
-  int32_t class_id;
-  float confidence;
-  int bbox[4];
-};
-
-struct InferYOLOResponse {
-  std::vector<std::string_view> class_names;
-  std::vector<std::vector<YOLODetectedObject>> results;
-};
-
-struct OCRLine {
-  std::string line;
-  float confidence;
-  int bbox[4];
-};
-
-struct InferOCRResponse {
-  std::vector<std::vector<OCRLine>> results;
-};
-
 class HTTPServerImpl : public HTTPServer {
   HTTPServerOptions options_;
   hv::HttpService http_service_;
   hv::HttpServer http_server_;
-  std::unique_ptr<InferContext> infer_context_;
-  std::shared_mutex yolo_models_cache_mutex_;
-  std::map<std::string, std::unique_ptr<InferYOLO>> yolo_models_cache_;
-  std::shared_mutex ocr_models_cache_mutex_;
-  std::map<std::string, std::unique_ptr<InferOCR>> ocr_models_cache_;
-
-  VSResult<std::optional<std::reference_wrapper<InferYOLO>>> GetYOLOModel(
-      const std::string& name) {
-    {
-      std::shared_lock lock{yolo_models_cache_mutex_};
-      if (auto it = yolo_models_cache_.find(name);
-          it != yolo_models_cache_.end())
-        return *it->second;
-    }
-    std::unique_lock lock{yolo_models_cache_mutex_};
-    if (auto it = yolo_models_cache_.find(name); it != yolo_models_cache_.end())
-      return *it->second;
-    // load model
-    auto config_result = Config::Instance();
-    if (!config_result)
-      return std::unexpected(std::move(config_result.error()));
-    auto& config = config_result->get();
-    if (auto it = std::ranges::find_if(
-            config.model_config().yolo,
-            [&name](const auto& item) { return name == item.name; });
-        it != config.model_config().yolo.end()) {
-      auto& model_info = *it;
-      auto version_opt = magic_enum::enum_cast<YOLOVersion>(model_info.version);
-      if (!version_opt)
-        return std::unexpected{VisionSimpleError{
-            VisionSimpleErrorCode::kModelError,
-            std::format("unknown yolo version: {}", model_info.version)}};
-      auto version = *version_opt;
-      auto data_result = ReadAll(model_info.path);
-      if (!data_result) return std::unexpected(std::move(data_result.error()));
-      auto& device_str = options_.OptionOrPut(
-          HTTPSERVER_OPT_KEY_INFER_DEVICE, HTTPSERVER_OPT_DEFVAL_INFER_DEVICE);
-      int device_id{0};
-      try {
-        device_id = std::stoi(device_str);
-      } catch (std::exception& _) {
-        return std::unexpected{
-            VisionSimpleError{VisionSimpleErrorCode::kParameterError,
-                              "device_id is not a integer: " + device_str}};
-      }
-      auto infer_yolo_result = InferYOLO::Create(
-          *infer_context_, data_result->span(), version, device_id);
-      if (!infer_yolo_result) {
-        return std::unexpected{VisionSimpleError{
-            VisionSimpleErrorCode::kModelError,
-            std::format("unable to create infer yolo model:{},message:{} ",
-                        name, infer_yolo_result.error().message)}};
-      }
-      yolo_models_cache_.emplace(name, std::move(*infer_yolo_result));
-      LogFacade::Info("http", std::format("yolo model '{}' loaded", name));
-      return *yolo_models_cache_[name];
-    }
-    return std::optional<std::reference_wrapper<InferYOLO>>{};
-  }
-
-  VSResult<std::optional<std::reference_wrapper<InferOCR>>> GetOCRModel(
-      const std::string& name) {
-    {
-      std::shared_lock lock{ocr_models_cache_mutex_};
-      if (auto it = ocr_models_cache_.find(name); it != ocr_models_cache_.end())
-        return *it->second;
-    }
-    std::unique_lock lock{ocr_models_cache_mutex_};
-    if (auto it = ocr_models_cache_.find(name); it != ocr_models_cache_.end())
-      return *it->second;
-    auto config_result = Config::Instance();
-    if (!config_result)
-      return std::unexpected(std::move(config_result.error()));
-    auto& config = config_result->get();
-    if (auto it = std::ranges::find_if(
-            config.model_config().ocr,
-            [&name](const auto& item) { return name == item.name; });
-        it != config.model_config().ocr.end()) {
-      const auto& model_info = *it;
-      auto model_type_opt =
-          magic_enum::enum_cast<OCRModelType>(model_info.version);
-      if (!model_type_opt)
-        return MK_VSERROR(
-            VisionSimpleErrorCode::kParameterError,
-            std::format("unknown version:{}", model_info.version));
-      auto model_type = *model_type_opt;
-      auto& device_str = options_.OptionOrPut(
-          HTTPSERVER_OPT_KEY_INFER_DEVICE, HTTPSERVER_OPT_DEFVAL_INFER_DEVICE);
-      int device_id{0};
-      try {
-        device_id = std::stoi(device_str);
-      } catch (std::exception& _) {
-        return std::unexpected{
-            VisionSimpleError{VisionSimpleErrorCode::kParameterError,
-                              "device_id is not a integer: " + device_str}};
-      }
-      auto infer_ocr_result = InferOCR::Create(
-          *infer_context_, model_info.char_dict_path, model_info.det_path,
-          model_info.rec_path, model_type, device_id);
-      if (!infer_ocr_result) {
-        return std::unexpected{VisionSimpleError{
-            VisionSimpleErrorCode::kModelError,
-            std::format("unable to create infer ocr model:{},message:{} ", name,
-                        infer_ocr_result.error().message)}};
-      }
-      ocr_models_cache_.emplace(name, std::move(*infer_ocr_result));
-      LogFacade::Info("http",
-                      std::format("ocr model loaded (det={}, rec={})",
-                                  model_info.det_path, model_info.rec_path));
-      return *ocr_models_cache_[name];
-    }
-    return std::optional<std::reference_wrapper<InferOCR>>{};
-  }
+  std::shared_ptr<InferenceService> service_;
+  std::unique_ptr<MCPAdapter> mcp_;
+  std::unique_ptr<TrackingAdapter> tracking_;
+  std::unique_ptr<SubtitleAdapter> subtitles_;
 
  public:
-  explicit HTTPServerImpl(HTTPServerOptions&& options,
-                          std::unique_ptr<InferContext>&& infer_context)
-      : HTTPServer{},
-        options_(std::move(options)),
-        http_service_(),
-        http_server_(),
-        infer_context_{std::move(infer_context)},
-        yolo_models_cache_{} {
-    // static resource
-    http_service_.Static("/", options_
-                                  .OptionOrPut(HTTPSERVER_OPT_KEY_STATIC_DIR,
-                                               HTTPSERVER_OPT_DEFVAL_STATIC_DIR)
-                                  .c_str());
+  HTTPServerImpl(HTTPServerOptions&& options,
+                 std::shared_ptr<InferenceService> service,
+                 std::unique_ptr<MCPAdapter> mcp,
+                 std::unique_ptr<TrackingAdapter> tracking,
+                 std::unique_ptr<SubtitleAdapter> subtitles)
+      : options_(std::move(options)),
+        service_(std::move(service)),
+        mcp_(std::move(mcp)),
+        tracking_(std::move(tracking)),
+        subtitles_(std::move(subtitles)) {
+    http_service_.Static(
+        "/", options_.options.at(std::string(HTTPSERVER_OPT_KEY_STATIC_DIR))
+                 .c_str());
     // register handles
     // /v0/infer/yolo
     http_service_.POST("/v0/infer/yolo", [this](const HttpContextPtr& ctx) {
@@ -347,22 +169,53 @@ class HTTPServerImpl : public HTTPServer {
     http_service_.POST("/v0/infer/ocr", [this](const HttpContextPtr& ctx) {
       return this->HandleInferOCR(ctx);
     });
+    for (const auto& task : RegisteredTasks()) {
+      http_service_.POST(
+          ("/v1/infer/" + std::string(task.id)).c_str(),
+          [this, kind = task.kind](const HttpContextPtr& ctx,
+                                   http_parser_state phase, const char* data,
+                                   size_t size) {
+            return HandleStreamingInfer(ctx, kind, phase, data, size);
+          });
+    }
     // /v0/infer/models
     http_service_.GET("/v0/infer/models", [this](const HttpContextPtr& ctx) {
       return this->HandleInferModels(ctx);
     });
+    http_service_.POST("/v0/infer/unload", [this](const HttpContextPtr& ctx) {
+      return HandleUnload(ctx);
+    });
+    http_service_.GET("/v0/infer/stats", [this](const HttpContextPtr& ctx) {
+      return HandleStats(ctx);
+    });
     http_service_.Use([](const HttpContextPtr& ctx) {
       Logger::Instance()->get().Info(
           LOG_DOMAIN_NAME,
-          std::format("{}:{} -> {}", ctx->ip(), ctx->port(), ctx->url()));
+          std::format("{}:{} -> {}", ctx->ip(), ctx->port(),
+                      std::string_view(ctx->request->url)
+                          .substr(0, ctx->request->url.find('?'))));
       return HTTP_STATUS_NEXT;
     });
     http_service_.AllowCORS();
+    // libhv's CORS middleware answers OPTIONS before route handlers run.
+    // Keep its v0 behavior, but never let it bypass MCP Origin validation.
+    auto cors = std::move(http_service_.middleware.back().sync_handler);
+    http_service_.middleware.back().sync_handler =
+        [cors = std::move(cors)](HttpRequest* request, HttpResponse* response) {
+          const auto path = std::string_view(request->path);
+          if (path == "/mcp" || path.starts_with("/mcp/") ||
+              path.starts_with("/mcp?"))
+            return HTTP_STATUS_NEXT;
+          return cors(request, response);
+        };
     http_service_.enable_access_log = 0;
 
     http_server_.setHost(options_.host.c_str());
     http_server_.port = options_.port;
     http_server_.service = &http_service_;
+    // Context handlers execute on libhv IO threads, not its async pool.
+    // Multiple workers allow lifecycle routes to run alongside inference.
+    http_server_.setThreadNum(4);
     logger_set_handler(
         hv_default_logger(), [](int log_level, const char* buf, int len) {
           auto msg = std::string(buf, len);
@@ -386,8 +239,13 @@ class HTTPServerImpl : public HTTPServer {
                 "libhv", msg.substr(msg.find_first_of("INFO") + 6));
           }
         });
-  }
 
+    RegisterOpenAI(http_service_, service_);
+    mcp_->Mount(http_service_, http_server_);
+    tracking_->Mount(http_service_);
+    subtitles_->Mount(http_service_);
+  }
+  ~HTTPServerImpl() override { Stop(); }
   const HTTPServerOptions& options() const noexcept override {
     return options_;
   }
@@ -396,8 +254,12 @@ class HTTPServerImpl : public HTTPServer {
 
   HTTPServerResult<void> StartAsync() noexcept override { return Start(false); }
 
-  void Stop() noexcept override { http_server_.stop(); }
-
+  void Stop() noexcept override {
+    if (subtitles_) subtitles_->Stop();
+    if (tracking_) tracking_->Stop();
+    if (mcp_) mcp_->Stop();
+    http_server_.stop();
+  }
   HTTPServerResult<void> Start(bool wait) noexcept {
     try {
       const int result = http_server_run(&http_server_, wait ? 1 : 0);
@@ -421,139 +283,148 @@ class HTTPServerImpl : public HTTPServer {
   }
 
   int HandleInferModels(const HttpContextPtr& ctx) {
+    return HandleRequest(ctx, {FailureStage::ModelConfig, {}},
+                         [this](RequestStage& stage) -> PreparedResponse {
+                           auto catalog = service_->ListModels();
+                           if (!catalog)
+                             return ServiceErrorResponse(catalog.error());
+                           stage = {FailureStage::Serialization, {}};
+                           nlohmann::json legacy{
+                               {"yolo", nlohmann::json::array()},
+                               {"ocr", nlohmann::json::array()}};
+                           for (const auto& model : catalog->models)
+                             if (model.task == "yolo" || model.task == "ocr")
+                               legacy[model.task].push_back(model.name);
+                           return {HTTP_STATUS_OK, legacy.dump()};
+                         });
+  }
+  int HandleUnload(const HttpContextPtr& ctx) {
     return HandleRequest(
-        ctx, {FailureStage::ModelConfig, std::nullopt},
-        [](RequestStage& stage) -> PreparedResponse {
-          auto config_result = Config::Instance();
-          if (!config_result) {
-            LogFailure(config_result.error().message);
+        ctx, {FailureStage::LifecycleRequest, std::nullopt},
+        [this, &ctx](RequestStage& stage) -> PreparedResponse {
+          const auto body = nlohmann::json::parse(ctx->body());
+          if (!body.is_object()) return ErrorResponse(stage);
+          const auto kind = body.find("kind");
+          const auto model = body.find("model");
+          if (kind == body.end() || !kind->is_string() || model == body.end() ||
+              !model->is_string() ||
+              model->get_ref<const std::string&>().empty())
             return ErrorResponse(stage);
-          }
-          const auto& model_config = config_result->get().model_config();
-          std::map<std::string_view, std::vector<std::string_view>> model_list;
-          auto& yolo_list = model_list["yolo"];
-          auto& ocr_list = model_list["ocr"];
-          for (const auto& info : model_config.yolo)
-            yolo_list.emplace_back(info.name);
-          for (const auto& info : model_config.ocr)
-            ocr_list.emplace_back(info.name);
+          const auto& kind_name = kind->get_ref<const std::string&>();
+          const auto& name = model->get_ref<const std::string&>();
+          const auto* task = FindTask(kind_name);
+          if (!task) return ErrorResponse(stage);
+          // Prepare the response before mutating the cache.
           stage = {FailureStage::Serialization, std::nullopt};
-          PreparedResponse response;
-          struct_json::to_json(model_list, response.body);
+          PreparedResponse response{
+              HTTP_STATUS_OK,
+              nlohmann::json{
+                  {"kind", kind_name}, {"model", name}, {"unloaded", true}}
+                  .dump()};
+
+          auto unloaded = service_->Unload(task->kind, name);
+          if (!unloaded) return ServiceErrorResponse(unloaded.error());
           return response;
         });
   }
+  int HandleStats(const HttpContextPtr& ctx) {
+    return HandleRequest(
+        ctx, {FailureStage::Pagination, std::nullopt},
+        [this, &ctx](RequestStage& stage) -> PreparedResponse {
+          size_t limit = 100, offset = 0;
+          const auto& params = ctx->params();
+          if (const auto it = params.find("limit"); it != params.end()) {
+            if (!ParseInteger(it->second, limit) || limit == 0 || limit > 200)
+              return ErrorResponse(stage);
+          }
+          if (const auto it = params.find("offset"); it != params.end()) {
+            if (!ParseInteger(it->second, offset)) return ErrorResponse(stage);
+          }
+          stage = {FailureStage::Serialization, std::nullopt};
 
+          auto stats = service_->Stats(limit, offset);
+          if (!stats) return ServiceErrorResponse(stats.error());
+          PreparedResponse response;
+          struct_json::to_json(*stats, response.body);
+          return response;
+        });
+  }
+  int HandleInfer(const HttpContextPtr& ctx, InferenceKind kind) {
+    const auto started = std::chrono::steady_clock::now();
+    std::optional<InferenceResponse> inference;
+    return HandleRequest(ctx, {}, [&](RequestStage& stage) -> PreparedResponse {
+      auto request = ParseRequest(
+          ctx->body(), service_->options().pipeline.max_batch_images);
+      if (!request) return ErrorResponse(stage);
+      auto result = service_->Run(
+          kind, request->model, request->images,
+          ServiceControl{.timeout = request->timeout, .started = started});
+      if (!result) return ServiceErrorResponse(result.error());
+      inference.emplace(std::move(*result));
+      stage = {FailureStage::Serialization, {}};
+      PreparedResponse response{HTTP_STATUS_OK, SerializeInference(*inference)};
+      inference->Succeed();
+      return response;
+    });
+  }
+  int HandleStreamingInfer(const HttpContextPtr& ctx, InferenceKind kind,
+                           http_parser_state phase, const char* data,
+                           size_t size) {
+    constexpr size_t kBodyLimit = 64 * 1024 * 1024;
+    constexpr auto kBodyTooLarge = static_cast<http_status>(413);
+    if (phase == HP_ERROR) return HTTP_STATUS_UNFINISHED;
+    if (ctx->response->status_code >= 400) return ctx->response->status_code;
+    const auto expectation = ctx->header("Expect");
+    const bool continue_expected =
+        ParseHTTPExpectation(expectation) == HTTPExpectation::kContinue;
+    const auto reject = [&](http_status status, const char* code,
+                            const char* message) {
+      ctx->setStatus(status);
+      ctx->setContentType(APPLICATION_JSON);
+      ctx->response->body = nlohmann::json{{"error",
+                                            {{"code", code},
+                                             {"message", message},
+                                             {"image_index", nullptr}}}}
+                                .dump();
+      if (status == kBodyTooLarge || !expectation.empty()) {
+        ctx->setHeader("Connection", "close");
+        return ctx->send();
+      }
+      return static_cast<int>(status);
+    };
+    if (phase == HP_HEADERS_COMPLETE) {
+      if (!expectation.empty() && !continue_expected)
+        return reject(static_cast<http_status>(417), "expectation_failed",
+                      "Unsupported expectation");
+      if (!ctx->is(APPLICATION_JSON))
+        return reject(HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE,
+                      "unsupported_media_type", "Use application/json");
+      const auto declared = ctx->header("Content-Length");
+      uint64_t length = 0;
+      if (!declared.empty() &&
+          (!ParseInteger(declared, length) || length > kBodyLimit))
+        return reject(kBodyTooLarge, "request_too_large",
+                      "Request body exceeds 64 MiB");
+      if (continue_expected)
+        ctx->writer->write("HTTP/1.1 100 Continue\r\n\r\n");
+    } else if (phase == HP_BODY) {
+      if (size > kBodyLimit - ctx->request->body.size())
+        return reject(kBodyTooLarge, "request_too_large",
+                      "Request body exceeds 64 MiB");
+      ctx->request->body.append(data, size);
+    } else if (phase == HP_MESSAGE_COMPLETE) {
+      return HandleInfer(ctx, kind);
+    }
+    return HTTP_STATUS_UNFINISHED;
+  }
   int HandleInferYOLO(const HttpContextPtr& ctx) {
-    return HandleRequest(
-        ctx, {}, [this, &ctx](RequestStage& stage) -> PreparedResponse {
-          auto request = ParseRequest(ctx->body());
-          if (!request) return ErrorResponse(stage);
-          stage = {FailureStage::ModelConfig, std::nullopt};
-          if (auto config = Config::Instance(); !config) {
-            LogFailure(config.error().message);
-            return ErrorResponse(stage);
-          }
-          stage = {FailureStage::ModelLoad, std::nullopt};
-          auto model = GetYOLOModel(request->model);
-          if (!model) {
-            LogFailure(model.error().message);
-            return ErrorResponse(stage);
-          }
-          if (!*model)
-            return ErrorResponse({FailureStage::UnknownModel, std::nullopt});
-          auto& infer = model->value().get();
-          auto images = DecodeImages(request->images, stage);
-          if (!images) return ErrorResponse(stage);
-          std::vector<YOLOFrameResult> all_results;
-          all_results.reserve(images->size());
-          for (size_t i = 0; i < images->size(); ++i) {
-            stage = {FailureStage::Inference, i};
-            auto result = infer.Run((*images)[i], 0.125f);
-            if (!result) {
-              LogFailure(result.error().message);
-              return ErrorResponse(stage);
-            }
-            all_results.emplace_back(std::move(*result));
-          }
-          stage = {FailureStage::Serialization, std::nullopt};
-          InferYOLOResponse body;
-          body.class_names.assign(infer.class_names().cbegin(),
-                                  infer.class_names().cend());
-          body.results.reserve(all_results.size());
-          for (const auto& frame : all_results) {
-            std::vector<YOLODetectedObject> objects;
-            objects.reserve(frame.results.size());
-            for (const auto& result : frame.results) {
-              const auto& box = result.bbox;
-              objects.emplace_back(
-                  YOLODetectedObject{result.class_id,
-                                     result.confidence,
-                                     {box.x, box.y, box.width, box.height}});
-            }
-            body.results.emplace_back(std::move(objects));
-          }
-          PreparedResponse response;
-          struct_json::to_json(body, response.body);
-          return response;
-        });
+    return HandleInfer(ctx, InferenceKind::kYOLO);
   }
-
   int HandleInferOCR(const HttpContextPtr& ctx) {
-    return HandleRequest(
-        ctx, {}, [this, &ctx](RequestStage& stage) -> PreparedResponse {
-          auto request = ParseRequest(ctx->body());
-          if (!request) return ErrorResponse(stage);
-          stage = {FailureStage::ModelConfig, std::nullopt};
-          if (auto config = Config::Instance(); !config) {
-            LogFailure(config.error().message);
-            return ErrorResponse(stage);
-          }
-          stage = {FailureStage::ModelLoad, std::nullopt};
-          auto model = GetOCRModel(request->model);
-          if (!model) {
-            LogFailure(model.error().message);
-            return ErrorResponse(stage);
-          }
-          if (!*model)
-            return ErrorResponse({FailureStage::UnknownModel, std::nullopt});
-          auto& infer = model->value().get();
-          auto images = DecodeImages(request->images, stage);
-          if (!images) return ErrorResponse(stage);
-          std::vector<OCRFrameResult> all_results;
-          all_results.reserve(images->size());
-          for (size_t i = 0; i < images->size(); ++i) {
-            stage = {FailureStage::Inference, i};
-            auto result = infer.Run((*images)[i], 0.125f);
-            if (!result) {
-              LogFailure(result.error().message);
-              return ErrorResponse(stage);
-            }
-            all_results.emplace_back(std::move(*result));
-          }
-          stage = {FailureStage::Serialization, std::nullopt};
-          InferOCRResponse body;
-          body.results.reserve(all_results.size());
-          for (auto& frame : all_results) {
-            std::vector<OCRLine> lines;
-            lines.reserve(frame.results.size());
-            for (auto& result : frame.results) {
-              const auto& box = result.rect;
-              lines.emplace_back(
-                  OCRLine{std::move(result.line),
-                          result.confidence,
-                          {box.x, box.y, box.width, box.height}});
-            }
-            body.results.emplace_back(std::move(lines));
-          }
-          PreparedResponse response;
-          struct_json::to_json(body, response.body);
-          return response;
-        });
+    return HandleInfer(ctx, InferenceKind::kOCR);
   }
 };
 }  // namespace vision_simple
-
 const std::string& vision_simple::HTTPServerOptions::OptionOrPut(
     const std::string& key, const std::string& default_value) {
   if (auto it = options.find(key); it != options.end()) {
@@ -581,6 +452,61 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) try {
     return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
                       "port must be greater than zero");
   }
+  options.OptionOrPut(HTTPSERVER_OPT_KEY_STATIC_DIR,
+                      HTTPSERVER_OPT_DEFVAL_STATIC_DIR);
+  const auto& device_text = options.OptionOrPut(
+      HTTPSERVER_OPT_KEY_INFER_DEVICE, HTTPSERVER_OPT_DEFVAL_INFER_DEVICE);
+  const auto& idle_text =
+      options.OptionOrPut(HTTPSERVER_OPT_KEY_INFER_IDLE_TIMEOUT_MS,
+                          HTTPSERVER_OPT_DEFVAL_INFER_IDLE_TIMEOUT_MS);
+  const auto& sweep_text =
+      options.OptionOrPut(HTTPSERVER_OPT_KEY_INFER_SWEEP_INTERVAL_MS,
+                          HTTPSERVER_OPT_DEFVAL_INFER_SWEEP_INTERVAL_MS);
+  int device_id = 0;
+  uint64_t idle_ms = 0, sweep_ms = 0;
+  // Bound conversions and steady-clock arithmetic, including wait deadlines.
+  const auto max_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::duration::max())
+          .count() /
+      2);
+  if (!ParseInteger(device_text, device_id) || device_id < 0 ||
+      !ParseInteger(idle_text, idle_ms) || idle_ms > max_ms ||
+      !ParseInteger(sweep_text, sweep_ms) || sweep_ms == 0 ||
+      sweep_ms > max_ms) {
+    return MK_VSERROR(
+        VisionSimpleErrorCode::kParameterError,
+        "infer_device and infer_idle_timeout_ms must be nonnegative integers; "
+        "infer_sweep_interval_ms must be a positive integer within clock "
+        "range");
+  }
+  PipelineOptions pipeline_options;
+  uint64_t timeout_ms = 0;
+  size_t ocr_rec_batch_size = 1;
+  if (!ParseInteger(
+          options.OptionOrPut(HTTPSERVER_OPT_KEY_PIPELINE_CAPACITY,
+                              HTTPSERVER_OPT_DEFVAL_PIPELINE_CAPACITY),
+          pipeline_options.capacity) ||
+      !ParseInteger(options.OptionOrPut(HTTPSERVER_OPT_KEY_PIPELINE_BATCHES,
+                                        HTTPSERVER_OPT_DEFVAL_PIPELINE_BATCHES),
+                    pipeline_options.max_batches) ||
+      !ParseInteger(options.OptionOrPut(HTTPSERVER_OPT_KEY_MAX_BATCH_IMAGES,
+                                        HTTPSERVER_OPT_DEFVAL_MAX_BATCH_IMAGES),
+                    pipeline_options.max_batch_images) ||
+      !ParseInteger(options.OptionOrPut(HTTPSERVER_OPT_KEY_TIMEOUT_MS,
+                                        HTTPSERVER_OPT_DEFVAL_TIMEOUT_MS),
+                    timeout_ms) ||
+      !ParseInteger(
+          options.OptionOrPut(HTTPSERVER_OPT_KEY_OCR_REC_BATCH_SIZE,
+                              HTTPSERVER_OPT_DEFVAL_OCR_REC_BATCH_SIZE),
+          ocr_rec_batch_size) ||
+      ocr_rec_batch_size == 0 || ocr_rec_batch_size > 64 || timeout_ms == 0 ||
+      timeout_ms > 300000) {
+    return MK_VSERROR(
+        VisionSimpleErrorCode::kParameterError,
+        "pipeline limits must be integers and infer_timeout_ms "
+        "must be 1 to 300000; ocr_rec_batch_size must be 1 to 64");
+  }
   auto infer_fw_str =
       options.OptionOrPut(HTTPSERVER_OPT_KEY_INFER_FRAMEWORK,
                           HTTPSERVER_OPT_DEFVAL_INFER_FRAMEWORK);
@@ -593,17 +519,28 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) try {
         VisionSimpleErrorCode::kParameterError,
         std::format("unsupported infer_framework:{} or infer_ep:{}",
                     infer_fw_str, infer_ep_str)});
-  auto infer_context = InferContext::Create(*infer_fw, *infer_ep);
-  if (!infer_context)
-    return std::unexpected(VisionSimpleError{
-        VisionSimpleErrorCode::kModelError,
-        std::format("unable to create infer context with {}:{},error:{}",
-                    infer_fw_str, infer_ep_str,
-                    infer_context.error().message)});
+
+  auto service = InferenceService::Create(InferenceServiceOptions{
+      .framework = *infer_fw,
+      .ep = *infer_ep,
+      .device_id = device_id,
+      .idle_timeout = std::chrono::milliseconds(idle_ms),
+      .sweep_interval = std::chrono::milliseconds(sweep_ms),
+      .pipeline = pipeline_options,
+      .request_timeout = std::chrono::milliseconds(timeout_ms),
+      .ocr_rec_batch_size = ocr_rec_batch_size});
+  if (!service) return std::unexpected(std::move(service.error()));
   Logger::Instance()->get().Info(
       LOG_DOMAIN_NAME, std::format("Execution Provider:{}", infer_ep_str));
-  return std::make_unique<HTTPServerImpl>(std::move(options),
-                                          std::move(*infer_context));
+  auto mcp = MCPAdapter::Create(*service, options.host, options.port);
+  if (!mcp) return std::unexpected(std::move(mcp.error()));
+  auto tracking = TrackingAdapter::Create();
+  if (!tracking) return std::unexpected(std::move(tracking.error()));
+  auto subtitles = SubtitleAdapter::Create(*service);
+  if (!subtitles) return std::unexpected(std::move(subtitles.error()));
+  return std::make_unique<HTTPServerImpl>(
+      std::move(options), std::move(*service), std::move(*mcp),
+      std::move(*tracking), std::move(*subtitles));
 } catch (const std::exception& error) {
   return MK_VSERROR(
       VisionSimpleErrorCode::kRuntimeError,
