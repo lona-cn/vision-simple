@@ -54,14 +54,15 @@ bool Same(const YOLOTaskFrameResult& a, const YOLOTaskFrameResult& b) {
       a);
 }
 int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
-             const char* stem) {
+             const char* stem, YOLOVersion version = YOLOVersion::kV11,
+             bool end_to_end = false) {
   auto model = InferYOLOTask::Create(
-      context, (assets / (std::string(stem) + ".onnx")).string(), task);
+      context, (assets / (std::string(stem) + ".onnx")).string(), task, version);
   if (!model) std::cerr << model.error().message << '\n';
   TEST_ASSERT(model, "create FP32 task model");
   auto bytes = ReadAll((assets / (std::string(stem) + "_fp16.onnx")).string());
   TEST_ASSERT(bytes, "read FP16 task model");
-  auto half = InferYOLOTask::Create(context, bytes->span(), task);
+  auto half = InferYOLOTask::Create(context, bytes->span(), task, version);
   TEST_ASSERT(half, "create FP16 task model from memory");
   const cv::Mat square(64, 64, CV_8UC3, cv::Scalar::all(0));
   auto reference = (*model)->Run(square, .5f);
@@ -70,8 +71,8 @@ int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
               "FP16/FP32 decode agrees");
   if (task == YOLOTask::kSegmentation) {
     const auto& items = std::get<YOLOSegmentationFrame>(*reference).results;
-    TEST_ASSERT(items.size() == 2,
-                "segmentation removes duplicate and preserves second class");
+    TEST_ASSERT(items.size() == (end_to_end ? 3 : 2),
+                "only raw segmentation suppresses overlapping instances");
     TEST_ASSERT(
         items[0].class_id == 1 && items[0].bbox == cv::Rect(40, 40, 16, 16) &&
             items[1].class_id == 0 && items[1].bbox == cv::Rect(4, 4, 24, 24),
@@ -95,8 +96,11 @@ int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
                 "later workspace reuse does not mutate retained masks");
   } else if (task == YOLOTask::kPose) {
     const auto& items = std::get<YOLOPoseFrame>(*reference).results;
-    TEST_ASSERT(items.size() == 2 && items[1].keypoints.size() == 2,
-                "pose suppresses duplicate while retaining keypoints");
+    TEST_ASSERT(items.size() == (end_to_end ? 3 : 2) &&
+                    items[1].keypoints.size() == 2,
+                "only raw pose suppresses overlapping instances");
+    TEST_ASSERT(items[1].bbox == cv::Rect(4, 4, 24, 24),
+                "pose raw xywh and e2e xyxy restore the same box");
     TEST_ASSERT(Near(items[1].keypoints[0].x, 10) &&
                     Near(items[1].keypoints[0].y, 12) &&
                     Near(items[1].keypoints[1].x, 22) &&
@@ -113,14 +117,17 @@ int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
         "clipping");
   } else {
     const auto& items = std::get<YOLOOBBFrame>(*reference).results;
-    TEST_ASSERT(items.size() == 2 && Near(items[0].angle, -.785398f) &&
+    TEST_ASSERT(items.size() == (end_to_end ? 3 : 2) &&
+                    Near(items[0].angle, -.785398f) &&
                     Near(items[1].angle, .785398f),
-                "crossed boxes survive rotated IoU while parallel duplicate is "
-                "suppressed");
+                "raw rotated NMS suppresses parallel duplicate; e2e retains it");
     TEST_ASSERT(
         Near(items[1].corners[1].x - items[1].corners[0].x, 28.28427f) &&
             Near(items[1].corners[1].y - items[1].corners[0].y, 28.28427f),
         "ordered corners preserve oriented width edge");
+    const auto center = (items[1].corners[0] + items[1].corners[2]) * .5f;
+    TEST_ASSERT(Near(center.x, 32) && Near(center.y, 32),
+                "OBB retains center coordinates rather than decoding as xyxy");
     auto wide =
         (*model)->Run(cv::Mat(16, 128, CV_8UC3, cv::Scalar::all(0)), .5f);
     TEST_ASSERT(wide, "OBB supports severe letterbox padding");
@@ -155,7 +162,7 @@ int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
               "failed request releases reusable workspace and capacity");
   auto mismatch = InferYOLOTask::Create(
       context, (assets / (std::string(stem) + ".onnx")).string(),
-      task == YOLOTask::kPose ? YOLOTask::kOBB : YOLOTask::kPose);
+      task == YOLOTask::kPose ? YOLOTask::kOBB : YOLOTask::kPose, version);
   TEST_ASSERT(!mismatch, "task metadata or output layout mismatch rejected");
   return 0;
 }
@@ -166,7 +173,8 @@ int MetadataAndRecovery(InferContext& context, const fs::path& assets) {
   const std::vector<std::string> expected{
       "worker's glove", "say 'hi' \\ \xc3\xa9 \xf0\x9f\x98\x80"};
   auto named =
-      InferYOLOTask::Create(context, path("names_obb"), YOLOTask::kOBB);
+      InferYOLOTask::Create(context, path("names_obb"), YOLOTask::kOBB,
+                            YOLOVersion::kV11);
   TEST_ASSERT(named && (*named)->class_names() == expected,
               "quoted keys, apostrophes, escaped quotes/backslashes and "
               "Unicode preserve labels; quoted flag text is not NMS");
@@ -179,16 +187,19 @@ int MetadataAndRecovery(InferContext& context, const fs::path& assets) {
   for (const char* name :
        {"names_invalid", "names_unclosed", "names_escape_invalid"})
     TEST_ASSERT(
-        !InferYOLOTask::Create(context, path(name), YOLOTask::kOBB),
+        !InferYOLOTask::Create(context, path(name), YOLOTask::kOBB,
+                               YOLOVersion::kV11),
         "invalid names reject instead of truncating or mislabeling classes");
   for (const char* name : {"pose_nms_python", "pose_nms_json", "pose_end2end",
                            "pose_nms_direct", "pose_end2end_args"})
     TEST_ASSERT(
-        !InferYOLOTask::Create(context, path(name), YOLOTask::kPose),
+        !InferYOLOTask::Create(context, path(name), YOLOTask::kPose,
+                               YOLOVersion::kV11),
         "exported NMS metadata rejects shape collision with raw pose channels");
   const cv::Mat black(64, 64, CV_8UC3, cv::Scalar::all(0));
   const cv::Mat white(64, 64, CV_8UC3, cv::Scalar::all(255));
-  auto d2 = InferYOLOTask::Create(context, path("pose_d2"), YOLOTask::kPose);
+  auto d2 = InferYOLOTask::Create(context, path("pose_d2"), YOLOTask::kPose,
+                                 YOLOVersion::kV11);
   TEST_ASSERT(d2, "create two-dimensional keypoints model");
   auto points = (*d2)->Run(black, .5f);
   TEST_ASSERT(points, "decode two-dimensional keypoints");
@@ -203,7 +214,8 @@ int MetadataAndRecovery(InferContext& context, const fs::path& assets) {
     for (const auto& point : item.keypoints)
       TEST_ASSERT(point.confidence == 1.f,
                   "D2 keypoints have implicit confidence one");
-  auto nan = InferYOLOTask::Create(context, path("pose_nan"), YOLOTask::kPose);
+  auto nan = InferYOLOTask::Create(context, path("pose_nan"), YOLOTask::kPose,
+                                  YOLOVersion::kV11);
   TEST_ASSERT(nan, "create input-dependent non-finite output model");
   auto before = (*nan)->Run(black, .5f);
   TEST_ASSERT(before, "finite output succeeds before runtime NaN");
@@ -226,6 +238,35 @@ int MetadataAndRecovery(InferContext& context, const fs::path& assets) {
               "pipeline recovers capacity and workspaces after NaN output");
   return 0;
 }
+int InvalidYOLO26(InferContext& context, const fs::path& assets) {
+  const auto path = [&](const char* name) {
+    return (assets / (std::string("yolo26_") + name + ".onnx")).string();
+  };
+  for (const char* name :
+       {"pose_missing_task", "pose_missing_kpt_shape", "pose_bad_extra",
+        "pose_missing_mode", "pose_conflicting_mode", "pose_embedded_nms"})
+    TEST_ASSERT(!InferYOLOTask::Create(context, path(name), YOLOTask::kPose,
+                                      YOLOVersion::kV26),
+                "YOLO26 rejects ambiguous mode or inconsistent task channels");
+  TEST_ASSERT(!InferYOLOTask::Create(context, path("seg_bad_proto"),
+                                    YOLOTask::kSegmentation, YOLOVersion::kV26),
+              "mask coefficient count must match prototype channels");
+  TEST_ASSERT(!InferYOLOTask::Create(context, path("obb_bad_extra"),
+                                    YOLOTask::kOBB, YOLOVersion::kV26),
+              "OBB accepts exactly one angle");
+  const cv::Mat square(64, 64, CV_8UC3, cv::Scalar::all(0));
+  for (const char* name : {"pose_bad_class", "pose_out_of_range_class"}) {
+    auto model = InferYOLOTask::Create(context, path(name), YOLOTask::kPose,
+                                      YOLOVersion::kV26);
+    TEST_ASSERT(model, "class value validation occurs on actual model output");
+    TEST_ASSERT(!(*model)->Run(square, .5f),
+                "fractional/out-of-range e2e labels cannot silently mislabel");
+  }
+  TEST_ASSERT(!InferYOLOTask::Create(context, path("pose_raw"), YOLOTask::kPose,
+                                    YOLOVersion::kV10),
+              "task factory rejects unsupported YOLO generation");
+  return 0;
+}
 }  // namespace
 int main(int argc, char** argv) {
   fs::path root = fs::current_path();
@@ -246,5 +287,18 @@ int main(int argc, char** argv) {
   if (Exercise(**context, assets, YOLOTask::kPose, "yolo_pose")) return 1;
   if (Exercise(**context, assets, YOLOTask::kOBB, "yolo_obb")) return 1;
   if (MetadataAndRecovery(**context, assets)) return 1;
+  for (const bool end_to_end : {false, true}) {
+    const std::string mode = end_to_end ? "_e2e" : "_raw";
+    if (Exercise(**context, assets, YOLOTask::kSegmentation,
+                 ("yolo26_seg" + mode).c_str(), YOLOVersion::kV26, end_to_end))
+      return 1;
+    if (Exercise(**context, assets, YOLOTask::kPose,
+                 ("yolo26_pose" + mode).c_str(), YOLOVersion::kV26, end_to_end))
+      return 1;
+    if (Exercise(**context, assets, YOLOTask::kOBB,
+                 ("yolo26_obb" + mode).c_str(), YOLOVersion::kV26, end_to_end))
+      return 1;
+  }
+  if (InvalidYOLO26(**context, assets)) return 1;
   return 0;
 }

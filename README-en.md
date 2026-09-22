@@ -10,6 +10,7 @@ english | [简体中文](./README.md)
 <p align="center">
 <a><img alt="" src="https://img.shields.io/badge/yolo-v10-AD65F1.svg"></a>
 <a><img alt="" src="https://img.shields.io/badge/yolo-v11-AD65F1.svg"></a>
+<a><img alt="YOLO26" src="https://img.shields.io/badge/yolo-26-AD65F1.svg"></a>
 <a><img alt="" src="https://img.shields.io/badge/paddle_ocr-v4-2932DF.svg"></a>
 </p>
 
@@ -27,7 +28,7 @@ english | [简体中文](./README.md)
 <a><img alt="ort rknpu" src="https://img.shields.io/badge/ort-rknpu-white.svg"></a>
 </p>
 
-`vision-simple` is a cross-platform visual inference library based on C++23, designed to provide **out-of-the-box** inference capabilities. With Docker, users can quickly set up inference services. This library currently supports popular YOLO models (including YOLOv10 and YOLOv11) and some OCR models (such as `PaddleOCR`). It features a **built-in HTTP API**, making the service more accessible. Additionally, `vision-simple` uses the `ONNXRuntime` engine, which supports multiple Execution Providers such as `DirectML`, `CUDA`, `TensorRT`, and can be compatible with specific hardware devices (such as RockChip's RKNPU), offering more efficient inference performance.
+`vision-simple` is a cross-platform visual inference library based on C++23, designed to provide **out-of-the-box** inference capabilities. With Docker, users can quickly set up inference services. This library currently supports popular YOLO models (including YOLOv10, YOLOv11 and YOLO26) and some OCR models (such as `PaddleOCR`). It features a **built-in HTTP API**, making the service more accessible. Additionally, `vision-simple` uses the `ONNXRuntime` engine, which supports multiple Execution Providers such as `DirectML`, `CUDA`, `TensorRT`, and can be compatible with specific hardware devices (such as RockChip's RKNPU), offering more efficient inference performance.
 
 ## <div align="center">🚀 Features </div>
 - **Cross-platform**: Supports `windows/x64`, `linux/x86_64`, `linux/arm64`,and `linux/riscv64`
@@ -150,12 +151,73 @@ models:
     files: {model: assets/yolo11n-obb.onnx}
 ```
 
-- Exports must have a static `[1,3,H,W]` input and static raw FP32/FP16 outputs, class-name metadata, and no exported NMS/end-to-end postprocessing. Segmentation requires predictions plus matching mask prototypes; pose uses keypoint channels (`kpt_shape` supports 2 or 3 coordinates); OBB requires one angle channel. Dynamic shapes, batched N, arbitrary YOLO architectures and exported-NMS graphs are not supported by these tasks.
+- YOLO11 exports must have a static `[1,3,H,W]` input and static raw FP32/FP16 outputs, class-name metadata, and no exported NMS/end-to-end postprocessing. YOLO26 supports the two modes described below. Segmentation requires predictions plus matching mask prototypes; pose uses keypoint channels (`kpt_shape` supports 2 or 3 coordinates); OBB requires one angle channel. Dynamic shapes, batch>1, arbitrary YOLO architectures and embedded-NMS graphs are not supported.
 - `POST /v1/infer/{task}` accepts `{"model":"raw configured name","images":["raw base64"],"timeout_ms":60000}` for all five task IDs. It shares ordered, whole-batch failure semantics and pipeline limits; native v1 caps request bodies at 64 MiB. Existing v0 inference responses remain unchanged.
 - New task responses contain `class_names` and per-image `results`. Every object has `class_id` and `confidence`. Segmentation adds integer original-image `bbox:[x,y,width,height]` and `mask_png_base64`: a binary 0/255 PNG cropped to that box, not a full-image mask. Place its top-left at the box origin. C++ `InferYOLOTask` returns a separate `YOLOTaskFrameResult` variant; each segmentation `CV_8UC1` mask owns its pixels independently of inference workspaces.
 - Pose adds the same box and `keypoints:[{x,y,confidence}]` in original-image floating-point pixels. Keypoints are not clipped to the image. OBB instead returns four ordered original-image `corners:[[x,y],...]` and `angle` in radians along corner 0 → 1; corners may lie outside the image and are not replaced by an axis-aligned box.
 - OpenAI-like model IDs are task-qualified (for example `seg:segment`, `pose:pose`, `obb:oriented`); MCP generates `infer_seg`, `infer_pose`, `infer_obb` alongside the existing tools. The result JSON retains each task's geometry.
 - Real model verification on one machine/sample produced 5 segmentation, 4 pose and 177 OBB objects on both CPU and DirectML. An independent CPU ORT oracle matched masks with IoU 1 and maximum coordinate error below 0.0003 pixels. This is implementation agreement, not a model-quality benchmark or a guarantee for other exports/providers.
+
+### YOLO26 (YOLOv26)
+
+`kV26 = 26` supports detection, instance segmentation, pose and oriented boxes, preserving existing YOLOv10/YOLO11 behavior. Models must use static, single-image ONNX tensors with FP32 or FP16 inputs/outputs. FP16 weights do not imply that every I/O tensor is FP16.
+
+| Service task | Raw output (external NMS) | NMS-free output (no additional NMS) |
+|---|---|---|
+| `yolo` | `[1,4+nc,A]`, `xywh` + class scores | `[1,K,6]`, `xyxy,score,class_id` |
+| `seg` | `[1,4+nc+nm,A]` + prototypes | `[1,K,6+nm]` + `[1,nm,Hm,Wm]` prototypes |
+| `pose` | `[1,4+nc+nk*nd,A]` | `[1,K,6+nk*nd]`, `nd=2/3` |
+| `obb` | `[1,5+nc,A]` | `[1,K,7]`, **`xywh,score,class_id,angle`** |
+
+Neither `A` nor `K` is hardcoded to 8400 or 300. Preserve `names`, the correct `task`, explicit `end2end`, and `args.nms` metadata; pose also requires `kpt_shape`. Missing/conflicting metadata, invalid shapes and embedded NMS are rejected rather than inferred from filenames or `[1,K,6]` alone.
+
+**Reproducible export** (development tools, not service dependencies; downloads official nano checkpoints on first use):
+
+```bash
+python -m pip install ultralytics==8.4.159 onnx==1.20.1 onnxruntime==1.24.3 torch==2.14.0 torchvision==0.29.0
+python scripts/export_yolo26.py --output build/yolo26 --imgsz 640
+```
+
+This exports 16 models: four tasks × raw/e2e × FP32/FP16, with batch=1, opset=17, dynamic=False and simplify=False. The generated `manifest.json` records dependency versions, checkpoint/ONNX SHA256 values, export arguments and actual tensor metadata. This exporter version uses `nms=None` for raw, `nms=False` for NMS-free and `quantize=16` for half precision. CPU FP16 conversion is followed by a topological sort to order appended I/O Cast nodes correctly, then ONNX checker and CPU ORT loading. Do not remove mode metadata or assume older exporters assign the same meaning to these arguments.
+
+Copy the desired ONNX files into your deployment and configure:
+
+```yaml
+models:
+  - task: yolo
+    name: yolo26n
+    version: kV26
+    files: {model: assets/detect_e2e_fp32.onnx}
+  - task: seg
+    name: yolo26n-seg
+    version: kV26
+    files: {model: assets/seg_e2e_fp32.onnx}
+  - task: pose
+    name: yolo26n-pose
+    version: kV26
+    files: {model: assets/pose_e2e_fp32.onnx}
+  - task: obb
+    name: yolo26n-obb
+    version: kV26
+    files: {model: assets/obb_e2e_fp32.onnx}
+```
+
+Use existing `POST /v1/infer/{task}` routes; detection also supports `/v0/infer/yolo`. Responses, caching, ordered batches and whole-batch failure semantics are unchanged. C++ detection uses `InferYOLO::Create(context, path, YOLOVersion::kV26)`. Other tasks now take an explicit version, for example `InferYOLOTask::Create(context, path, YOLOTask::kPose, YOLOVersion::kV26)`. Existing task callers must insert `YOLOVersion::kV11` after `task`, before the optional device ID.
+
+Postprocessing keeps this library's contract: raw detection uses NMS IoU 0.3; other raw tasks use 0.45. OBB uses polygon IoU, **not Ultralytics' probabilistic IoU**. NMS-free outputs never undergo another suppression pass. Letterbox uses black padding, keypoints retain out-of-frame coordinates, and masks interpolate logits before thresholding and cropping to integer bounding boxes. Comparisons against Ultralytics must align preprocessing and account for these documented differences.
+
+**Verified environment:** Windows x64 Release, C++ ORT 1.20.0 / DirectML 1.15.4, with Python ORT 1.24.3 as the reference runtime.
+
+| EP | Raw FP32 | NMS-free FP32 | Raw FP16 | NMS-free FP16 |
+|---|---|---|---|---|
+| CPU | All four tasks passed | All four tasks passed | All four tasks passed | All four tasks passed |
+| DirectML | All four compared successfully | All four compared successfully | All four ran successfully | All four failed during ORT initialization |
+
+CPU verification exercised C++ `Run` and HTTP inference on 16 real nano exports with square/wide images, comparing classes, scores, boxes, masks, keypoints and rotated boxes. FP32 box error was <0.5 pixels and keypoint/OBB corner error <0.001 pixels. CPU FP16 maximum box error was 0.75 pixels, keypoint error 0.375 pixels, and absolute score error <0.007. Minimum mask IoU against Ultralytics' binary-mask resizing was 0.941 (see the differing interpolation contract above). Raw OBB used an independent polygon-IoU oracle: the square sample retained 180 boxes versus 175 under Ultralytics' probabilistic IoU, an intentional algorithm difference.
+
+One CPU square-image stage sample (preprocess/inference/postprocess, ms): raw FP32 detection `1.381 / 25.476 / 0.489`; NMS-free FP32 `1.200 / 21.912 / 0.010`. These are smoke observations, not a benchmark or speedup guarantee. **Use FP32 or verified raw FP16 on this DML stack, not these NMS-free FP16 artifacts.** Initialization failures return controlled `model_load_failed` errors; no silent mode substitution occurs.
+
+Classification, semantic segmentation, depth, YOLOE, dynamic shapes and batch>1 are outside this support. CUDA/TensorRT were not verified in this environment; this is not an all-provider compatibility claim. Model weights and exported artifacts are not checked into source control. Review the applicable Ultralytics software/model licenses before deployment.
 
 ### Temporal tracking sessions
 

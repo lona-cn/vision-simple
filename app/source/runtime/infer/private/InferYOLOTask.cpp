@@ -51,6 +51,7 @@ class TaskModel final : public InferYOLOTask {
   YOLOTask kind;
   std::vector<std::string> names;
   size_t extra = 0, keypoints = 0, dimensions = 0;
+  bool end_to_end = false;
   std::mutex session_mutex, pool_mutex;
 
   struct Workspace {
@@ -186,9 +187,13 @@ class TaskModel final : public InferYOLOTask {
         if (!IsFinite(value)) return ModelError("Non-finite YOLO task output");
     }
     const auto& transform = ws.transform;
-    const size_t n = static_cast<size_t>(outputs[0].shape[2]);
+    const size_t n = static_cast<size_t>(
+        outputs[0].shape[end_to_end ? 1 : 2]);
+    const size_t channels = static_cast<size_t>(
+        outputs[0].shape[end_to_end ? 2 : 1]);
+    const size_t extra_begin = end_to_end ? 6 : 4 + names.size();
     const auto at = [&](size_t row, size_t col) {
-      return data[0][row * n + col];
+      return data[0][end_to_end ? col * channels + row : row * n + col];
     };
     const auto restore = [&](double x, double y) {
       return cv::Point2f(
@@ -198,11 +203,27 @@ class TaskModel final : public InferYOLOTask {
     std::vector<Candidate> candidates;
     for (size_t i = 0; i < n; ++i) {
       size_t label = 0;
-      for (size_t c = 1; c < names.size(); ++c)
-        if (at(4 + c, i) > at(4 + label, i)) label = c;
-      const float score = at(4 + label, i);
+      float score;
+      if (end_to_end) {
+        const float class_id = at(5, i);
+        if (class_id < 0 || double(class_id) >= double(names.size()) ||
+            std::floor(class_id) != class_id)
+          return ModelError("Invalid YOLO end-to-end class index");
+        label = static_cast<size_t>(class_id);
+        score = at(4, i);
+      } else {
+        for (size_t c = 1; c < names.size(); ++c)
+          if (at(4 + c, i) > at(4 + label, i)) label = c;
+        score = at(4 + label, i);
+      }
       if (score < threshold) continue;
-      const double x = at(0, i), y = at(1, i), w = at(2, i), h = at(3, i);
+      // OBB's dist2rbox emits xywh in both modes; the other end-to-end
+      // heads emit xyxy. All task extras are already decoded by the graph.
+      const bool xyxy = end_to_end && kind != YOLOTask::kOBB;
+      const double w = xyxy ? double(at(2, i)) - at(0, i) : at(2, i);
+      const double h = xyxy ? double(at(3, i)) - at(1, i) : at(3, i);
+      const double x = xyxy ? double(at(0, i)) + w / 2 : at(0, i);
+      const double y = xyxy ? double(at(1, i)) + h / 2 : at(1, i);
       if (w <= 0 || h <= 0) continue;
       Candidate candidate{
           i,
@@ -215,7 +236,7 @@ class TaskModel final : public InferYOLOTask {
       for (float v : candidate.xyxy.val)
         if (!IsFinite(v)) return ModelError("YOLO box geometry overflow");
       if (kind == YOLOTask::kOBB) {
-        const double angle = at(4 + names.size(), i), cosine = std::cos(angle),
+        const double angle = at(extra_begin, i), cosine = std::cos(angle),
                      sine = std::sin(angle);
         constexpr int signs[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
         for (size_t j = 0; j < 4; ++j) {
@@ -240,12 +261,14 @@ class TaskModel final : public InferYOLOTask {
     std::vector<Candidate> kept;
     for (const auto& candidate : candidates) {
       bool suppress = false;
-      for (const auto& selected : kept)
-        if (candidate.label == selected.label &&
-            IoU(candidate, selected, kind == YOLOTask::kOBB) > .45) {
-          suppress = true;
-          break;
-        }
+      if (!end_to_end) {
+        for (const auto& selected : kept)
+          if (candidate.label == selected.label &&
+              IoU(candidate, selected, kind == YOLOTask::kOBB) > .45) {
+            suppress = true;
+            break;
+          }
+      }
       if (!suppress) kept.push_back(candidate);
     }
     if (kind == YOLOTask::kOBB) {
@@ -263,7 +286,7 @@ class TaskModel final : public InferYOLOTask {
         YOLOPoseResult item{c.label, c.score, c.bbox, {}};
         item.keypoints.reserve(keypoints);
         for (size_t k = 0; k < keypoints; ++k) {
-          const size_t row = 4 + names.size() + k * dimensions;
+          const size_t row = extra_begin + k * dimensions;
           const auto point = restore(at(row, c.index), at(row + 1, c.index));
           if (!IsFinite(point.x) || !IsFinite(point.y))
             return ModelError("YOLO keypoint geometry overflow");
@@ -284,7 +307,7 @@ class TaskModel final : public InferYOLOTask {
       for (size_t p = 0; p < plane; ++p) {
         double sum = 0;
         for (size_t m = 0; m < extra; ++m)
-          sum += double(at(4 + names.size() + m, c.index)) *
+          sum += double(at(extra_begin + m, c.index)) *
                  data[1][m * plane + p];
         logits[p] = static_cast<float>(sum);
         if (!IsFinite(logits[p])) return ModelError("YOLO mask logit overflow");
@@ -390,8 +413,12 @@ VSResult<std::unique_ptr<detail::FrameTask>> detail::MakeFrameTask(
 InferYOLOTask::CreateResult InferYOLOTask::Create(InferContext& context,
                                                   std::span<uint8_t> bytes,
                                                   YOLOTask task,
+                                                  YOLOVersion version,
                                                   size_t device_id) noexcept {
   try {
+    if (version != YOLOVersion::kV11 && version != YOLOVersion::kV26)
+      return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
+                        "Unsupported YOLO task version");
     if (task != YOLOTask::kSegmentation && task != YOLOTask::kPose &&
         task != YOLOTask::kOBB)
       return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
@@ -405,27 +432,36 @@ InferYOLOTask::CreateResult InferYOLOTask::Create(InferContext& context,
     auto& session = **created;
     const size_t count = task == YOLOTask::kSegmentation ? 2 : 1;
     if (session.GetInputCount() != 1 || session.GetOutputCount() != count)
-      return ModelError(
-          "YOLO task requires one input and raw task outputs (no exported "
-          "NMS)");
+      return ModelError("YOLO task requires one input and task outputs");
     Ort::Allocator allocator(session, ort->env_memory_info());
     const auto metadata = session.GetModelMetadata();
-    bool exported_nms = false;
-    for (const char* key : {"nms", "end2end"}) {
-      const auto flag =
-          metadata.LookupCustomMetadataMapAllocated(key, allocator);
-      if (flag && detail::YOLOMetadataTrue(flag.get())) exported_nms = true;
-    }
     const auto args =
         metadata.LookupCustomMetadataMapAllocated("args", allocator);
-    if (args && !detail::ParseYOLOExportArgs(args.get(), exported_nms))
-      return ModelError("Invalid YOLO export args metadata");
-    if (exported_nms)
-      return ModelError(
-          "YOLO tasks require raw outputs; exported NMS/end2end is "
-          "unsupported");
+    bool end_to_end = false;
+    if (version == YOLOVersion::kV26) {
+      const auto end2end =
+          metadata.LookupCustomMetadataMapAllocated("end2end", allocator);
+      const auto nms =
+          metadata.LookupCustomMetadataMapAllocated("nms", allocator);
+      if (!detail::ParseYOLO26Export(args ? args.get() : "",
+                                     end2end ? end2end.get() : "",
+                                     nms ? nms.get() : "", end_to_end))
+        return ModelError("Unsupported YOLO26 export metadata");
+    } else {
+      bool exported_nms = false;
+      for (const char* key : {"nms", "end2end"}) {
+        const auto flag =
+            metadata.LookupCustomMetadataMapAllocated(key, allocator);
+        if (flag && detail::YOLOMetadataTrue(flag.get())) exported_nms = true;
+      }
+      if (args && !detail::ParseYOLOExportArgs(args.get(), exported_nms))
+        return ModelError("Invalid YOLO export args metadata");
+      if (exported_nms)
+        return ModelError("YOLO11 tasks require raw outputs");
+    }
     auto model = std::make_unique<TaskModel>(std::move(*created),
                                              std::move(allocator), task);
+    model->end_to_end = end_to_end;
     const auto load = [&](size_t index, bool input,
                           TaskModel::Tensor& spec) -> bool {
       auto info = input ? session.GetInputTypeInfo(index)
@@ -453,7 +489,8 @@ InferYOLOTask::CreateResult InferYOLOTask::Create(InferContext& context,
                                           ? "segment"
                                       : task == YOLOTask::kPose ? "pose"
                                                                 : "obb";
-    if (task_name && std::string_view(task_name.get()) != expected)
+    if ((!task_name && version == YOLOVersion::kV26) ||
+        (task_name && std::string_view(task_name.get()) != expected))
       return ModelError("YOLO task metadata does not match requested task");
     const auto names =
         metadata.LookupCustomMetadataMapAllocated("names", model->allocator);
@@ -461,10 +498,12 @@ InferYOLOTask::CreateResult InferYOLOTask::Create(InferContext& context,
     if (!detail::ParseYOLOClassNames(names.get(), model->names))
       return ModelError("Invalid YOLO class names metadata");
     const auto& shape = model->outputs[0].shape;
+    const size_t base_channels = end_to_end ? 6 : 4 + model->names.size();
     if (shape.size() != 3 || shape[0] != 1 ||
-        shape[1] <= 4 + static_cast<int64_t>(model->names.size()))
-      return ModelError("Unsupported YOLO raw prediction shape");
-    model->extra = static_cast<size_t>(shape[1]) - 4 - model->names.size();
+        shape[end_to_end ? 2 : 1] <= static_cast<int64_t>(base_channels))
+      return ModelError("Unsupported YOLO task prediction shape");
+    model->extra =
+        static_cast<size_t>(shape[end_to_end ? 2 : 1]) - base_channels;
     if (task == YOLOTask::kSegmentation) {
       const auto& proto = model->outputs[1].shape;
       if (proto.size() != 4 || proto[0] != 1 ||
@@ -478,6 +517,8 @@ InferYOLOTask::CreateResult InferYOLOTask::Create(InferContext& context,
       model->dimensions = 3;
       const auto kpt_shape = metadata.LookupCustomMetadataMapAllocated(
           "kpt_shape", model->allocator);
+      if (!kpt_shape && version == YOLOVersion::kV26)
+        return ModelError("Missing YOLO26 keypoint shape metadata");
       if (kpt_shape) {
         const std::string value(kpt_shape.get());
         std::smatch match;
@@ -513,11 +554,12 @@ InferYOLOTask::CreateResult InferYOLOTask::Create(InferContext& context,
 InferYOLOTask::CreateResult InferYOLOTask::Create(InferContext& context,
                                                   const std::string& path,
                                                   YOLOTask task,
+                                                  YOLOVersion version,
                                                   size_t device_id) noexcept {
   try {
     auto bytes = ReadAll(path);
     if (!bytes) return std::unexpected(std::move(bytes.error()));
-    return Create(context, bytes->span(), task, device_id);
+    return Create(context, bytes->span(), task, version, device_id);
   } catch (const std::exception& e) {
     return MK_VSERROR(VisionSimpleErrorCode::kModelError, e.what());
   }

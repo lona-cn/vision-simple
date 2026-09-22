@@ -18,13 +18,19 @@ bool SupportedFloatType(ONNXTensorElementDataType type) noexcept {
          type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
 }
 
-bool ValidOutputShape(YOLOVersion version, std::span<const int64_t> shape,
+bool ValidOutputShape(YOLODetectionLayout layout, std::span<const int64_t> shape,
                       size_t classes) noexcept {
   if (shape.size() != 3 || shape[0] != 1 || classes == 0 || classes > INT_MAX)
     return false;
-  if (version == YOLOVersion::kV10)
+  if (shape[1] < 0 || shape[2] < 0 ||
+      (shape[2] != 0 &&
+       static_cast<uint64_t>(shape[1]) >
+           std::numeric_limits<size_t>::max() / sizeof(float) /
+               static_cast<uint64_t>(shape[2])))
+    return false;
+  if (layout == YOLODetectionLayout::kEndToEnd)
     return shape[1] >= 0 && shape[1] <= INT_MAX && shape[2] == 6;
-  if (version == YOLOVersion::kV11)
+  if (layout == YOLODetectionLayout::kRaw)
     return shape[1] == static_cast<int64_t>(classes) + 4 && shape[2] >= 0 &&
            shape[2] <= INT_MAX;
   return false;
@@ -66,6 +72,9 @@ std::map<InferFramework, InferYOLOFactory> infer_yolo_factories{std::make_pair(
           input_shape[1] != 3 || input_shape[2] <= 0 ||
           input_shape[2] > INT_MAX || input_shape[3] <= 0 ||
           input_shape[3] > INT_MAX ||
+          static_cast<uint64_t>(input_shape[2]) >
+              std::numeric_limits<size_t>::max() / sizeof(float) / 3 /
+                  static_cast<uint64_t>(input_shape[3]) ||
           !SupportedFloatType(input_tensor.GetElementType()) ||
           !SupportedFloatType(output_tensor.GetElementType()))
         return std::unexpected(
@@ -83,14 +92,36 @@ std::map<InferFramework, InferYOLOFactory> infer_yolo_factories{std::make_pair(
         return std::unexpected(
             VisionSimpleError{VisionSimpleErrorCode::kModelError,
                               "Invalid YOLO class names metadata"});
-      if (!ValidOutputShape(version, output_tensor.GetShape(),
+      YOLODetectionLayout layout =
+          version == YOLOVersion::kV10 ? YOLODetectionLayout::kEndToEnd
+          : version == YOLOVersion::kV11 ? YOLODetectionLayout::kRaw
+                                        : YOLODetectionLayout::kUnspecified;
+      if (version == YOLOVersion::kV26) {
+        auto metadata = session.GetModelMetadata();
+        auto task = metadata.LookupCustomMetadataMapAllocated("task", allocator);
+        auto args = metadata.LookupCustomMetadataMapAllocated("args", allocator);
+        auto end2end =
+            metadata.LookupCustomMetadataMapAllocated("end2end", allocator);
+        auto nms = metadata.LookupCustomMetadataMapAllocated("nms", allocator);
+        bool end_to_end = false;
+        if (!task || std::string_view(task.get()) != "detect" ||
+            !vision_simple::detail::ParseYOLO26Export(args ? args.get() : "",
+                                      end2end ? end2end.get() : "",
+                                      nms ? nms.get() : "", end_to_end))
+          return std::unexpected(VisionSimpleError{
+              VisionSimpleErrorCode::kModelError,
+              "YOLO26 requires detect task and explicit supported export metadata"});
+        layout = end_to_end ? YOLODetectionLayout::kEndToEnd
+                            : YOLODetectionLayout::kRaw;
+      }
+      if (!ValidOutputShape(layout, output_tensor.GetShape(),
                             class_names.size()))
         return std::unexpected(
             VisionSimpleError{VisionSimpleErrorCode::kModelError,
                               "Unsupported YOLO output shape or class names"});
       return std::make_unique<InferYOLOOrtImpl>(
           ort_ctx, std::move(*session_opt), std::move(allocator), version,
-          std::move(class_names));
+          std::move(class_names), layout);
     })};
 }  // namespace
 
@@ -119,8 +150,11 @@ InferYOLO::CreateResult InferYOLO::Create(InferContext& context,
 
 YOLOFilter::YOLOFilter(YOLOVersion version,
                        std::vector<std::string> class_names,
-                       std::vector<int64_t> shapes)
+                       std::vector<int64_t> shapes, YOLODetectionLayout layout)
     : version_(version),
+      layout_(version == YOLOVersion::kV10 ? YOLODetectionLayout::kEndToEnd
+              : version == YOLOVersion::kV11 ? YOLODetectionLayout::kRaw
+                                             : layout),
       class_names_(std::move(class_names)),
       shapes_(std::move(shapes)) {}
 
@@ -147,14 +181,14 @@ std::vector<YOLOResult> YOLOFilter::ApplyNMS(
   return result;
 }
 
-YOLOFilter::FilterResult YOLOFilter::v11(
+YOLOFilter::FilterResult YOLOFilter::DecodeRaw(
     std::span<const float> infer_output, float confidence_threshold,
     const LetterboxTransform& transform) const {
-  if (!ValidOutputShape(YOLOVersion::kV11, shapes_, class_names_.size()) ||
+  if (!ValidOutputShape(YOLODetectionLayout::kRaw, shapes_, class_names_.size()) ||
       !ValidOutputLength(shapes_, infer_output.size()))
     return std::unexpected(
         VisionSimpleError{VisionSimpleErrorCode::kModelError,
-                          "Invalid YOLO v11 output shape or length"});
+                          "Invalid YOLO raw output shape or length"});
   const size_t num_detections = static_cast<size_t>(shapes_[2]);
   std::vector<YOLOResult> detections;
   for (size_t d = 0; d < num_detections; ++d) {
@@ -164,6 +198,10 @@ YOLOFilter::FilterResult YOLOFilter::v11(
     if (!IsFinite(cx) || !IsFinite(cy) || !IsFinite(width) || !IsFinite(height))
       return std::unexpected(VisionSimpleError{
           VisionSimpleErrorCode::kModelError, "Non-finite YOLO coordinates"});
+    if (!IsFinite(cx - width * 0.5f) || !IsFinite(cy - height * 0.5f) ||
+        !IsFinite(cx + width * 0.5f) || !IsFinite(cy + height * 0.5f))
+      return std::unexpected(VisionSimpleError{
+          VisionSimpleErrorCode::kModelError, "Overflowing YOLO coordinates"});
     int class_id = 0;
     float confidence = infer_output[4 * num_detections + d];
     for (size_t c = 0; c < class_names_.size(); ++c) {
@@ -188,14 +226,14 @@ YOLOFilter::FilterResult YOLOFilter::v11(
   return YOLOFrameResult{ApplyNMS(detections, 0.3f)};
 }
 
-YOLOFilter::FilterResult YOLOFilter::v10(
+YOLOFilter::FilterResult YOLOFilter::DecodeEndToEnd(
     std::span<const float> infer_output, float confidence_threshold,
     const LetterboxTransform& transform) const {
-  if (!ValidOutputShape(YOLOVersion::kV10, shapes_, class_names_.size()) ||
+  if (!ValidOutputShape(YOLODetectionLayout::kEndToEnd, shapes_, class_names_.size()) ||
       !ValidOutputLength(shapes_, infer_output.size()))
     return std::unexpected(
         VisionSimpleError{VisionSimpleErrorCode::kModelError,
-                          "YOLO v10 requires end-to-end [1,N,6] output"});
+                          "YOLO requires end-to-end [1,N,6] output"});
   std::vector<YOLOResult> detections;
   for (size_t i = 0; i < infer_output.size(); i += 6) {
     for (size_t j = 0; j < 6; ++j)
@@ -225,12 +263,16 @@ YOLOFilter::FilterResult YOLOFilter::v10(
 YOLOFilter::FilterResult YOLOFilter::operator()(
     std::span<const float> infer_output, float confidence_threshold,
     const LetterboxTransform& transform) const {
-  if (version_ == YOLOVersion::kV10)
-    return v10(infer_output, confidence_threshold, transform);
-  if (version_ == YOLOVersion::kV11)
-    return v11(infer_output, confidence_threshold, transform);
+  if (version_ != YOLOVersion::kV10 && version_ != YOLOVersion::kV11 &&
+      version_ != YOLOVersion::kV26)
+    return std::unexpected(VisionSimpleError{
+        VisionSimpleErrorCode::kParameterError, "Unsupported YOLO version"});
+  if (layout_ == YOLODetectionLayout::kEndToEnd)
+    return DecodeEndToEnd(infer_output, confidence_threshold, transform);
+  if (layout_ == YOLODetectionLayout::kRaw)
+    return DecodeRaw(infer_output, confidence_threshold, transform);
   return std::unexpected(VisionSimpleError{
-      VisionSimpleErrorCode::kParameterError, "Unsupported YOLO version"});
+      VisionSimpleErrorCode::kModelError, "Missing YOLO detection layout"});
 }
 
 struct InferYOLOOrtImpl::Workspace {
@@ -308,13 +350,14 @@ InferYOLOOrtImpl::InferYOLOOrtImpl(InferContextORT& ort_ctx,
                                    std::unique_ptr<Ort::Session>&& session,
                                    Ort::Allocator&& allocator,
                                    YOLOVersion version,
-                                   std::vector<std::string> class_names)
+                                   std::vector<std::string> class_names,
+                                   YOLODetectionLayout layout)
     : session_(std::move(session)),
       version_(version),
       filter_(version, class_names,
               session_->GetOutputTypeInfo(0)
                   .GetTensorTypeAndShapeInfo()
-                  .GetShape()),
+                  .GetShape(), layout),
       allocator_(std::move(allocator)),
       class_names_(std::move(class_names)) {
   auto input_info = session_->GetInputTypeInfo(0);

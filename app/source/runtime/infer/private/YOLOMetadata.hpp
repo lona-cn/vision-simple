@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -12,7 +13,8 @@ namespace vision_simple::detail {
 // Python repr and JSON share the delimiters used by Ultralytics metadata.
 class YOLOMetadataReader {
  public:
-  explicit YOLOMetadataReader(std::string_view text) : text_(text) {}
+  explicit YOLOMetadataReader(std::string_view text, bool strict = false)
+      : text_(text), strict_(strict) {}
   void Space() {
     while (pos_ < text_.size() && (text_[pos_] == ' ' || text_[pos_] == '\t' ||
                                    text_[pos_] == '\r' || text_[pos_] == '\n'))
@@ -161,6 +163,18 @@ class YOLOMetadataReader {
       return String(ignored);
     }
     const char c = text_[pos_];
+    if (strict_ && (c == '{' || c == '[' || c == '(')) {
+      ++pos_;
+      const char close = c == '{' ? '}' : c == '[' ? ']' : ')';
+      if (Take(close)) return true;
+      do {
+        if (!Value(depth + 1)) return false;
+        if (c == '{' && (!Take(':') || !Value(depth + 1))) return false;
+        if (Take(close)) return true;
+        if (!Take(',')) return false;
+        if (Take(close)) return true;
+      } while (true);
+    }
     if (c == '{' || c == '[' || c == '(') {
       ++pos_;
       const char close = c == '{' ? '}' : c == '[' ? ']' : ')';
@@ -183,10 +197,21 @@ class YOLOMetadataReader {
         return false;
       ++pos_;
     }
-    return pos_ != start;
+    if (pos_ == start) return false;
+    if (!strict_) return true;
+    const auto token = text_.substr(start, pos_ - start);
+    if (token == "True" || token == "False" || token == "None" ||
+        token == "true" || token == "false" || token == "null")
+      return true;
+    double number = 0;
+    const auto parsed =
+        std::from_chars(token.data(), token.data() + token.size(), number);
+    return parsed.ec == std::errc{} &&
+           parsed.ptr == token.data() + token.size() && std::isfinite(number);
   }
   std::string_view text_;
   size_t pos_ = 0;
+  bool strict_ = false;
 };
 
 inline bool ParseYOLOClassNames(std::string_view text,
@@ -223,5 +248,56 @@ inline bool ParseYOLOExportArgs(std::string_view text, bool& exported_nms) {
       exported_nms = true;
     return true;
   });
+}
+
+inline bool ParseYOLO26Export(std::string_view args, std::string_view end2end,
+                              std::string_view nms, bool& end_to_end) {
+  const auto trim = [](std::string_view value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    return first == std::string_view::npos
+               ? std::string_view{}
+               : value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+  };
+  const auto boolean = [&](std::string_view value, bool& result) {
+    value = trim(value);
+    if (value == "True" || value == "true") {
+      result = true;
+      return true;
+    }
+    if (value == "False" || value == "false") {
+      result = false;
+      return true;
+    }
+    return false;
+  };
+  bool mode = false;
+  if (!boolean(end2end, mode)) return false;
+  if (!nms.empty()) {
+    bool embedded = false;
+    if (!boolean(nms, embedded) || embedded) return false;
+  }
+  bool seen_nms = false, seen_end2end = false;
+  YOLOMetadataReader reader(args, true);
+  const bool valid = reader.Dictionary(
+      [&](const std::string& key, std::string_view value) {
+        if (key == "nms") {
+          if (seen_nms) return false;
+          seen_nms = true;
+          value = trim(value);
+          if (!mode) return value == "None" || value == "null";
+          bool embedded = false;
+          return boolean(value, embedded) && !embedded;
+        }
+        if (key == "end2end") {
+          if (seen_end2end) return false;
+          seen_end2end = true;
+          bool declared = false;
+          return boolean(value, declared) && declared == mode;
+        }
+        return true;
+      });
+  if (!valid || !seen_nms) return false;
+  end_to_end = mode;
+  return true;
 }
 }  // namespace vision_simple::detail

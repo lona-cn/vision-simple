@@ -11,6 +11,7 @@
 <p align="center">
 <a><img alt="" src="https://img.shields.io/badge/yolo-v10-AD65F1.svg"></a>
 <a><img alt="" src="https://img.shields.io/badge/yolo-v11-AD65F1.svg"></a>
+<a><img alt="YOLO26" src="https://img.shields.io/badge/yolo-26-AD65F1.svg"></a>
 <a><img alt="" src="https://img.shields.io/badge/paddle_ocr-v4-2932DF.svg"></a>
 </p>
 
@@ -28,7 +29,7 @@
 <a><img alt="ort rknpu" src="https://img.shields.io/badge/ort-rknpu-white.svg"></a>
 </p>
 
-`vision-simple` 是一个基于 C++23 的跨平台视觉推理库，旨在提供 **开箱即用** 的推理功能。通过 Docker用户可以快速搭建推理服务。该库目前支持常见的 YOLO 系列（包括 YOLOv10 和 YOLOv11），以及部分 OCR 模型（如 `PaddleOCR`）。**内建 HTTP API** 使得服务更加便捷。此外，`vision-simple` 采用 `ONNXRuntime` 引擎，支持多种 Execution Provider，如 `DirectML`、`CUDA`、`TensorRT`，并可与特定硬件设备（如 RockChip 的 RKNPU）兼容，提供更高效的推理性能。
+`vision-simple` 是一个基于 C++23 的跨平台视觉推理库，旨在提供 **开箱即用** 的推理功能。通过 Docker用户可以快速搭建推理服务。该库目前支持常见的 YOLO 系列（包括 YOLOv10、YOLOv11 和 YOLO26），以及部分 OCR 模型（如 `PaddleOCR`）。**内建 HTTP API** 使得服务更加便捷。此外，`vision-simple` 采用 `ONNXRuntime` 引擎，支持多种 Execution Provider，如 `DirectML`、`CUDA`、`TensorRT`，并可与特定硬件设备（如 RockChip 的 RKNPU）兼容，提供更高效的推理性能。
 
 
 ## <div align="center">🚀 特性 </div>
@@ -155,12 +156,74 @@ models:
     files: {model: assets/yolo11n-obb.onnx}
 ```
 
-- 导出须具有静态 `[1,3,H,W]` 输入、静态 FP32/FP16 原始输出及类别名称元数据，不得包含导出 NMS/end-to-end 后处理。分割需要预测和通道匹配的 mask prototype；姿态使用关键点通道（`kpt_shape` 支持 2 或 3 个分量）；OBB 需要一个角度通道。不支持动态维度、批量 N、任意 YOLO 架构或导出 NMS 图。
+- YOLO11 导出须具有静态 `[1,3,H,W]` 输入、静态 FP32/FP16 原始输出及类别名称元数据，不得包含导出 NMS/end-to-end 后处理。YOLO26 的两种导出模式见下节。分割需要预测和通道匹配的 mask prototype；姿态使用关键点通道（`kpt_shape` 支持 2 或 3 个分量）；OBB 需要一个角度通道。不支持动态维度、batch>1、任意 YOLO 架构或内嵌 NMS 图。
 - 五个 task 均可调用 `POST /v1/infer/{task}`，正文为 `{"model":"配置原名","images":["原始base64"],"timeout_ms":60000}`。共用按输入顺序、整批失败语义和流水线限制；原生 v1 正文限制为 64 MiB。既有 v0 推理响应不变。
 - 新任务返回 `class_names` 及逐图 `results`，各目标含 `class_id` 和 `confidence`。分割额外返回原图整数 `bbox:[x,y,width,height]` 和 `mask_png_base64`：裁剪至该框的 0/255 二值 PNG，并非全图 mask，放置时以框左上角为原点。C++ `InferYOLOTask` 使用独立 `YOLOTaskFrameResult` variant；分割 `CV_8UC1` mask 自持有像素，不依赖推理工作区。
 - 姿态额外返回同样的框及 `keypoints:[{x,y,confidence}]`，坐标为原图浮点像素，不裁剪至图像范围。OBB 返回四个有序原图 `corners:[[x,y],...]` 和沿角点 0 → 1 的弧度 `angle`；角点可在图外，不转换为轴对齐包围框。
 - OpenAI-like 使用带任务前缀的 ID，例如 `seg:segment`、`pose:pose`、`obb:oriented`；MCP 在旧工具之外生成 `infer_seg`、`infer_pose`、`infer_obb`。结果 JSON 保留各任务的几何信息。
 - 当前机器/样本的真实模型验收中，CPU 与 DirectML 均得到分割 5、姿态 4、OBB 177 个目标；独立 CPU ORT oracle 对照的 mask IoU 为 1，最大坐标误差小于 0.0003 像素。这是实现一致性验证，不是模型质量基准，也不保证其他导出模型或 provider 的结果。
+
+### YOLO26（YOLOv26）
+
+`kV26 = 26` 支持检测、实例分割、姿态与旋转框，保留 YOLOv10/YOLO11 的既有行为。模型须为单张、静态尺寸的 ONNX，输入/输出张量支持 FP32 或 FP16；FP16 权重不意味着所有 I/O 都是 FP16。
+
+| 服务 task | 原始输出（外部 NMS） | NMS-free 输出（不再执行 NMS） |
+|---|---|---|
+| `yolo` | `[1,4+nc,A]`，`xywh` + 类别分数 | `[1,K,6]`，`xyxy,score,class_id` |
+| `seg` | `[1,4+nc+nm,A]` + prototype | `[1,K,6+nm]` + `[1,nm,Hm,Wm]` prototype |
+| `pose` | `[1,4+nc+nk*nd,A]` | `[1,K,6+nk*nd]`，`nd=2/3` |
+| `obb` | `[1,5+nc,A]` | `[1,K,7]`，**`xywh,score,class_id,angle`** |
+
+`A`、`K` 不固定为 8400、300。YOLO26 必须保留 `names`、正确的 `task`、显式 `end2end` 和 `args.nms` 元数据；pose 还必须有 `kpt_shape`。缺失、矛盾、非法 shape、内嵌 NMS 均明确拒绝，不根据文件名或仅凭 `[1,K,6]` 猜测模式。
+
+**可复现导出**（开发工具，不是服务运行依赖；首次下载官方 nano 权重）：
+
+```bash
+python -m pip install ultralytics==8.4.159 onnx==1.20.1 onnxruntime==1.24.3 torch==2.14.0 torchvision==0.29.0
+python scripts/export_yolo26.py --output build/yolo26 --imgsz 640
+```
+
+脚本导出四任务 × raw/e2e × FP32/FP16 共 16 个模型，固定 batch=1、opset=17、dynamic=False、simplify=False；生成的 `manifest.json` 记录依赖版本、权重与 ONNX SHA256、导出参数及实际张量元数据。该版本用 `nms=None` 选择 raw，`nms=False` 选择 NMS-free，`quantize=16` 选择半精度。CPU 半精度转换后会拓扑排序节点，修正转换器追加 I/O Cast 的顺序，然后执行 ONNX checker 和 CPU ORT 加载验证。不要删除模式元数据，也不要把旧导出器的同名参数语义直接套用。
+
+复制所需 ONNX 到部署目录后配置：
+
+```yaml
+models:
+  - task: yolo
+    name: yolo26n
+    version: kV26
+    files: {model: assets/detect_e2e_fp32.onnx}
+  - task: seg
+    name: yolo26n-seg
+    version: kV26
+    files: {model: assets/seg_e2e_fp32.onnx}
+  - task: pose
+    name: yolo26n-pose
+    version: kV26
+    files: {model: assets/pose_e2e_fp32.onnx}
+  - task: obb
+    name: yolo26n-obb
+    version: kV26
+    files: {model: assets/obb_e2e_fp32.onnx}
+```
+
+使用现有 `POST /v1/infer/{task}`；检测也支持原有 `/v0/infer/yolo`。响应结构、模型缓存、批次顺序与整批失败语义不变。C++ 检测仍使用 `InferYOLO::Create(context, path, YOLOVersion::kV26)`；其他任务改为显式版本，例如 `InferYOLOTask::Create(context, path, YOLOTask::kPose, YOLOVersion::kV26)`。旧任务调用者在 `task` 后补 `YOLOVersion::kV11`，可选 device_id 顺延。
+
+后处理沿用本项目契约：raw 检测 NMS IoU 为 0.3，其他 raw 任务为 0.45；OBB 使用多边形 IoU，**不同于 Ultralytics 的概率 IoU**。NMS-free 不作二次抑制。Letterbox 使用黑色 padding，关键点保留图外坐标；mask 先插值 logits 再二值化、裁剪至整数 bbox。因此直接与 Ultralytics 默认 padding、mask 缩放、关键点裁剪比较不会逐像素一致，应统一预处理并明确这些差异。
+
+**已验证范围**：Windows x64 Release，C++ ORT 1.20.0 / DirectML 1.15.4，对照端 Python ORT 1.24.3。
+
+| EP | raw FP32 | NMS-free FP32 | raw FP16 | NMS-free FP16 |
+|---|---|---|---|---|
+| CPU | 四任务通过 | 四任务通过 | 四任务通过 | 四任务通过 |
+| DirectML | 四任务对照通过 | 四任务对照通过 | 四任务推理通过 | 四任务均在 ORT 初始化时失败 |
+
+CPU 对 16 个真实 nano 模型运行了 C++ `Run` 和 HTTP 推理，使用方形／宽图，核对类别、置信度、框、mask、关键点和旋转框。FP32 框误差 <0.5 像素，关键点／OBB 角点误差 <0.001 像素；CPU FP16 最大框误差 0.75 像素、关键点误差 0.375 像素、置信度绝对误差 <0.007。分割与 Ultralytics 二值 mask 缩放流程对照的最小 IoU 为 0.941（本项目插值语义见上文）。OBB raw 对照使用独立的多边形 IoU oracle；同一方图下本项目保留 180 个框，Ultralytics 概率 IoU 保留 175 个，属于已说明的算法差异。
+
+一次 CPU 方图阶段采样（预处理／推理／后处理，ms）：检测 raw FP32 为 `1.381 / 25.476 / 0.489`，NMS-free FP32 为 `1.200 / 21.912 / 0.010`。这是功能烟测记录，不是性能基准或加速承诺。**当前 DML 环境请选择 FP32 或已验证的 raw FP16，不要部署这些 NMS-free FP16 产物**；初始化失败返回受控 `model_load_failed`，不会静默换模式。
+
+
+不包括分类、语义分割、深度估计、YOLOE、动态输入或 batch>1。CUDA/TensorRT 尚未在本次验收环境验证，不能据此宣称所有 EP 可用。模型权重与导出产物不纳入源码，部署者应自行核对 Ultralytics 的模型与软件许可证。
 
 ### 时序跟踪会话
 

@@ -63,17 +63,20 @@ def decode_mask(encoded):
 
 
 def configuration(root):
-    entries = [(kind, name, f'yolo_{kind}{suffix}.onnx')
+    entries = [(kind, name, f'yolo_{kind}{suffix}.onnx', 'kV11')
                for kind in ('seg', 'pose', 'obb')
                for name, suffix in (('shared', ''), ('half', '_fp16'))]
-    entries += [('pose', 'recover', 'yolo_pose_nan.onnx'),
-                ('pose', 'exported-nms', 'yolo_pose_nms_python.onnx')]
+    entries += [('pose', 'recover', 'yolo_pose_nan.onnx', 'kV11'),
+                ('pose', 'exported-nms', 'yolo_pose_nms_python.onnx', 'kV11')]
+    entries += [(kind, f'v26-{mode}{suffix}', f'yolo26_{kind}_{mode}{suffix}.onnx', 'kV26')
+                for kind in ('seg', 'pose', 'obb')
+                for mode in ('raw', 'e2e') for suffix in ('', '_fp16')]
     text = 'models:\n'
-    for kind, name, filename in entries:
+    for kind, name, filename, version in entries:
         path = (root / 'app/assets/test/reliability' / filename).as_posix()
-        text += (f'  - task: {kind}\n    name: {name}\n    version: kV11\n'
+        text += (f'  - task: {kind}\n    name: {name}\n    version: {version}\n'
                  f'    files:\n      model: {json.dumps(path)}\n')
-    return text, {f'{kind}:{name}' for kind, name, _ in entries}
+    return text, {f'{kind}:{name}' for kind, name, _, _ in entries}
 
 
 def infer_task(server, kind, model, images):
@@ -151,6 +154,19 @@ def main():
                 require([[obj['class_id'] for obj in row] for row in half['results']] ==
                         [[obj['class_id'] for obj in row] for row in native[kind]['results']],
                         'FP16 task loading changed object identities/order')
+                raw26 = infer_task(server, kind, 'v26-raw', images)
+                require(close_values(raw26, native[kind]),
+                        f'{kind} YOLO26 raw decoding changed task geometry')
+                end26 = infer_task(server, kind, 'v26-e2e', images)
+                for raw_frame, end_frame in zip(raw26['results'], end26['results']):
+                    require(len(end_frame) == 3 and close_values(end_frame[:2], raw_frame),
+                            f'{kind} YOLO26 e2e lost overlapping predictions or changed extras')
+                for mode in ('raw', 'e2e'):
+                    half26 = infer_task(server, kind, f'v26-{mode}_fp16', images)
+                    full26 = raw26 if mode == 'raw' else end26
+                    require([[obj['class_id'] for obj in row] for row in half26['results']] ==
+                            [[obj['class_id'] for obj in row] for row in full26['results']],
+                            f'{kind} YOLO26 {mode} FP16 changed selected predictions')
                 status, completion = server.request('/v1/chat/completions',
                                                      chat_payload(kind, 'shared', images))
                 require(status == 200 and close_values(

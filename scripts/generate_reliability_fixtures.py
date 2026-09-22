@@ -187,6 +187,90 @@ def yolo_task_fixtures():
                             [value for row in rows for value in row])],
              class_names, metadata)
 
+    # YOLO26 uses explicit exporter metadata to distinguish raw and one-to-one
+    # layouts, including cases where their tensor dimensions are ambiguous.
+    import numpy as np
+    from onnx import numpy_helper
+
+    def save26(name, task, predictions, metadata, dtype=T.FLOAT, proto=None):
+        shape = list(predictions.shape)
+        nodes = [h.make_node("Identity", ["predictions"], ["output0"])]
+        outputs = [h.make_tensor_value_info("output0", dtype, shape)]
+        constants = [h.make_tensor("predictions", dtype, shape, predictions.flatten())]
+        if proto is not None:
+            nodes.append(h.make_node("Identity", ["prototypes"], ["output1"]))
+            outputs.append(h.make_tensor_value_info("output1", dtype, list(proto.shape)))
+            constants.append(h.make_tensor("prototypes", dtype, list(proto.shape), proto.flatten()))
+        save(f"reliability/{name}.onnx", nodes,
+             [h.make_tensor_value_info("images", dtype, [1, 3, 64, 64])],
+             outputs, constants, "{0: 'person'}" if task == "pose" else names, metadata)
+
+    for task in ("seg", "pose", "obb"):
+        base = onnx.load(DEST / f"reliability/yolo_{task}.onnx")
+        raw = numpy_helper.to_array(base.graph.initializer[0]).copy()
+        proto = numpy_helper.to_array(base.graph.initializer[1]).copy() if task == "seg" else None
+        nc = 1 if task == "pose" else 2
+        rows = raw[0].T
+        labels = rows[:, 4:4 + nc].argmax(axis=1)
+        scores = rows[np.arange(len(rows)), 4 + labels]
+        boxes26 = rows[:, :4].copy()
+        if task != "obb":
+            boxes26[:, :2] -= boxes26[:, 2:] / 2
+            boxes26[:, 2:] += boxes26[:, :2]
+        e2e = np.concatenate((boxes26, scores[:, None], labels[:, None], rows[:, 4 + nc:]), axis=1)
+        e2e = e2e[np.argsort(-scores, kind="stable")][None].astype(np.float32)
+        task_meta = {"task": "segment" if task == "seg" else task}
+        if task == "pose":
+            task_meta["kpt_shape"] = "[2, 3]"
+        for mode, predictions in (("raw", raw), ("e2e", e2e)):
+            metadata = dict(task_meta, end2end=str(mode == "e2e"),
+                            args=str({"nms": False if mode == "e2e" else None}))
+            for suffix, dtype in (("", T.FLOAT), ("_fp16", T.FLOAT16)):
+                save26(f"yolo26_{task}_{mode}{suffix}", task, predictions, metadata, dtype, proto)
+        metadata = dict(task_meta, end2end="True", args="{'nms': False}")
+        if task == "pose":
+            for suffix, key in (("missing_task", "task"), ("missing_kpt_shape", "kpt_shape"),
+                                ("missing_mode", "end2end")):
+                invalid = metadata.copy()
+                del invalid[key]
+                save26(f"yolo26_pose_{suffix}", task, e2e, invalid)
+            for suffix, nms in (("conflicting_mode", None), ("embedded_nms", True)):
+                save26(f"yolo26_pose_{suffix}", task, e2e, dict(metadata, args=str({"nms": nms})))
+            for suffix, label in (("bad_class", .5), ("out_of_range_class", 2)):
+                invalid = e2e.copy()
+                invalid[0, 0, 5] = label
+                save26(f"yolo26_pose_{suffix}", task, invalid, metadata)
+            save26("yolo26_pose_bad_extra", task, e2e[:, :, :-1], metadata)
+        elif task == "seg":
+            save26("yolo26_seg_bad_proto", task, e2e, metadata, proto=proto[:, :1])
+        else:
+            save26("yolo26_obb_bad_extra", task,
+                   np.concatenate((e2e, e2e[:, :, -1:]), axis=2), metadata)
+
+    raw = np.zeros((1, 6, 6), dtype=np.float32)
+    raw[0, :, 0] = [16, 16, 24, 24, .9, .1]
+    raw[0, :, 1] = [16, 16, 24, 24, .8, .2]
+    e2e = np.zeros((1, 6, 6), dtype=np.float32)
+    e2e[0, 0] = [4, 4, 28, 28, .9, 0]
+    e2e[0, 1] = [4, 4, 28, 28, .8, 0]
+    for mode, predictions in (("raw", raw), ("e2e", e2e)):
+        metadata = {"task": "detect", "end2end": str(mode == "e2e"),
+                    "args": str({"nms": False if mode == "e2e" else None})}
+        for suffix, dtype in (("", T.FLOAT), ("_fp16", T.FLOAT16)):
+            save26(f"yolo26_detect_{mode}{suffix}", "detect", predictions, metadata, dtype)
+    metadata = {"task": "detect", "end2end": "True", "args": "{'nms': False}"}
+    for name, change in (
+        ("missing_task", {"task": None}), ("wrong_task", {"task": "pose"}),
+        ("missing_args", {"args": None}), ("empty_args", {"args": "{}"}),
+        ("missing_mode", {"end2end": None}), ("invalid_mode", {"end2end": "yes"}),
+        ("embedded_nms", {"args": "{'nms': True}"}),
+        ("conflicting_mode", {"args": "{'nms': None}"}),
+        ("raw_conflict", {"end2end": "False"}),
+    ):
+        invalid = metadata | change
+        invalid = {key: value for key, value in invalid.items() if value is not None}
+        save26(f"yolo26_detect_{name}", "detect", e2e, invalid)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

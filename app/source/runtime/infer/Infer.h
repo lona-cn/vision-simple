@@ -65,6 +65,7 @@ enum class YOLOVersion : uint8_t {
   kVCustom = 0,
   kV10 = 10,
   kV11,
+  kV26 = 26,
 };
 
 struct YOLOResult {
