@@ -47,7 +47,7 @@ struct YOLOOBBFrame {
 using YOLOTaskFrameResult =
     std::variant<YOLOSegmentationFrame, YOLOPoseFrame, YOLOOBBFrame>;
 
-// YOLO11 non-detection exports. Existing InferYOLO/YOLOResult remain unchanged.
+// YOLO11 raw and YOLO26 raw/end-to-end non-detection exports.
 class VISION_SIMPLE_API InferYOLOTask {
  public:
   using CreateResult = VSResult<std::unique_ptr<InferYOLOTask>>;
@@ -63,9 +63,11 @@ class VISION_SIMPLE_API InferYOLOTask {
   virtual RunResult Run(const cv::Mat& image,
                         float confidence_threshold) noexcept = 0;
   static CreateResult Create(InferContext& context, std::span<uint8_t> data,
-                             YOLOTask task, size_t device_id = 0) noexcept;
+                             YOLOTask task, YOLOVersion version,
+                             size_t device_id = 0) noexcept;
   static CreateResult Create(InferContext& context, const std::string& path,
-                             YOLOTask task, size_t device_id = 0) noexcept;
+                             YOLOTask task, YOLOVersion version,
+                             size_t device_id = 0) noexcept;
 };
 
 }  // namespace vision_simple

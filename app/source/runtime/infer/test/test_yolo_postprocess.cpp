@@ -5,6 +5,7 @@
 #include <limits>
 
 #include "../private/InferYOLO.h"
+#include "../private/YOLOMetadata.hpp"
 #include "Util.hpp"
 
 using namespace vision_simple;
@@ -138,11 +139,102 @@ int test_malformed_class_and_nonfinite_values() {
   return 0;
 }
 
+int test_v26_layouts_and_metadata() {
+  const LetterboxTransform transform{{640, 640}, {640, 640}, {640, 640}, 1,
+                                     1,          0,          0};
+  bool end_to_end = false;
+  TEST_ASSERT(detail::ParseYOLO26Export(
+                  "{'nms': False, 'imgsz': (640, 640), 'half': True}",
+                  "True", "", end_to_end) && end_to_end,
+              "Python exporter metadata selects end-to-end decoding");
+  YOLOFilter e2e(YOLOVersion::kV26, {"first", "second"}, {1, 6, 6},
+                 YOLODetectionLayout::kEndToEnd);
+  const std::array<float, 36> rows{
+      60, 60, 140, 140, 0.9f, 0, 60, 60, 140, 140, 0.8f, 0,
+      60, 60, 140, 140, 0.85f, 1, 60, 60, 140, 140, 0.5f, 0,
+      60, 60, 140, 140, 0.1f, 0, 60, 60, 140, 140, 0.1f, 0};
+  auto result = e2e(rows, 0.5f, transform);
+  TEST_ASSERT(result && result->results.size() == 4,
+              "YOLO26 end-to-end keeps overlaps and threshold equality");
+  TEST_ASSERT_EQ(result->results[0].bbox, cv::Rect(60, 60, 80, 80),
+                 "YOLO26 end-to-end boxes are xyxy");
+  TEST_ASSERT_EQ(result->results[2].class_name, "second",
+                 "YOLO26 end-to-end class mapping");
+  TEST_ASSERT(detail::ParseYOLO26Export(
+                  "{\"nms\": null, \"end2end\": false}", "false", "false",
+                  end_to_end) && !end_to_end,
+              "JSON export metadata selects raw decoding");
+  YOLOFilter raw(YOLOVersion::kV26, {"first", "second"}, {1, 6, 6},
+                 YOLODetectionLayout::kRaw);
+  const std::array<float, 36> channels{
+      100, 100, 100, 400, 400, 400, 100, 100, 100, 400, 400, 400,
+      80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80,
+      0.9f, 0.8f, 0.05f, 0.5f, 0.1f, 0.1f,
+      0.05f, 0.05f, 0.85f, 0.1f, 0.1f, 0.1f};
+  result = raw(channels, 0.5f, transform);
+  TEST_ASSERT(result && result->results.size() == 2,
+              "YOLO26 raw applies class-aware NMS and strict threshold");
+  TEST_ASSERT_EQ(result->results[0].bbox, cv::Rect(60, 60, 80, 80),
+                 "YOLO26 raw boxes are center xywh");
+  YOLOFilter unspecified(YOLOVersion::kV26, {"first", "second"}, {1, 6, 6});
+  TEST_ASSERT(!unspecified(channels, 0.5f, transform),
+              "ambiguous shape alone never selects YOLO26 mode");
+  auto malformed = rows;
+  malformed[5] = 0.5f;
+  TEST_ASSERT(!e2e(malformed, 0.5f, transform),
+              "YOLO26 rejects fractional class indexes");
+  malformed = channels;
+  malformed[0] = std::numeric_limits<float>::max();
+  malformed[12] = std::numeric_limits<float>::max();
+  TEST_ASSERT(!raw(malformed, 0.5f, transform),
+              "YOLO26 rejects coordinate arithmetic overflow");
+  malformed = channels;
+  malformed[35] = std::numeric_limits<float>::quiet_NaN();
+  TEST_ASSERT(!raw(malformed, 0.5f, transform),
+              "YOLO26 rejects nonfinite scores below threshold");
+  for (const auto& shape : std::vector<std::vector<int64_t>>{
+           {2, 6, 6}, {1, -1, 6}, {1, 6, -1},
+           {1, std::numeric_limits<int64_t>::max(), 6}}) {
+    YOLOFilter invalid_shape(YOLOVersion::kV26, {"first", "second"}, shape,
+                             YOLODetectionLayout::kEndToEnd);
+    TEST_ASSERT(!invalid_shape(rows, 0.5f, transform),
+                "YOLO26 rejects dynamic, batched and oversized outputs");
+  }
+  TEST_ASSERT(!e2e(std::span(rows).first(35), 0.5f, transform),
+              "YOLO26 rejects truncated tensors");
+  const std::array<std::array<std::string_view, 3>, 17> invalid{{
+      {"", "True", ""},
+      {"{}", "True", ""},
+      {"{'nms': False}", "", ""},
+      {"{'nms': False}", "1", ""},
+      {"{'nms': True}", "True", ""},
+      {"{'nms': False}", "False", ""},
+      {"{'nms': None}", "True", ""},
+      {"{'nms': False}", "True", "True"},
+      {"{'nms': False}", "True", "None"},
+      {"{'nms': False}", "True", "garbage"},
+      {"{'nms': False, 'nms': False}", "True", ""},
+      {"{'nms': False, 'end2end': False}", "True", ""},
+      {"{'nms': False, 'end2end': True, 'end2end': True}", "True", ""},
+      {"{'nms': 'False'}", "True", ""},
+      {"{'nms': False, 'half': garbage}", "True", ""},
+      {"{'nms': False, 'other': {'broken', 2}}", "True", ""},
+      {"{'nms': False} trailing", "True", ""},
+  }};
+  for (const auto& metadata : invalid)
+    TEST_ASSERT(!detail::ParseYOLO26Export(metadata[0], metadata[1], metadata[2],
+                                          end_to_end),
+                "malformed, missing, embedded-NMS or conflicting export rejected");
+  TEST_PASS("YOLO26 explicit layouts, NMS policy and metadata validation");
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += test_v11_class_aware_nms();
   failures += test_v10_coordinates_without_second_nms();
   failures += test_malformed_shapes_and_lengths();
   failures += test_malformed_class_and_nonfinite_values();
+  failures += test_v26_layouts_and_metadata();
   return failures ? 1 : 0;
 }

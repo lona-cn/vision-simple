@@ -166,6 +166,38 @@ int CheckRuntimeRecovery(InferContext& context, const fs::path& assets) {
   }
   return 0;
 }
+
+int CheckYOLO26(InferContext& context, const fs::path& assets) {
+  const auto path = [&](const std::string& name) {
+    return (assets / "reliability" / ("yolo26_detect_" + name + ".onnx")).string();
+  };
+  for (const char* name : {"missing_task", "wrong_task", "missing_args",
+                           "empty_args", "missing_mode", "invalid_mode",
+                           "embedded_nms", "conflicting_mode", "raw_conflict"}) {
+    const auto rejected = InferYOLO::Create(context, path(name), YOLOVersion::kV26);
+    TEST_ASSERT(!rejected && rejected.error().code == VisionSimpleErrorCode::kModelError,
+                "ambiguous detection layout requires valid consistent export metadata");
+  }
+  for (const char* mode : {"raw", "e2e"}) {
+    for (const char* precision : {"", "_fp16"}) {
+      auto model = InferYOLO::Create(context, path(std::string(mode) + precision),
+                                     YOLOVersion::kV26);
+      TEST_ASSERT(model && (*model)->version() == YOLOVersion::kV26,
+                  "load explicit YOLO26 mode without masquerading as an old version");
+      auto result = (*model)->Run(cv::Mat(64, 64, CV_8UC3, cv::Scalar::all(0)), .5f);
+      const size_t count = std::string_view(mode) == "raw" ? 1 : 2;
+      TEST_ASSERT(result && result->results.size() == count,
+                  "metadata disambiguates identical [1,6,6] shapes and controls NMS");
+      for (const auto& detection : result->results) {
+        TEST_ASSERT(detection.class_id == 0 && detection.bbox == cv::Rect(4, 4, 24, 24),
+                    "explicit layout preserves box coordinate semantics");
+      }
+      auto empty = (*model)->Run(cv::Mat(64, 64, CV_8UC3, cv::Scalar::all(0)), 1.f);
+      TEST_ASSERT(empty && empty->results.empty(), "empty YOLO26 detections are successful");
+    }
+  }
+  return 0;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -209,6 +241,8 @@ int main(int argc, char** argv) {
   TEST_ASSERT(CheckInputs(**ocr) == 0, "OCR input contract and recovery");
   TEST_ASSERT(CheckRuntimeRecovery(**context, assets) == 0,
               "ORT failure recovery");
+  TEST_ASSERT(CheckYOLO26(**context, assets) == 0,
+              "YOLO26 load-time metadata, ambiguous layouts and FP16");
   TEST_PASS(
       "CPU input boundaries, ROI, fast-math confidence, real ORT recovery");
   return 0;

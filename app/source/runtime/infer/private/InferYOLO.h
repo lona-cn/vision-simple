@@ -10,8 +10,11 @@
 #include "VisionHelper.hpp"
 
 namespace vision_simple {
+enum class YOLODetectionLayout { kUnspecified, kRaw, kEndToEnd };
+
 class YOLOFilter {
   YOLOVersion version_;
+  YOLODetectionLayout layout_;
   std::vector<std::string> class_names_;
   std::vector<int64_t> shapes_;
 
@@ -22,15 +25,16 @@ class YOLOFilter {
   using FilterResult = InferResult<YOLOFrameResult>;
 
   explicit YOLOFilter(YOLOVersion version, std::vector<std::string> class_names,
-                      std::vector<int64_t> shapes);
+                      std::vector<int64_t> shapes,
+                      YOLODetectionLayout layout = YOLODetectionLayout::kUnspecified);
 
   YOLOVersion version() const noexcept;
 
-  FilterResult v11(std::span<const float> infer_output,
+  FilterResult DecodeRaw(std::span<const float> infer_output,
                    float confidence_threshold,
                    const LetterboxTransform& transform) const;
 
-  FilterResult v10(std::span<const float> infer_output,
+  FilterResult DecodeEndToEnd(std::span<const float> infer_output,
                    float confidence_threshold,
                    const LetterboxTransform& transform) const;
 
@@ -73,7 +77,8 @@ class InferYOLOOrtImpl : public InferYOLO {
   InferYOLOOrtImpl(InferContextORT& ort_ctx,
                    std::unique_ptr<Ort::Session>&& session,
                    Ort::Allocator&& allocator, YOLOVersion version,
-                   std::vector<std::string> class_names);
+                   std::vector<std::string> class_names,
+                   YOLODetectionLayout layout);
   ~InferYOLOOrtImpl() override;
 
   YOLOVersion version() const noexcept override;

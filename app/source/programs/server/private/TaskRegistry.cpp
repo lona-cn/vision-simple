@@ -87,12 +87,15 @@ template <YOLOTask Task>
 VSResult<RegisteredModel> LoadYOLOTask(InferContext& context,
                                        const ModelDefinition& definition,
                                        size_t device) {
-  if (definition.version != "kV11")
+  const auto version = magic_enum::enum_cast<YOLOVersion>(definition.version);
+  if (!version || (*version != YOLOVersion::kV11 &&
+                   *version != YOLOVersion::kV26))
     return MK_VSERROR(VisionSimpleErrorCode::kModelError,
-                      "YOLO segmentation, pose and OBB require kV11 exports");
+                      "YOLO segmentation, pose and OBB require kV11 or kV26");
   auto path = RequiredFile(definition, "model");
   if (!path) return std::unexpected(std::move(path.error()));
-  auto loaded = InferYOLOTask::Create(context, path->get(), Task, device);
+  auto loaded =
+      InferYOLOTask::Create(context, path->get(), Task, *version, device);
   if (!loaded) return std::unexpected(std::move(loaded.error()));
   if (!*loaded)
     return MK_VSERROR(VisionSimpleErrorCode::kModelError,
