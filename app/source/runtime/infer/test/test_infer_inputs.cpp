@@ -1,6 +1,9 @@
+#include <atomic>
+#include <barrier>
 #include <bit>
 #include <filesystem>
 #include <iostream>
+#include <thread>
 
 #include "Infer.h"
 #include "Util.hpp"
@@ -74,6 +77,36 @@ int CheckInputs(Model& model) {
   return 0;
 }
 
+template <typename Model>
+int CheckConcurrentRecovery(Model& model) {
+  const cv::Mat black(32, 32, CV_8UC3, cv::Scalar::all(0));
+  const cv::Mat white(32, 32, CV_8UC3, cv::Scalar::all(255));
+  const auto reference = model.Run(black, .5f);
+  TEST_ASSERT(reference, "concurrent recovery baseline succeeds");
+  std::atomic<bool> correct{true};
+  std::barrier ready(4);
+  std::vector<std::jthread> threads;
+  for (int worker = 0; worker < 4; ++worker) {
+    threads.emplace_back([&, worker] {
+      ready.arrive_and_wait();
+      for (int iteration = 0; iteration < 8; ++iteration) {
+        const bool fail = (iteration + worker) % 2 == 0;
+        const auto result = model.Run(fail ? white : black, .5f);
+        if (fail ? (result ||
+                    result.error().code != VisionSimpleErrorCode::kRuntimeError)
+                 : (!result || !Same(*reference, *result))) {
+          correct.store(false, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+  threads.clear();
+  TEST_ASSERT(
+      correct.load(std::memory_order_relaxed),
+      "concurrent calls preserve their pixels and recover from ORT errors");
+  return 0;
+}
+
 int CheckRuntimeRecovery(InferContext& context, const fs::path& assets) {
   auto yolo = InferYOLO::Create(context,
                                 (assets / "yolo_runtime_failure.onnx").string(),
@@ -97,6 +130,8 @@ int CheckRuntimeRecovery(InferContext& context, const fs::path& assets) {
               "rounded-zero Letterbox dimension is a recoverable input error");
   TEST_ASSERT((*yolo)->Run(black, .5f),
               "Letterbox error leaves session reusable");
+  TEST_ASSERT(CheckConcurrentRecovery(**yolo) == 0,
+              "YOLO serializes full Run for direct clients");
 
   auto rec_data = ReadAll((assets / "ocr_rec_runtime_failure.onnx").string());
   TEST_ASSERT(rec_data, "recognition failure fixture exists");
@@ -126,6 +161,8 @@ int CheckRuntimeRecovery(InferContext& context, const fs::path& assets) {
                     "blank detection is a successful empty result");
       }
     }
+    TEST_ASSERT(CheckConcurrentRecovery(**ocr) == 0,
+                "OCR serializes detection and all recognition crops");
   }
   return 0;
 }
@@ -148,8 +185,9 @@ int main(int argc, char** argv) {
   auto context =
       InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCPU);
   TEST_ASSERT(context, "create actual CPU context");
-  TEST_ASSERT(!InferContext::Create(InferFramework::kTVM, InferEP::kCPU),
-              "unsupported framework fails without terminating");
+  TEST_ASSERT(
+      !InferContext::Create(static_cast<InferFramework>(255), InferEP::kCPU),
+      "unknown framework fails without terminating");
   const auto missing = InferYOLO::Create(
       **context, (assets / "missing.onnx").string(), YOLOVersion::kV11);
   TEST_ASSERT(!missing, "missing model is an ordinary creation error");

@@ -2,11 +2,11 @@
 
 #include <climits>
 #include <limits>
-#include <regex>
 
 #include "InferValidation.hpp"
 #include "LogContext.h"
 #include "LogFacade.h"
+#include "YOLOMetadata.hpp"
 
 using namespace std;
 using namespace cv;
@@ -78,13 +78,11 @@ std::map<InferFramework, InferYOLOFactory> infer_yolo_factories{std::make_pair(
         return std::unexpected(
             VisionSimpleError{VisionSimpleErrorCode::kModelError,
                               "Missing YOLO class names metadata"});
-      const std::string names_str(names.get());
-      const std::regex reg{R"('([^']+)')"};
       std::vector<std::string> class_names;
-      for (auto i =
-               std::sregex_iterator(names_str.begin(), names_str.end(), reg);
-           i != std::sregex_iterator(); ++i)
-        class_names.emplace_back((*i)[1].str());
+      if (!vision_simple::detail::ParseYOLOClassNames(names.get(), class_names))
+        return std::unexpected(
+            VisionSimpleError{VisionSimpleErrorCode::kModelError,
+                              "Invalid YOLO class names metadata"});
       if (!ValidOutputShape(version, output_tensor.GetShape(),
                             class_names.size()))
         return std::unexpected(
@@ -235,12 +233,76 @@ YOLOFilter::FilterResult YOLOFilter::operator()(
       VisionSimpleErrorCode::kParameterError, "Unsupported YOLO version"});
 }
 
-cv::Mat& InferYOLOOrtImpl::PreProcess(const cv::Mat& image) {
-  auto& dst_image = vision_helper_.Letterbox(image, input_size_, transform_);
-  if (!dst_image.empty())
-    vision_helper_.HWC2CHW_BGR2RGB<uint8_t>(dst_image, dst_image);
-  return dst_image;
-}
+struct InferYOLOOrtImpl::Workspace {
+  Ort::Value input{nullptr}, output{nullptr};
+  Ort::IoBinding binding;
+  VisionHelper helper;
+  cv::Mat preprocessed;
+  LetterboxTransform transform;
+  std::vector<float> output_fp32;
+
+  explicit Workspace(InferYOLOOrtImpl& model) : binding(*model.session_) {
+    input = Ort::Value::CreateTensor(
+        model.allocator_, model.input_shape_.data(), model.input_shape_.size(),
+        model.input_value_type_);
+    output = Ort::Value::CreateTensor(
+        model.allocator_, model.output_shape_.data(),
+        model.output_shape_.size(), model.output_value_type_);
+    binding.BindOutput(model.output_name_.c_str(), output);
+  }
+};
+
+class InferYOLOOrtImpl::Task final : public detail::FrameTask {
+  InferYOLOOrtImpl& model_;
+  const cv::Mat& image_;
+  float threshold_;
+  std::unique_ptr<Workspace> workspace_;
+  detail::PipelineLane lane_ = detail::PipelineLane::kPreprocess;
+  YOLOFrameResult result_;
+
+ public:
+  Task(InferYOLOOrtImpl& model, const cv::Mat& image, float threshold,
+       std::unique_ptr<Workspace> workspace)
+      : model_(model),
+        image_(image),
+        threshold_(threshold),
+        workspace_(std::move(workspace)) {}
+
+  ~Task() override { model_.ReleaseWorkspace(std::move(workspace_)); }
+
+  VSResult<std::optional<detail::PipelineLane>> Advance() noexcept override {
+    try {
+      if (lane_ == detail::PipelineLane::kPreprocess) {
+        auto prepared = model_.PreProcess(*workspace_, image_, threshold_);
+        if (!prepared) return std::unexpected(std::move(prepared.error()));
+        lane_ = detail::PipelineLane::kInference;
+        return lane_;
+      }
+      if (lane_ == detail::PipelineLane::kInference) {
+        model_.Execute(*workspace_);
+        lane_ = detail::PipelineLane::kPostprocess;
+        return lane_;
+      }
+      auto result = model_.PostProcess(*workspace_, threshold_);
+      if (!result) return std::unexpected(std::move(result.error()));
+      result_ = std::move(*result);
+      return std::nullopt;
+    } catch (const cv::Exception& e) {
+      return std::unexpected(
+          VisionSimpleError{VisionSimpleErrorCode::kRuntimeError, e.what()});
+    } catch (const Ort::Exception& e) {
+      return std::unexpected(
+          VisionSimpleError{VisionSimpleErrorCode::kRuntimeError, e.what()});
+    } catch (const std::exception& e) {
+      return std::unexpected(
+          VisionSimpleError{VisionSimpleErrorCode::kRuntimeError, e.what()});
+    }
+  }
+
+  detail::FrameResult TakeResult() noexcept override {
+    return std::move(result_);
+  }
+};
 
 InferYOLOOrtImpl::InferYOLOOrtImpl(InferContextORT& ort_ctx,
                                    std::unique_ptr<Ort::Session>&& session,
@@ -254,24 +316,67 @@ InferYOLOOrtImpl::InferYOLOOrtImpl(InferContextORT& ort_ctx,
                   .GetTensorTypeAndShapeInfo()
                   .GetShape()),
       allocator_(std::move(allocator)),
-      input_value_(nullptr),
-      output_memory_info_(Ort::MemoryInfo::CreateCpu(
-          ort_ctx.env_memory_info().GetAllocatorType(),
-          ort_ctx.env_memory_info().GetMemoryType())),
       class_names_(std::move(class_names)) {
   auto input_info = session_->GetInputTypeInfo(0);
   auto tensor_info = input_info.GetTensorTypeAndShapeInfo();
-  auto shape = tensor_info.GetShape();
-  input_size_ = {static_cast<int>(shape[3]), static_cast<int>(shape[2])};
+  input_shape_ = tensor_info.GetShape();
+  input_size_ = {static_cast<int>(input_shape_[3]),
+                 static_cast<int>(input_shape_[2])};
   input_name_ = session_->GetInputNameAllocated(0, allocator_).get();
   output_name_ = session_->GetOutputNameAllocated(0, allocator_).get();
   input_value_type_ = tensor_info.GetElementType();
-  input_value_ = Ort::Value::CreateTensor(allocator_, shape.data(),
-                                          shape.size(), input_value_type_);
   auto output_info = session_->GetOutputTypeInfo(0);
   auto output_tensor = output_info.GetTensorTypeAndShapeInfo();
   output_shape_ = output_tensor.GetShape();
   output_value_type_ = output_tensor.GetElementType();
+  legacy_workspace_ = std::make_unique<Workspace>(*this);
+}
+
+InferYOLOOrtImpl::~InferYOLOOrtImpl() = default;
+
+std::unique_ptr<InferYOLOOrtImpl::Workspace>
+InferYOLOOrtImpl::AcquireWorkspace() {
+  {
+    const std::lock_guard lock(pool_mutex_);
+    for (auto& idle : idle_workspaces_)
+      if (idle) return std::move(idle);
+  }
+  const std::lock_guard lock(session_mutex_);
+  return std::make_unique<Workspace>(*this);
+}
+
+void InferYOLOOrtImpl::ReleaseWorkspace(
+    std::unique_ptr<Workspace> workspace) noexcept {
+  const std::lock_guard lock(pool_mutex_);
+  for (auto& idle : idle_workspaces_) {
+    if (!idle) {
+      idle = std::move(workspace);
+      return;
+    }
+  }
+}
+
+VSResult<std::unique_ptr<vision_simple::detail::FrameTask>>
+vision_simple::detail::MakeFrameTask(InferYOLO& model, const cv::Mat& image,
+                                     float confidence_threshold) noexcept {
+  try {
+    auto* ort = dynamic_cast<InferYOLOOrtImpl*>(&model);
+    if (!ort)
+      return std::unexpected(
+          VisionSimpleError{VisionSimpleErrorCode::kUnimplementedError,
+                            "Unsupported YOLO backend for staged inference"});
+    return std::make_unique<InferYOLOOrtImpl::Task>(
+        *ort, image, confidence_threshold, ort->AcquireWorkspace());
+  } catch (const cv::Exception& e) {
+    return std::unexpected(
+        VisionSimpleError{VisionSimpleErrorCode::kRuntimeError, e.what()});
+  } catch (const Ort::Exception& e) {
+    return std::unexpected(
+        VisionSimpleError{VisionSimpleErrorCode::kRuntimeError, e.what()});
+  } catch (const std::exception& e) {
+    return std::unexpected(
+        VisionSimpleError{VisionSimpleErrorCode::kRuntimeError, e.what()});
+  }
 }
 
 YOLOVersion InferYOLOOrtImpl::version() const noexcept { return version_; }
@@ -280,70 +385,87 @@ const std::vector<std::string>& InferYOLOOrtImpl::class_names() const noexcept {
   return class_names_;
 }
 
+VSResult<void> InferYOLOOrtImpl::PreProcess(Workspace& workspace,
+                                            const cv::Mat& image,
+                                            float confidence_threshold) {
+  if (auto valid = ValidateInferInput(image, confidence_threshold); !valid)
+    return std::unexpected(std::move(valid.error()));
+  auto timer = LogContext::ScopedTimer("YOLO::preprocess", nullptr);
+  auto& chw =
+      workspace.helper.Letterbox(image, input_size_, workspace.transform);
+  if (chw.empty())
+    return std::unexpected(
+        VisionSimpleError{VisionSimpleErrorCode::kParameterError,
+                          "Image dimensions cannot be letterboxed"});
+  workspace.helper.HWC2CHW_BGR2RGB<uint8_t>(chw, chw);
+  const size_t elements = chw.total() * chw.channels();
+  if (input_value_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    chw.convertTo(workspace.preprocessed, CV_32F, 1.0 / 255);
+    Cvt::cvt(
+        std::span<const float>(workspace.preprocessed.ptr<float>(), elements),
+        workspace.input.GetTensorMutableData<Ort::Float16_t>());
+  } else {
+    cv::Mat input_image(chw.size(), CV_32FC3,
+                        workspace.input.GetTensorMutableData<float>());
+    chw.convertTo(input_image, CV_32F, 1.0 / 255);
+  }
+  LogFacade::Timing("yolo", "YOLO::preprocess", timer.elapsed_ms());
+  return {};
+}
+
+void InferYOLOOrtImpl::Execute(Workspace& workspace) {
+  const std::lock_guard lock(session_mutex_);
+  auto timer = LogContext::ScopedTimer("YOLO::infer", nullptr);
+  // Rebind after writing: device providers may copy CPU inputs at bind time.
+  // Binding and execution share the gate with the legacy direct Run path.
+  workspace.binding.BindInput(input_name_.c_str(), workspace.input);
+  Ort::RunOptions run_options;
+  session_->Run(run_options, workspace.binding);
+  LogFacade::Timing("yolo", "YOLO::infer", timer.elapsed_ms());
+}
+
+InferYOLO::RunResult InferYOLOOrtImpl::PostProcess(Workspace& workspace,
+                                                   float confidence_threshold) {
+  auto timer = LogContext::ScopedTimer("YOLO::postprocess", nullptr);
+  auto outputs = workspace.binding.GetOutputValues();
+  if (outputs.size() != 1 || !outputs[0].IsTensor())
+    return std::unexpected(VisionSimpleError{VisionSimpleErrorCode::kModelError,
+                                             "Invalid YOLO output tensor"});
+  auto& output = outputs[0];
+  auto info = output.GetTensorTypeAndShapeInfo();
+  if (info.GetShape() != output_shape_ ||
+      info.GetElementType() != output_value_type_)
+    return std::unexpected(
+        VisionSimpleError{VisionSimpleErrorCode::kModelError,
+                          "YOLO output does not match model metadata"});
+  const size_t count = info.GetElementCount();
+  const float* output_data;
+  if (output_value_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    workspace.output_fp32.resize(count);
+    Cvt::cvt(std::span<const Ort::Float16_t>(
+                 output.GetTensorData<Ort::Float16_t>(), count),
+             workspace.output_fp32.data());
+    output_data = workspace.output_fp32.data();
+  } else {
+    output_data = output.GetTensorData<float>();
+  }
+  auto result = filter_(std::span<const float>(output_data, count),
+                        confidence_threshold, workspace.transform);
+  LogFacade::Timing("yolo", "YOLO::postprocess", timer.elapsed_ms());
+  return result;
+}
+
 InferYOLO::RunResult InferYOLOOrtImpl::Run(
     const cv::Mat& image, float confidence_threshold) noexcept {
   try {
-    if (auto valid = ValidateInferInput(image, confidence_threshold); !valid)
-      return std::unexpected(std::move(valid.error()));
+    const std::lock_guard lock(run_mutex_);
     auto total_timer = LogContext::ScopedTimer(
         "YOLO::Run::total", LogFacade::TimerCallback("yolo"));
     LogFacade::Info("yolo", "YOLO inference started");
-    auto preprocess_timer =
-        LogContext::ScopedTimer("YOLO::preprocess", nullptr);
-    cv::Mat& chw = PreProcess(image);
-    if (chw.empty())
-      return std::unexpected(
-          VisionSimpleError{VisionSimpleErrorCode::kParameterError,
-                            "Image dimensions cannot be letterboxed"});
-    const size_t elements = chw.total() * chw.channels();
-    if (input_value_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-      chw.convertTo(preprocessed_image_, CV_32F, 1.0 / 255);
-      Cvt::cvt(
-          std::span<const float>(preprocessed_image_.ptr<float>(), elements),
-          input_value_.GetTensorMutableData<Ort::Float16_t>());
-    } else {
-      chw.convertTo(preprocessed_image_, CV_32F, 1.0 / 255);
-      std::memcpy(input_value_.GetTensorMutableData<float>(),
-                  preprocessed_image_.ptr<float>(), elements * sizeof(float));
-    }
-    Ort::IoBinding binding(*session_);
-    binding.BindInput(input_name_.c_str(), input_value_);
-    binding.BindOutput(output_name_.c_str(), output_memory_info_);
-    LogFacade::Timing("yolo", "YOLO::preprocess",
-                      preprocess_timer.elapsed_ms());
-    auto infer_timer = LogContext::ScopedTimer("YOLO::infer", nullptr);
-    Ort::RunOptions run_options;
-    session_->Run(run_options, binding);
-    LogFacade::Timing("yolo", "YOLO::infer", infer_timer.elapsed_ms());
-    auto postprocess_timer =
-        LogContext::ScopedTimer("YOLO::postprocess", nullptr);
-    auto outputs = binding.GetOutputValues();
-    if (outputs.size() != 1 || !outputs[0].IsTensor())
-      return std::unexpected(VisionSimpleError{
-          VisionSimpleErrorCode::kModelError, "Invalid YOLO output tensor"});
-    auto& output = outputs[0];
-    auto info = output.GetTensorTypeAndShapeInfo();
-    if (info.GetShape() != output_shape_ ||
-        info.GetElementType() != output_value_type_)
-      return std::unexpected(
-          VisionSimpleError{VisionSimpleErrorCode::kModelError,
-                            "YOLO output does not match model metadata"});
-    const size_t count = info.GetElementCount();
-    const float* output_data;
-    if (output_value_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-      output_fp32_cache_.resize(count);
-      Cvt::cvt(std::span<const Ort::Float16_t>(
-                   output.GetTensorData<Ort::Float16_t>(), count),
-               output_fp32_cache_.data());
-      output_data = output_fp32_cache_.data();
-    } else {
-      output_data = output.GetTensorData<float>();
-    }
-    auto result = filter_(std::span<const float>(output_data, count),
-                          confidence_threshold, transform_);
-    LogFacade::Timing("yolo", "YOLO::postprocess",
-                      postprocess_timer.elapsed_ms());
-    return result;
+    auto prepared = PreProcess(*legacy_workspace_, image, confidence_threshold);
+    if (!prepared) return std::unexpected(std::move(prepared.error()));
+    Execute(*legacy_workspace_);
+    return PostProcess(*legacy_workspace_, confidence_threshold);
   } catch (const cv::Exception& e) {
     return std::unexpected(
         VisionSimpleError{VisionSimpleErrorCode::kRuntimeError, e.what()});

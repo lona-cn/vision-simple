@@ -136,6 +136,10 @@ package("opencv")
 
     on_install("linux", "macosx", "windows", "mingw@windows,msys", function (package)
         io.replace("cmake/OpenCVUtils.cmake", "if(PKG_CONFIG_FOUND OR PkgConfig_FOUND)", "if(NOT WIN32 AND (PKG_CONFIG_FOUND OR PkgConfig_FOUND))", {plain = true})
+        -- Backport OpenCV 4.12's helper-script minimum for CMake 4 compatibility.
+        -- The separate `cmake -P` invocation does not inherit configure cache policies.
+        io.replace("cmake/OpenCVGenPkgconfig.cmake", "cmake_minimum_required(VERSION 2.8.12.2)",
+                   "cmake_minimum_required(VERSION 3.5)", {plain = true})
         local configs = {"-DCMAKE_OSX_DEPLOYMENT_TARGET=",
                          "-DBUILD_PERF_TESTS=OFF",
                          "-DBUILD_TESTS=OFF",

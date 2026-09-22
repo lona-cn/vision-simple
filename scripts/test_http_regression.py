@@ -4,6 +4,7 @@
 import argparse
 import base64
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import ipaddress
 import json
@@ -71,12 +72,13 @@ def listeners(pid):
 
 class Server:
     def __init__(self, executable, root, model_config, *, host="127.0.0.1", port=None,
-                 framework="kONNXRUNTIME", ep="kCPU"):
+                 framework="kONNXRUNTIME", ep="kCPU", options=None):
         self.executable = executable
         self.root = root
         self.model_config = model_config
         self.host, self.port = host, port if port is not None else free_port()
         self.framework, self.ep = framework, ep
+        self.options = options or {}
         self.process = None
         self.temp = None
         self.output = None
@@ -93,6 +95,7 @@ class Server:
             # JSON string quoting is also valid YAML; forward slashes avoid Windows escapes.
             options = {"static_path": (self.root / "doc/openapi").as_posix(),
                        "infer_framework": self.framework, "infer_ep": self.ep, "infer_device": "0"}
+            options.update(self.options)
             text = f"host: {json.dumps(self.host)}\nport: {self.port}\noptions:\n"
             text += "".join(f"  {key}: {json.dumps(value)}\n" for key, value in options.items())
             (self.cwd / "config/server.yaml").write_text(text, encoding="utf-8")
@@ -139,10 +142,10 @@ class Server:
         require(all(ipaddress.ip_address(address).is_loopback for address, _ in rows),
                 f"Server opened a non-loopback/wildcard listener: {rows}")
 
-    def request(self, route, payload=None, *, raw=None, method="POST"):
+    def request(self, route, payload=None, *, raw=None, method="POST", timeout=120):
         require(self.process.poll() is None, "Server exited between requests")
         body = raw if raw is not None else json.dumps(payload).encode("utf-8")
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=120)
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
             connection.request(method, route, body=None if method == "GET" else body,
                                headers={"Content-Type": "application/json"})
@@ -205,6 +208,8 @@ class Server:
                         cleanup_error = f"Server failed during normal shutdown: {self.process.returncode}"
                 elif not self.expected_start_failure and exc_type is None:
                     cleanup_error = f"Server exited unexpectedly before cleanup: {self.process.returncode}"
+                if self.process.returncode == 0 and "log4cplus:ERROR" in self.diagnostics():
+                    cleanup_error = "Logging runtime reported an error at server shutdown"
                 if self.process.stdin:
                     self.process.stdin.close()
                 require(not listeners(self.process.pid), "Owned listener survived process cleanup")
@@ -364,6 +369,184 @@ def inference_failure_matrix(server, kind):
     print(f"PASS {kind}: real ORT failure, stage/index precedence, same-instance recovery", flush=True)
 
 
+def model_stats(server):
+    # A socket accepted before inference starts can share its blocked IO worker.
+    # Probe a fresh connection rather than waiting behind that entire batch.
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            status, body = server.request("/v0/infer/stats", method="GET", timeout=.25)
+            break
+        except TimeoutError:
+            if time.monotonic() >= deadline:
+                raise RegressionFailure("Stats unavailable throughout active-request observation")
+    require(status == 200, f"Stats failed: {status} {body}")
+    return {(row["kind"], row["name"]): row for row in body["models"]}
+
+
+def lifecycle_matrix(server, images):
+    for kind, model in (("yolo", "hd2-fp32"), ("ocr", "ppocr-v4")):
+        expected = [infer(server, kind, model, [image])["results"][0] for image in images]
+        before = model_stats(server)[kind, model]
+        error_response(server.request(f"/v0/infer/{kind}",
+                                      {"model": model, "images": ["%%%"]}),
+                       400, "invalid_image", 0)
+        after = model_stats(server)[kind, model]
+        require(after["failures"] == before["failures"] + 1,
+                f"{kind}: failed request not accounted")
+        require(after["active_requests"] == 0, f"{kind}: failed request leaked a lease")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = [pool.submit(infer, server, kind, model, images * 8)]
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if model_stats(server)[kind, model]["active_requests"] > 0:
+                    break
+                if jobs[0].done():
+                    jobs[0].result()
+                    raise RegressionFailure(f"{kind}: first request finished before activity was observed")
+                time.sleep(.01)
+            else:
+                raise RegressionFailure(f"{kind}: first request never became active")
+            # Establish the next connection after the first handler is occupied;
+            # libhv may otherwise accept both sockets on one IO worker.
+            jobs.append(pool.submit(infer, server, kind, model, list(reversed(images)) * 8))
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                row = model_stats(server)[kind, model]
+                if row["active_requests"] >= 2:
+                    break
+                for job in jobs:
+                    if job.done():
+                        job.result()
+                require(not all(job.done() for job in jobs),
+                        f"{kind}: failed to observe overlapping active requests")
+                time.sleep(.01)
+            else:
+                raise RegressionFailure(f"{kind}: stats blocked behind inference")
+            error_response(server.request("/v0/infer/unload", {"kind": kind, "model": model}),
+                           409, "model_busy", None)
+            for job, reference in zip(jobs, (expected * 8, list(reversed(expected)) * 8)):
+                require(close_values(job.result()["results"], reference),
+                        f"{kind}: concurrent request overwrote workspace or result order")
+        final = model_stats(server)[kind, model]
+        deadline = time.monotonic() + 5
+        while final["active_requests"] and time.monotonic() < deadline:
+            time.sleep(.01)
+            final = model_stats(server)[kind, model]
+        require(final["active_requests"] == 0 and final["requests"] == after["requests"] + 2,
+                f"{kind}: successful requests not released/accounted")
+        require(final["total_duration_ms"] >= after["total_duration_ms"] and
+                final["last_used"] >= after["last_used"], f"{kind}: timing moved backwards")
+        status, body = server.request("/v0/infer/unload", {"kind": kind, "model": model})
+        require(status == 200, f"{kind}: idle unload failed: {status} {body}")
+        require((kind, model) not in model_stats(server), f"{kind}: unloaded model still resident")
+        error_response(server.request("/v0/infer/unload", {"kind": kind, "model": model}),
+                       404, "model_not_loaded", None)
+        reloaded = infer(server, kind, model, images)
+        require(close_values(reloaded["results"], expected), f"{kind}: reload changed inference")
+        print(f"PASS {kind}: overlapping requests, busy unload, stats, failure lease, reload", flush=True)
+    expected_keys = sorted(model_stats(server))
+    page_keys = []
+    for offset in range(len(expected_keys)):
+        status, page = server.request(f"/v0/infer/stats?limit=1&offset={offset}", method="GET")
+        require(status == 200 and page["total"] == len(expected_keys), f"Invalid stats page: {page}")
+        page_keys.extend((row["kind"], row["name"]) for row in page["models"])
+    require(page_keys == expected_keys, "Stats pagination lost, duplicated or reordered models")
+    error_response(server.request("/v0/infer/stats?limit=201", method="GET"),
+                   400, "invalid_request", None)
+    error_response(server.request("/v0/infer/stats?offset=-1", method="GET"),
+                   400, "invalid_request", None)
+    error_response(server.request("/v0/infer/unload", {"kind": "yolo", "model": []}),
+                   400, "invalid_request", None)
+
+
+def idle_eviction_matrix(executable, root, config, images):
+    with Server(executable, root, config,
+                options={"infer_idle_timeout_ms": "100", "infer_sweep_interval_ms": "20"}) as server:
+        server.wait_ready()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            job = pool.submit(infer, server, "yolo", "hd2-fp32", images * 16)
+            observed = False
+            deadline = time.monotonic() + 60
+            while not job.done() and time.monotonic() < deadline:
+                rows = model_stats(server)
+                row = rows.get(("yolo", "hd2-fp32"))
+                if row is not None and row["active_requests"] > 0:
+                    observed = True
+                    time.sleep(.15)
+                    if not job.done():
+                        current = model_stats(server).get(("yolo", "hd2-fp32"))
+                        require(job.done() or (current is not None and current["active_requests"] > 0),
+                                "Idle timer evicted an active request")
+                else:
+                    time.sleep(.01)
+            require(observed, "Did not observe active model during idle eviction")
+            reference = job.result()["results"][:len(images)]
+        deadline = time.monotonic() + 5
+        while ("yolo", "hd2-fp32") in model_stats(server) and time.monotonic() < deadline:
+            time.sleep(.05)
+        require(("yolo", "hd2-fp32") not in model_stats(server), "Idle model was not evicted")
+        require(close_values(infer(server, "yolo", "hd2-fp32", images)["results"], reference),
+                "Reload after timer eviction changed inference")
+    print("PASS automatic idle eviction protects active work, reloads, and stops cleanly", flush=True)
+
+
+def pipeline_controls_matrix(server, images):
+    for kind, model in (("yolo", "hd2-fp32"), ("ocr", "ppocr-v4")):
+        route = f"/v0/infer/{kind}"
+        reference = infer(server, kind, model, images)
+        error_response(server.request(route, {"model": model, "images": images, "timeout_ms": 1}),
+                       504, "request_timeout", None)
+        require(close_values(infer(server, kind, model, images), reference),
+                f"{kind}: deadline changed a later request's results")
+        error_response(server.request(route, {"model": model, "images": [], "timeout_ms": "1"}),
+                       400, "invalid_request", None)
+        error_response(server.request(route, {"model": model, "images": [], "timeout_ms": 0}),
+                       400, "invalid_request", None)
+        error_response(server.request(route, {"model": model, "images": [""] * 129}),
+                       400, "invalid_request", None)
+    print("PASS pipeline deadline, recovery, typed controls and batch bound", flush=True)
+
+
+def pipeline_backpressure_matrix(executable, root, config, images):
+    with Server(executable, root, config,
+                options={"infer_pipeline_capacity": "1", "infer_pipeline_max_batches": "1"}) as server:
+        server.wait_ready()
+        expected = infer(server, "yolo", "hd2-fp32", images)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            work = pool.submit(server.request, "/v0/infer/yolo",
+                               {"model": "hd2-fp32", "images": images * 16})
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if model_stats(server)["yolo", "hd2-fp32"]["active_requests"]:
+                    break
+                require(not work.done(), "Batch finished before backpressure observation")
+            busy = False
+            while not work.done() and time.monotonic() < deadline:
+                status, body = server.request("/v0/infer/yolo",
+                    {"model": "hd2-fp32", "images": [images[1]]})
+                if status == 503:
+                    error_response((status, body), 503, "service_overloaded", None)
+                    busy = True
+                    break
+                require(status == 200, f"Unexpected admission outcome: {status} {body}")
+                require(close_values(body["results"], [expected["results"][1]]),
+                        "Admitted competitor returned another request's results")
+            status, body = work.result()
+            if status == 503:
+                # Activity covers decoding too; the smaller request can reach
+                # admission first. Either competitor may legitimately lose.
+                error_response((status, body), 503, "service_overloaded", None)
+                busy = True
+            else:
+                require(status == 200 and close_values(body["results"], expected["results"] * 16),
+                        "Backpressure corrupted admitted batch order")
+            require(busy, "Saturated pipeline did not apply observable backpressure")
+        require(close_values(infer(server, "yolo", "hd2-fp32", images), expected),
+                "Pipeline did not release admission capacity")
+    print("PASS bounded pipeline rejects excess admission and recovers", flush=True)
+
+
 def run(args):
     root = args.project_root.resolve(strict=True)
     executable = args.server.resolve(strict=True)
@@ -400,6 +583,10 @@ def run(args):
         request_matrix(server, "ocr", "ppocr-v4", list(reversed(images)))
         inference_failure_matrix(server, "yolo")
         inference_failure_matrix(server, "ocr")
+        lifecycle_matrix(server, images)
+        pipeline_controls_matrix(server, images)
+    idle_eviction_matrix(executable, root, config, images)
+    pipeline_backpressure_matrix(executable, root, config, images)
     for bad_config in (None, 'yolo:\n  - name: "unterminated\n'):
         for route, payload, method, code in (
                 ("/v0/infer/models", None, "GET", "model_config_failed"),
@@ -415,7 +602,15 @@ def run(args):
                 infer(server, "yolo", "hd2-fp32", [images[0]])
             print(f"PASS model configuration error and recovery: {route}", flush=True)
     for options in ({"host": ""}, {"host": "invalid host!"}, {"host": "x" * 256},
-                    {"framework": "not-a-framework"}, {"ep": "not-an-ep"}):
+                    {"framework": "not-a-framework"}, {"ep": "not-an-ep"},
+                    {"options": {"infer_idle_timeout_ms": "-1"}},
+                    {"options": {"infer_idle_timeout_ms": "999999999999999999999"}},
+                    {"options": {"infer_sweep_interval_ms": "0"}},
+                    {"options": {"infer_sweep_interval_ms": "10junk"}},
+                    {"options": {"infer_pipeline_capacity": "0"}},
+                    {"options": {"infer_pipeline_max_batches": "65"}},
+                    {"options": {"infer_max_batch_images": "4097"}},
+                    {"options": {"infer_timeout_ms": "0"}}):
         with Server(executable, root, config, **options) as server:
             server.expect_start_failure()
         print(f"PASS controlled startup failure: {options}", flush=True)
