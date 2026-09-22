@@ -225,6 +225,22 @@ int test_v26_layouts_and_metadata() {
     TEST_ASSERT(!detail::ParseYOLO26Export(metadata[0], metadata[1], metadata[2],
                                           end_to_end),
                 "malformed, missing, embedded-NMS or conflicting export rejected");
+  for (std::string_view number :
+       {"640", "-0.125", "6.25e-3", "1E+2", "-0.0e-9999",
+        "1.7976931348623157e308", "5e-324"}) {
+    const std::string args =
+        "{'nms': False, 'numeric': " + std::string(number) + "}";
+    TEST_ASSERT(detail::ParseYOLO26Export(args, "True", "", end_to_end),
+                "finite metadata numbers include exponents and double boundaries");
+  }
+  for (std::string_view number :
+       {"1e309", "1e-9999", "nan", "-inf", "Infinity",
+        "0.5junk", "1e", "+1", "0x1p0"}) {
+    const std::string args =
+        "{'nms': False, 'numeric': " + std::string(number) + "}";
+    TEST_ASSERT(!detail::ParseYOLO26Export(args, "True", "", end_to_end),
+                "metadata rejects range errors, nonfinite values and partial numbers");
+  }
   TEST_PASS("YOLO26 explicit layouts, NMS policy and metadata validation");
   return 0;
 }

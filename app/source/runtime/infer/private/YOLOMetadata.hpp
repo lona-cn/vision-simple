@@ -1,8 +1,9 @@
 #pragma once
 
+#include <bit>
 #include <charconv>
 #include <climits>
-#include <cmath>
+#include <iguana/detail/fast_float.h>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -205,9 +206,23 @@ class YOLOMetadataReader {
       return true;
     double number = 0;
     const auto parsed =
-        std::from_chars(token.data(), token.data() + token.size(), number);
-    return parsed.ec == std::errc{} &&
-           parsed.ptr == token.data() + token.size() && std::isfinite(number);
+        fast_float::from_chars(token.data(), token.data() + token.size(), number);
+    if (parsed.ec != std::errc{} ||
+        parsed.ptr != token.data() + token.size())
+      return false;
+    // Bit classification survives release fast-math, unlike std::isfinite.
+    const auto magnitude =
+        std::bit_cast<uint64_t>(number) & UINT64_C(0x7fffffffffffffff);
+    if (magnitude >= UINT64_C(0x7ff0000000000000)) return false;
+    // Iguana's bundled fast_float reports underflow as a successful zero.
+    // Preserve from_chars range checking without rejecting signed/exponent zero.
+    if (magnitude == 0) {
+      for (char digit : token) {
+        if (digit == 'e' || digit == 'E') break;
+        if (digit >= '1' && digit <= '9') return false;
+      }
+    }
+    return true;
   }
   std::string_view text_;
   size_t pos_ = 0;
