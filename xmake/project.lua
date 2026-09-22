@@ -56,9 +56,14 @@ function SetupProject()
 			add_cxxflags("-mf16c")
 		end
 		add_rpathdirs("./")
-		-- add_syslinks("c++")
-		-- add_cxxflags("-stdlib=libc++", {tools = "clang"})
-		-- add_cxxflags("-fexperimental-library", {tools = "clang"})
+		local runtimes = get_config("runtimes")
+		if runtimes == "c++_shared" or runtimes == "c++_static" then
+			-- libc++ 18 gates stop_token behind its experimental library flag.
+			-- The link flags also make Clang link libc++experimental.
+			add_cxxflags("-fexperimental-library", {tools = "clang", force = true})
+			add_ldflags("-fexperimental-library", {tools = "clang", force = true})
+			add_shflags("-fexperimental-library", {tools = "clang", force = true})
+		end
 	end
 	set_version(project_semver, { build = "%Y%m%d%H%M" })
 	set_allowedplats("windows","linux","cross")

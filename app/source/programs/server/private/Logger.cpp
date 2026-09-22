@@ -5,8 +5,10 @@
 #include <log4cplus/logger.h>
 #include <log4cplus/loggingmacros.h>
 
-#include <filesystem>
+#include <codecvt>
+#include <fstream>
 #include <iostream>
+#include <locale>
 #include <mutex>
 #include <unordered_map>
 
@@ -54,11 +56,10 @@ struct vision_simple::Logger::Impl {
 };
 vision_simple::Logger::~Logger() { LogFacade::RegisterSink(nullptr); }
 
-vision_simple::Logger::Logger(const std::string& config_path)
+vision_simple::Logger::Logger(log4cplus::tistream& properties)
     : impl_(std::make_unique<Impl>()) {
   std::cout << "    initialize log system" << std::endl;
-  log4cplus::PropertyConfigurator::doConfigure(
-      LOG4CPLUS_STRING_TO_TSTRING(config_path));
+  log4cplus::PropertyConfigurator{properties}.configure();
 }
 
 vision_simple::VSResult<std::reference_wrapper<vision_simple::Logger>>
@@ -67,14 +68,23 @@ vision_simple::Logger::Instance() noexcept {
   static Logger* instance = nullptr;
   std::lock_guard lock{instance_mutex};
   if (!instance) {
-    if (!std::filesystem::exists(CONFIG_PATH)) {
+    // Decode UTF-8 independently of the process locale and log4cplus's
+    // optional encoding flags, which are not exposed by every package build.
+    std::basic_ifstream<log4cplus::tchar> properties;
+#if defined(UNICODE)
+    properties.imbue(std::locale(
+        properties.getloc(),
+        new std::codecvt_utf8<wchar_t, 0x10FFFF, std::consume_header>));
+#endif
+    properties.open(std::string(CONFIG_PATH), std::ios::binary);
+    if (!properties) {
       return std::unexpected{VisionSimpleError{
           VisionSimpleErrorCode::kIOError,
-          std::format("Configuration file not found:{}", CONFIG_PATH)}};
+          std::format("Unable to open logging configuration:{}", CONFIG_PATH)}};
     }
     // Function-local construction registers destruction after log4cplus's
     // own lazy context. A global unique_ptr registers too early.
-    static Logger singleton{std::string(CONFIG_PATH)};
+    static Logger singleton{properties};
     instance = &singleton;
     LogFacade::RegisterSink(instance);
   }
