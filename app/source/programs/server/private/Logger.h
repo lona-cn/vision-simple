@@ -1,4 +1,6 @@
 #pragma once
+#include <log4cplus/streams.h>
+
 #include <memory>
 #include <string>
 
@@ -11,7 +13,7 @@ class Logger : public LogSink {
   struct Impl;
   std::unique_ptr<Impl> impl_;
 
-  Logger(const std::string& config_path);
+  Logger(log4cplus::tistream& properties);
 
  public:
   ~Logger() override;
