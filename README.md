@@ -29,21 +29,22 @@
 <a><img alt="ort rknpu" src="https://img.shields.io/badge/ort-rknpu-white.svg"></a>
 </p>
 
-`vision-simple` 是一个基于 C++23 的跨平台视觉推理库，旨在提供 **开箱即用** 的推理功能。通过 Docker用户可以快速搭建推理服务。该库目前支持常见的 YOLO 系列（包括 YOLOv10、YOLOv11 和 YOLO26），以及部分 OCR 模型（如 `PaddleOCR`）。**内建 HTTP API** 使得服务更加便捷。此外，`vision-simple` 采用 `ONNXRuntime` 引擎，支持多种 Execution Provider，如 `DirectML`、`CUDA`、`TensorRT`，并可与特定硬件设备（如 RockChip 的 RKNPU）兼容，提供更高效的推理性能。
+`vision-simple` 是基于 C++23 和 ONNXRuntime 的跨平台视觉推理库，提供 C++ API 与独立 HTTP 服务。支持 YOLO 检测、实例分割、姿态、旋转框及 OCR，并提供检测结果跟踪、视频画面文字提取、OpenAI-like 和 MCP SSE 接入。
 
-**快速入口**：[YOLO26 上手与兼容性](#yolo26yolov26) · [模型配置](#任务注册与统一模型配置) · [构建项目](#构建项目) · [运行测试](#运行测试)
+本文面向希望构建、部署并发起首次推理的使用者，描述**当前源码**，不表示历史发布包或镜像已包含全部功能。
 
+**快速入口**：[构建与启动](#构建项目) · [容器部署](#docker部署http服务) · [模型配置](#任务注册与统一模型配置) · [YOLO26](#yolo26yolov26) · [协议接入](#统一服务openai-like-与-mcp-sse) · [运行测试](#运行测试)
 
-## <div align="center">🚀 特性 </div>
+## 特性
 
-- **跨平台**：支持`windows/x64`、`linux/x86_64`、`linux/arm64/v8`、`linux/riscv64`
-- **多计算设备**：支持CPU、GPU、RKNPU
-- **嵌入式设备**：目前已支持`rk3568`、`rv1106G3`（Luckfox Pico 1T算力版本）
-- **小体积**：静态编译版本体积不到20MiB，推理YOLO和OCR占用300MiB内存
-- **YOLO26 多任务**：检测、实例分割、姿态与旋转框均支持 raw 和 NMS-free ONNX 输出；CPU 已验证 FP32/FP16，DirectML 的精度限制见下方支持矩阵。
-- **快速部署**：
-  - **一键编译**：提供各个平台已验证的编译脚本
-  - **[容器部署](https://hub.docker.com/r/lonacn/vision_simple)**：使用`docker`、`podman`、`containerd`一键部署
+- **推理任务**：YOLOv10/v11/26 检测；YOLO11/26 实例分割、姿态、旋转框；PP-OCR v3/v4 CTC 与受限 SAR recognition 契约。
+- **有界服务**：模型按需加载、活动租约、空闲卸载、统计、分阶段流水线与合作式取消。
+- **时序处理**：ByteTrack / BoT-SORT 跟踪会话；异步 OCR 视频字幕任务，输出 SRT/WebVTT，不包含语音转写。
+- **部署平台**：Windows x64、Linux x86_64，以及 ARM64、ARMv7、RISC-V 64 交叉构建配置。交叉构建不等于目标硬件运行验证。
+- **执行提供者**：CPU、DirectML、CUDA、TensorRT、RKNPU 构建选项；实际可用性取决于依赖、硬件和模型导出，见兼容性说明。不承诺固定体积、内存占用或帧率。
+- **接入方式**：
+  - C++23 API，使用 `std::expected` 返回错误。
+  - [容器部署](https://hub.docker.com/r/lonacn/vision_simple)，当前发布工作流仅覆盖 Linux amd64 CPU。
   - **[HTTP服务](doc/openapi/server.yaml)**：提供HTTP API供Web应用调用
 
 
@@ -53,16 +54,26 @@
 ### <div align="center"> OCR(HTTP API) </div>
 
 ![http-inferocr](doc/images/http-inferocr.png)
-## <div align="center">🚀 快速使用 </div>
+## 快速使用
+
 ### docker部署HTTP服务
-1. 启动server项目：
+
+使用当前源码构建 CPU 镜像，避免将历史 `0.4.1-cpu-x86_64` 标签误当作最新功能：
+
 ```sh
-docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.1-cpu-x86_64
+git clone --recurse-submodules https://github.com/lona-cn/vision-simple.git
+cd vision-simple
+git lfs install
+git lfs pull
+docker build --platform linux/amd64 -t vision-simple:local -f docker/Dockerfile.debian-bookworm-x86_64-cpu .
+docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 ```
-2. 打开[swagger在线编辑器](https://editor-next.swagger.io/)，并允许该网站的不安全内容
-3. 复制[doc/openapi/server.yaml](doc/openapi/server.yaml)的内容到`swagger在线编辑器`
-4. 在编辑器右侧选择感兴趣的API进行测试：
-![swagger-right](doc/images/swagger-right.png)
+
+需要 Docker、Git LFS 及支持 AVX/AVX2/F16C 的 x86_64 CPU。首次构建会下载并编译依赖；镜像包含默认 YOLO11/PP-OCR 配置及测试模型，不包含 YOLO26 权重。发布镜像的选择与校验见[Docker Hub 发布](#docker-hub-发布)。
+
+在另一终端执行 `curl http://127.0.0.1:11451/v0/infer/models`（Windows 可用 `curl.exe`）检查模型目录。目录成功只证明配置可发现，不证明权重加载或推理成功；完整请求示例见[发起推理](#发起推理)，默认检测模型改用 `hd2-fp32` 即可。
+
+完整接口见 [OpenAPI](doc/openapi/server.yaml)。服务**没有认证或租户隔离**；不要直接暴露到公网。源码默认监听 `0.0.0.0`，容器示例仅发布回环端口；原生运行请将 `host` 改为 `"127.0.0.1"` 或使用鉴权代理。
 
 ### HTTP v0 错误与批量语义
 
@@ -80,12 +91,14 @@ docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.1-cpu-x86_
 | 400 | `invalid_image` | 从 0 开始的图片索引 |
 | 500 | `model_load_failed`、`model_config_failed`、`internal_error` | `null` |
 | 500 | `inference_failed` | 从 0 开始的图片索引 |
+| 503 | `service_overloaded`、`service_unavailable`、`request_cancelled` | `null` |
+| 504 | `request_timeout` | `null` |
 
 旧客户端需从“HTTP 200 + 文本错误”迁移为检查 HTTP 状态和 `error.code`，不能依赖 `message` 文案。第三方异常细节仅保留在日志。完整契约见 [OpenAPI](doc/openapi/server.yaml)。
 
 ### 模型生命周期与并发
 
-- `POST /v0/infer/unload` 接受 `{"kind":"yolo","model":"hd2-fp32"}`（kind 可为 `yolo` 或 `ocr`）。空闲模型卸载返回 `200 {"kind":"yolo","model":"hd2-fp32","unloaded":true}`；活动模型返回 `409 model_busy`；未加载返回 `404 model_not_loaded`。后续推理自动重新加载。
+- `POST /v0/infer/unload` 接受 `{"kind":"yolo","model":"hd2-fp32"}`；`kind` 支持 `yolo`、`ocr`、`seg`、`pose`、`obb`。空闲模型卸载返回 `200 {"kind":"yolo","model":"hd2-fp32","unloaded":true}`；活动模型返回 `409 model_busy`；未加载返回 `404 model_not_loaded`。后续推理自动重新加载。卸载和 stats 覆盖五种任务，只有旧 `/v0/infer/models` 目录限于 `yolo`/`ocr`。
 - `GET /v0/infer/stats?limit=100&offset=0` 返回 `models`、`total`、`limit`、`offset` 和 `idle_timeout_ms`；limit 范围 1–200。模型按 `(kind,name)` 排序，字段为 `kind`、`name`、`active_requests`、`requests`、`failures`、`total_duration_ms`、`last_used`（Unix 毫秒）。计数属于当前已加载实例，重新加载后重置；加载前的请求错误不计入实例统计，耗时含等待工作区的时间。
 - `config/server.yaml` 的字符串 options：`infer_idle_timeout_ms: "300000"`，`infer_sweep_interval_ms: "1000"`。空闲时间从最后一次请求结束计算，使用单调时钟；timeout 为 `"0"` 关闭自动卸载，扫描间隔必须为正整数。
 - 活动租约涵盖解码、等待推理、后处理及响应序列化/发送调用；手动和定时卸载均不删除活动实例。同步 C++ `Run` 每模型串行；HTTP 流水线使用独立任务工作区，同一会话的 ORT 执行受锁保护。
@@ -106,16 +119,7 @@ C++ 调用者可使用 `InferPipeline::Create`，再调用 `Run(model, images, c
 
 ### 任务注册与统一模型配置
 
-架构按四个独立切片验收，而不是重写推理 API：
-
-| 切片 | 实现边界 | 验收 |
-|---|---|---|
-| 任务注册 | server-private `TaskRegistry` 集中 `yolo`、`ocr`、`seg`、`pose`、`obb` 的类型化加载、流水线调用和结果转换 | 分任务推理及未知任务拒绝 |
-| 配置归一化 | `Config::Load` 将新旧 YAML 归一化到 `ModelConfig::models` | `test_config_load`：等价、冲突、跨任务同名、公共 DTO 往返 |
-| 服务生命周期 | `InferenceService` 统一 `(task,name)` 缓存、租约、统计和回收 | 同名模型隔离、活动卸载拒绝、空闲回收、失败恢复 |
-| 协议适配 | v0 保持兼容；原生 v1/OpenAI-like/MCP 调用同一推理服务 | HTTP 与协议回归 |
-
-默认 `app/config/base/models.yaml` 已使用以下格式：
+在 `config/models.yaml` 中声明模型，使用 `(task,name)` 标识。原生 v1 与 MCP 使用配置原名，OpenAI-like 使用 `<task>:<name>`。以下为默认配置的 FP32 检测与 OCR 条目：
 
 ```yaml
 models:
@@ -135,9 +139,7 @@ models:
 
 旧 `yolo`/`ocr` 配置仍可读，也可与不冲突的新条目混用。重复 `(task,name)` 一律拒绝；不同任务允许同名。版本和模型资源检查仍在首次模型加载时执行。旧配置 DTO 保留兼容投影，执行路径只读取 canonical `models`，没有两套缓存或配置查找逻辑。
 
-注册表是已实现能力的静态类型表，不是动态插件系统；当前注册 `yolo`、`ocr`、`seg`、`pose`、`obb`，未知 task 在服务配置边界拒绝。旧 v0 模型目录仍仅包含 `yolo`/`ocr`。各任务共用缓存、租约、统计和回收逻辑。运行 `xmake build test_config_load && xmake run test_config_load`，以及 `python3 scripts/test_model_registry.py --server <server可执行文件> --project-root .` 可分别验收配置和真实服务边界。
-
-实际实现的推理后端是 ONNXRuntime。[TVM 长期事项 #20](https://github.com/lona-cn/vision-simple/issues/20) 已按 `wontfix` / `not planned` 归档；未实现的 `InferFramework::kTVM` 公共枚举已移除，未知框架仍受控失败，不表示支持了新的后端。后续若重启 TVM，需要先明确部署平台、模型产物与动态 shape 契约，以及可复现的正确性、性能和内存验收指标。
+当前注册 `yolo`、`ocr`、`seg`、`pose`、`obb`，未知 task 在服务配置边界拒绝。各任务共用缓存、租约、统计和回收逻辑。实际推理后端为 ONNXRuntime，不支持 TVM；任务注册表不是动态插件系统。
 
 ### YOLO 分割、姿态与旋转框
 
@@ -164,13 +166,12 @@ models:
 - 新任务返回 `class_names` 及逐图 `results`，各目标含 `class_id` 和 `confidence`。分割额外返回原图整数 `bbox:[x,y,width,height]` 和 `mask_png_base64`：裁剪至该框的 0/255 二值 PNG，并非全图 mask，放置时以框左上角为原点。C++ `InferYOLOTask` 使用独立 `YOLOTaskFrameResult` variant；分割 `CV_8UC1` mask 自持有像素，不依赖推理工作区。
 - 姿态额外返回同样的框及 `keypoints:[{x,y,confidence}]`，坐标为原图浮点像素，不裁剪至图像范围。OBB 返回四个有序原图 `corners:[[x,y],...]` 和沿角点 0 → 1 的弧度 `angle`；角点可在图外，不转换为轴对齐包围框。
 - OpenAI-like 使用带任务前缀的 ID，例如 `seg:segment`、`pose:pose`、`obb:oriented`；MCP 在旧工具之外生成 `infer_seg`、`infer_pose`、`infer_obb`。结果 JSON 保留各任务的几何信息。
-- 当前机器/样本的真实模型验收中，CPU 与 DirectML 均得到分割 5、姿态 4、OBB 177 个目标；独立 CPU ORT oracle 对照的 mask IoU 为 1，最大坐标误差小于 0.0003 像素。这是实现一致性验证，不是模型质量基准，也不保证其他导出模型或 provider 的结果。
 
 ### YOLO26（YOLOv26）
 
 `kV26 = 26` 支持检测、实例分割、姿态与旋转框，保留 YOLOv10/YOLO11 的既有行为。模型须为单张、静态尺寸的 ONNX，输入/输出张量支持 FP32 或 FP16；FP16 权重不意味着所有 I/O 都是 FP16。
 
-首次使用建议选择 **FP32 + NMS-free**，先跑通单个检测模型，再扩展其他任务。需要包含 YOLO26 实现的服务构建；快速使用中的历史 Docker 镜像标签不代表已包含此功能。
+首次使用建议选择 **FP32 + NMS-free**，先跑通单个检测模型，再扩展其他任务。需要包含 YOLO26 实现的服务构建；历史发布包或 Docker 标签不代表已包含此功能。
 
 | 服务 task | 原始输出（外部 NMS） | NMS-free 输出（不再执行 NMS） |
 |---|---|---|
@@ -280,12 +281,10 @@ with urlopen(request, timeout=120) as response:
 | CPU | 四任务通过 | 四任务通过 | 四任务通过 | 四任务通过 |
 | DirectML | 四任务对照通过 | 四任务对照通过 | 四任务推理通过 | 四任务均在 ORT 初始化时失败 |
 
-CPU 对 16 个真实 nano 模型运行了 C++ `Run` 和 HTTP 推理，使用方形／宽图，核对类别、置信度、框、mask、关键点和旋转框。FP32 框误差 <0.5 像素，关键点／OBB 角点误差 <0.001 像素；CPU FP16 最大框误差 0.75 像素、关键点误差 0.375 像素、置信度绝对误差 <0.007。分割与 Ultralytics 二值 mask 缩放流程对照的最小 IoU 为 0.941（本项目插值语义见上文）。OBB raw 对照使用独立的多边形 IoU oracle；同一方图下本项目保留 180 个框，Ultralytics 概率 IoU 保留 175 个，属于已说明的算法差异。
-
-一次 CPU 方图阶段采样（预处理／推理／后处理，ms）：检测 raw FP32 为 `1.381 / 25.476 / 0.489`，NMS-free FP32 为 `1.200 / 21.912 / 0.010`。这是功能烟测记录，不是性能基准或加速承诺。**当前 DML 环境请选择 FP32 或已验证的 raw FP16，不要部署这些 NMS-free FP16 产物**；初始化失败返回受控 `model_load_failed`，不会静默换模式。
+该矩阵记录既有 Windows 验证范围，不是所有机器、驱动或导出模型的保证，也不是本次文档更新重新跑出的结果。**在上述 DML 环境请选择 FP32 或已验证的 raw FP16，不要部署这些 NMS-free FP16 产物**；初始化失败返回受控 `model_load_failed`，不会静默换模式。部署前请使用自己的图片、导出模型与执行提供者验证结果和资源占用。
 
 
-不包括分类、语义分割、深度估计、YOLOE、动态输入或 batch>1。CUDA/TensorRT 尚未在本次验收环境验证，不能据此宣称所有 EP 可用。模型权重与导出产物不纳入源码，部署者应自行核对 Ultralytics 的模型与软件许可证。
+不包括分类、语义分割、深度估计、YOLOE、动态输入或 batch>1。CUDA/TensorRT 不在上述 YOLO26 验证范围内。YOLO26 权重与导出产物不随仓库分发；部署者须核对 Ultralytics 软件及模型许可证。仓库中的 YOLO11/PP-OCR 测试资源另行通过 Git LFS 获取。
 
 ### 时序跟踪会话
 
@@ -304,13 +303,15 @@ CPU 对 16 个真实 nano 模型运行了 C++ `Run` 和 HTTP 推理，使用方�
 {"frame_index":0,"timestamp":0.0,"detections":[{"class_id":0,"confidence":0.9,"bbox":[10,20,30,40]}]}
 ```
 
+会话首帧建立的轨迹立即确认；后续新建轨迹才受 `min_hits` 确认门槛约束。空 `tracks` 也可能是成功结果，例如没有检测或新目标尚未确认。
+
 - `timestamp` 是有限非负秒数，`frame_index` 是 0–9007199254740991 的整数；两者在同一会话内均须严格递增。经过的秒数控制运动预测，索引间隔计入过期帧数。被拒绝帧不推进状态；reset 清空序列、ID 和时间。推进返回 `frame_index`、`timestamp` 和 `tracks:[{track_id,class_id,confidence,bbox}]`，仅输出本帧观测到的已确认轨迹，不输出丢失预测。状态含可空 `last_frame_index`/`last_timestamp` 及 `active_tracks`/`lost_tracks`。
 - 算法为 `"bytetrack"` 或 `"botsort"`。默认选项：`high_threshold:0.5`、`low_threshold:0.1`、`new_track_threshold:0.6`、`match_threshold:0.8`、`max_lost_frames:30`、`min_hits:2`、`max_tracks:256`、`max_detections:256`、`camera_motion:true`、`appearance:false`、`proximity_threshold:0.5`、`appearance_threshold:0.25`。阈值范围 [0,1]，须 low < high ≤ new；匹配阈值表示最大代价，不是最低 IoU。`min_hits` 为 1–10000，`max_lost_frames` 为 0–10000，两个容量选项均为 1–256。
 - BoT-SORT 相机运动补偿要求每帧 `image` 提供原始 base64 PNG/JPEG，整个序列尺寸一致且至少 8×8；仅提交检测结果时设 `camera_motion:false`。解码前限制为最多 16,777,216 像素。框为有限浮点 xywh，宽高为正；confidence 范围 [0,1]，类别 ID 非负。
 - BoT-SORT 的 `appearance:true` 要求每个检测含有限、非零 `embedding` 数组，最多 512 元素且会话内维度一致。外观特征由调用者提供，不附带 ReID 模型或权重，跟踪服务也不执行特征提取模型。
 - 限额：32 个会话、每帧最多 256 个检测、每会话最多 256 条轨迹、正文 4 MiB。自创建或最近成功 step/reset 后 300 秒过期，在服务访问时清理；status/list 不续期。会话忙时并发访问返回 409，不排队；不同会话的轨迹身份互不共享。
 - 错误为 `error.{code,message,image_index}`，`image_index` 为 null：400 `invalid_request`/`invalid_image`、404 `tracking_session_not_found`、409 `tracking_session_busy`/`frame_out_of_order`、503 `tracking_capacity`/`service_unavailable`（含 `Retry-After: 1`）、500 `tracking_failed`。拒绝未知 JSON 字段；POST 必须精确使用 `Content-Type: application/json`，GET/DELETE 不得带正文。正文超限返回 413，不支持的 `Expect` 返回 417。
-- 跟踪拒绝非空浏览器 `Origin`（403），响应使用 `Cache-Control: no-store`；但会话 ID 不等于认证，列表也没有租户隔离。必须使用可信网络或鉴权代理。固定依赖 `libhv 1.3.3-vs.1` 避免解析器仅凭 `Content-Length` 请求头就提前分配正文内存，防止接收限制被解析器预分配绕过。
+- 跟踪业务请求拒绝非空浏览器 `Origin`（403），响应使用 `Cache-Control: no-store`；普通 OPTIONS 预检仍由全局 CORS 中间件处理。Origin/CORS 和会话 ID 都不是认证，列表没有租户隔离，必须使用可信网络或鉴权代理。
 
 ### 异步视频字幕
 
@@ -336,10 +337,10 @@ curl -i -X DELETE http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
 - 正常状态为 `created → uploading → queued → running → completed`，失败进入 `failed`。取消返回 202；正在执行原生处理时经历 `cancelling → cancelled`，是合作式取消，不强制中断解码器/ORT 调用。对终态任务取消不会改变结果。状态字段为 `id`、`state`、`uploaded_bytes`、`decoded_frames`、`sampled_frames`、`position_ms`、可空 `duration_ms`、`cue_count` 和可空 `error_code`。时长可能未知，计数/位置并非保证准确的百分比；运行中的 `cue_count` 不含尚未闭合的字幕。`GET /v1/subtitle/jobs?limit=100` 返回任务对象数组及可空 `next_cursor`，下一页原样传入 `cursor`（limit 为 1–100）。
 - 创建 JSON 后以独立 PUT 上传原始字节，不接受 multipart/base64、服务器本地路径或远程 URL。仅 `created` 可开始上传；已消费、中断或失败的上传不能在同一任务重试，应新建任务并重新上传，创建操作不具幂等性。上传成功后仍可能异步失败，必须轮询 `state` 并检查 `error_code`（如 `upload_interrupted`、`unsupported_video`、`invalid_timestamps`、`ocr_failed`、`subtitle_limit`），不依赖错误文案；失败的部分结果不能下载。
 - 单 worker，最多 **8 个任务**（含待上传及保留的终态结果）。上限为每视频 64 MiB、1800 秒、1,000,000 个解码帧、每帧 16,777,216 像素；每次观测最多 4096 行，单行及合并文字最多 4096 字节；最多 10,000 条字幕及累计 2 MiB 字幕文字。JSON 控制正文最多 64 KiB。输入文件存放于服务自建的私有临时目录，在完成/失败/取消/删除时移除，正常关闭时移除目录。created/uploading 无上传活动 60 秒过期，终态结果 300 秒过期；轮询和下载不续期。文件系统清理失败可能继续占用容量，进程崩溃不保证正常清理。
-- 解码支持依平台而定：Windows 直接使用 Media Foundation 读取首部为 `ftyp` box 的 MP4 系列文件及 ASF，codec 取决于系统安装情况。所有平台均有有界 MJPEG AVI reader（从零开始的单一 MJPG/mjpg 视频流，含 OpenDML AVI/AVIX），拒绝其他 AVI codec。识别容器不代表支持其中任意 codec；不支持任意编码、播放列表、图像序列或 URL 抓取，解码错误与正常 EOF 分别处理。此处描述源码构建，不表示已发布新 Docker 镜像或提供 TVM 支持。
+- HTTP 可用的视频解码依平台而定：所有平台提供有界 MJPEG AVI reader（从零开始的单一 MJPG/mjpg 视频流，含 OpenDML AVI/AVIX），拒绝其他 AVI codec；Windows 另通过 Media Foundation 读取首部为 `ftyp` box 的 MP4 系列文件，codec 取决于系统安装情况。ASF 虽有底层读取支持，但当前上传入口拒绝它；MKV 可通过上传嗅探，却会在解码阶段报 `unsupported_video`。识别容器或返回上传 202 不代表支持解码。不支持任意编码、播放列表、图像序列或 URL 抓取。
 - MJPEG AVI 时间戳依据流的 rate/scale；Media Foundation 使用实际 sample 时间戳及正的 sample 时长，起点向下、终点向上取整至毫秒。完成后的 `duration_ms` 为实际视频结束时间，不是帧数估算值或较长的音轨/容器时长；原生解码的 duration 可在完成前一直为 null。
 - 错误为 `error.{code,message,image_index}`，`image_index` 为 null：400 `invalid_request`；404 `model_not_found`/`subtitle_job_not_found`；409 `subtitle_job_busy`/`subtitle_not_ready`；413 `payload_too_large`；415 `unsupported_media_type`/`invalid_video`；503 `subtitle_capacity`/`service_unavailable`（`Retry-After: 1`）；500 `subtitle_failed`。创建/取消必须精确使用 `application/json`，上传使用 `application/octet-stream`；无正文操作拒绝正文，不支持的 `Expect` 返回 417。DELETE 仅对 created 或终态返回 204，其他状态需先取消并轮询。
-- API **没有认证或租户隔离**。非空浏览器 `Origin` 返回 403，响应使用 `Cache-Control: no-store`；任务 ID 不是凭证。须使用可信网络或鉴权代理。
+- API **没有认证或租户隔离**。字幕业务请求对非空浏览器 `Origin` 返回 403，响应使用 `Cache-Control: no-store`；普通 OPTIONS 仍由全局 CORS 中间件处理。任务 ID 不是凭证，须使用可信网络或鉴权代理。
 
 真实视频回归（在仓库根目录运行，需先构建 server）：
 
@@ -359,7 +360,7 @@ python scripts/test_subtitle_regression.py --server <server可执行文件> --pr
 - 动态 N：把相同预处理宽度的框稳定分组，最多每组指定数量，执行真正的 `[N,3,H,W]` 推理，再恢复检测顺序。动态 H 默认 48，动态 W 保留原有高度倍数取整与整框 resize；不同宽度不额外混合 padding，因此不会引入新的有效长度截断。
 - 固定 N 以模型维度为准（1–64），末尾不足时补归一化零样本并丢弃其输出。固定 H/W 按声明尺寸整框 resize；不凭空推断 `T × width_ratio`，所有真实样本解码完整 T（SAR 由 EOS 截止）。需要保持宽高比或额外 mask 的导出模型必须先匹配这一预处理契约。
 - DBNet 检测在 recognition 裁剪前使用 1.5 unclip 比例扩展收缩后的文字区域，避免字形被裁掉（例如应为 `HELLO` 却只裁出 `E`）。同步与流水线 OCR 都使用修正后的几何，框和识别文字可能因此改变。
-- `test_ocr_batch` 覆盖混合宽度、顺序、固定 N 尾部、输入缓存复用、SAR 文件字典及流水线隔离；其中 ONNX guard 会在 N=1 时真实失败，防止“循环单张”伪装 batching。历史 CPU/DML PP-OCR 的 66 区域一致性以及 CPU batch 1/4 双图中位数 2074.8/1990.8 ms（各 2 次预热、10 次测量）均**早于 DBNet 几何修正**，不代表当前文字/框一致性或性能保证，需使用修正后的裁剪和实际负载重新测量。
+- `test_ocr_batch` 覆盖混合宽度、顺序、固定 N 尾部、输入缓存复用、SAR 文件字典及流水线隔离；其中 ONNX guard 会在 N=1 时真实失败，防止“循环单张”伪装 batching。批量大小的收益取决于裁剪尺寸、模型和执行提供者，需以实际负载测量。
 
 ### 统一服务、OpenAI-like 与 MCP SSE
 
@@ -377,6 +378,8 @@ v0、原生 v1、OpenAI-like 和 MCP 共用 `InferenceService`，不重复加载
 **MCP 传统 HTTP+SSE**
 
 连接 `GET /mcp/sse`，读取 `endpoint` 事件中的相对 POST 地址，再向其发送 JSON-RPC 2.0。完成 `initialize`、`notifications/initialized` 后，使用 `tools/list` / `tools/call`；支持版本 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25`。这不是 Streamable HTTP，客户端须选择 SSE 传输。
+
+初始化 `params` 必须包含 `protocolVersion`、对象 `capabilities` 和含 `name`/`version` 的 `clientInfo`。POST 返回 202 仅表示消息接收，JSON-RPC 响应从原 SSE 连接读取，不在 POST 正文中返回推理结果。
 
 - `list_models`：可选 `limit`（1–200）和 `cursor`，返回 `data:[{id,kind,name}]` 及可选 `next_cursor`。
 - 自动生成的 `infer_yolo` / `infer_ocr` / `infer_seg` / `infer_pose` / `infer_obb`：`{"model":"配置原名","images":["原始base64"],"timeout_ms":60000}`；不要传带任务前缀的 catalog ID 或 data URL。输入 JSON Schema 随工具发现返回。
@@ -405,42 +408,63 @@ cv::Rect box = VisionHelper::ScaleCoords(transform, cv::Vec4f{x1, y1, x2, y2});
 
 `ScaleCoords` 接收模型空间浮点 xyxy，按实际轴向比例反算，裁剪端点后 round 为整数 xywh。旧几何签名、`DataConverter` 和未实现的 uint8 转换空操作已删除；`Cvt` 支持 FP32/FP16 双向转换。
 
-本轮不提供用户认证、全局 CORS 重设计、旧推理接口的通用解码后像素限额、热加载、完整信号停机、RKNPU/容器发布或任意 ONNX 支持，不能据此宣称全面生产安全。跟踪 PNG/JPEG 和字幕视频帧具有上述像素限制，旧推理解码行为不变。v1/MCP 正文限制不覆盖原有 v0；错误消息使用独立堆分配，日志缓存具有同步保护。
+服务没有内建认证、热加载或任意 ONNX 支持。v1/MCP 正文限制不覆盖旧 v0 路由；旧推理接口也没有通用解码后像素上限。跟踪 PNG/JPEG 和字幕视频帧具有上述像素限制，但这些限制不等于全面的生产安全保证。
 
 
-## <div align="center">🚀 快速开发 </div>
+## 开发与部署
 
 ### 构建项目
-#### windows/x64
-* [xmake](https://xmake.io) >= 2.9.7
-* msvc with c++23
-* windows 11
 
-```powershell
-# pull project
-git clone https://github.com/lona-cn/vision-simple.git
-cd vision-simple
-# setup sln
-./scripts/dev-vs.bat
-# run server
-xmake build server
-xmake run server
-```
-#### linux/x86_64
-* [xmake](https://xmake.io) >= 2.9.7
-* gcc-13
-* debian12/ubuntu2022
+#### 获取源码与模型资源
+
+安装 Git、Git LFS、[xmake](https://xmake.io) 及对应编译器。MSVC/GCC 配置使用 xmake ≥ 2.9.7；Clang 18 + libc++ 配置使用 xmake ≥ 3.1.1，与 CI 一致。
 
 ```sh
-# pull project
-git clone https://github.com/lona-cn/vision-simple.git
+git clone --recurse-submodules https://github.com/lona-cn/vision-simple.git
 cd vision-simple
-# build release
-./scripts/build-release.sh
-# run server
-xmake build server
-xmake run server
+git lfs install
+git lfs pull
 ```
+
+首次配置会下载依赖，需可用网络和依赖构建工具。现有 checkout 可先执行 `git submodule update --init --recursive`；LFS 指针文件不能作为 ONNX 权重使用。
+
+#### windows/x64
+
+使用支持 C++23 的 Visual Studio 2022 MSVC 工具链和 Windows SDK。以下显式选择 CPU 构建；DirectML 见下一节。
+
+```powershell
+xmake f -p windows -a x64 --toolchain=msvc -m release --with_dml=n --with_cuda=n --with_tensorrt=n -y
+xmake build server
+Copy-Item app/assets/test/* build/windows/x64/release/assets/ -Recurse -Force
+# 在 build/windows/x64/release/config/server.yaml 中将 host 改为 "127.0.0.1"，再启动：
+Set-Location build/windows/x64/release
+.\vision_simple-server.exe
+```
+
+#### linux/x86_64
+
+CI 的本机 CPU 配置为 Ubuntu 24.04 + GCC 14；也提供 Clang 18 + libc++ 18 配置。需安装相应 C/C++ 编译器及 Python 开发工具、包构建工具。
+
+```sh
+xmake f -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 -m release --with_cuda=n --with_tensorrt=n --with_rknpu=n -y
+xmake build server
+cp -R app/assets/test/. build/linux/x86_64/release/assets/
+# 在 build/linux/x86_64/release/config/server.yaml 中将 host 改为 "127.0.0.1"，再启动：
+cd build/linux/x86_64/release
+LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ./vision_simple-server
+```
+
+Clang 用户在仓库根目录用以下命令替换 GCC 配置命令，后续构建与启动相同：
+
+```sh
+xmake f -p linux -a x86_64 --toolchain=clang --cc=clang-18 --cxx=clang++-18 -m release --runtimes=c++_shared --with_cuda=n --with_tensorrt=n --with_rknpu=n -y
+```
+
+libc++ 18 所需的实验库编译/链接标志由项目设置，无需手动修改源码。上述目录适用于默认输出配置；自定义 `-o` 时以实际 targetfile 为准。
+
+**工作目录很重要**：server 从工作目录读取 `config/server.yaml`、`config/models.yaml` 和相对模型路径。构建会复制基础配置与主资源，但 server 目标不会自动复制测试模型，因此上面显式复制了测试资源；正式部署只需准备配置引用的权重和字典。重新构建可能覆盖配置，建议部署到独立目录；配置或模型变更后重启服务。
+
+也可从 [GitHub Releases](https://github.com/lona-cn/vision-simple/releases) 选择平台、架构和 EP 变体匹配的归档；核对发布页校验和及归档内 `build-info.json` 的 commit/构建配置。归档仅收集当次构建目录中的配置和资源，不保证含全部模型；交叉构建产物仍须在目标硬件验证。
 
 #### linux/arm64 (交叉编译)
 * 交叉编译工具链: `aarch64-linux-gnu-`
@@ -460,6 +484,14 @@ xmake build server
 
 ### 启用硬件加速 (Execution Provider)
 
+编译选项与运行配置必须匹配：启用构建选项后，还要在 `config/server.yaml` 的字符串 `options.infer_ep` 中选择 `kDML`、`kCUDA`、`kTensorRT` 或 `kRKNPU`，`infer_device` 选择设备。默认运行配置为 `kCPU`；Windows 的 DML 构建选项默认开启，不等于运行时自动选择 DML。
+
+```powershell
+# DirectML（Windows）
+xmake f -p windows -a x64 -m release --with_dml=y
+xmake build server
+```
+
 ```sh
 # CUDA
 xmake f --with_cuda=y -m release
@@ -476,6 +508,8 @@ xmake build server
 
 ### 运行测试
 
+以下命令均从仓库根目录运行；如果刚按上文启动了服务，请另开终端并回到仓库根目录。先使用 CPU 配置构建，确保 Git LFS 模型资源已经下载。
+
 ```sh
 # 构建 CPU 回归目标（逐个构建）
 xmake build server
@@ -489,6 +523,8 @@ xmake build test_infer_inputs
 xmake build test_pipeline
 xmake build test_yolo_tasks
 xmake build test_tracker
+xmake build test_config_load
+xmake build test_subtitle_timeline
 
 xmake run test_common
 xmake run test_cvt
@@ -500,6 +536,8 @@ xmake run test_infer_inputs
 xmake run test_pipeline
 xmake run test_yolo_tasks --project-root .
 xmake run test_tracker
+xmake run test_config_load
+xmake run test_subtitle_timeline
 ```
 
 HTTP 回归使用 Python 3 标准库，独立创建临时配置、端口和进程，不触碰现有 11451 服务。模型、字典、图片和小型 ONNX 故障 fixture 必须存在；缺失即失败，不记为 SKIP。
@@ -509,6 +547,7 @@ python scripts/test_http_regression.py --server build/windows/x64/release/vision
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_yolo_tasks_http.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_tracking_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_model_registry.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 ```
 
 Linux 或自定义构建目录先查询实际可执行文件：
@@ -519,6 +558,7 @@ python3 scripts/test_http_regression.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
 python3 scripts/test_yolo_tasks_http.py --server "$server" --project-root .
 python3 scripts/test_tracking_regression.py --server "$server" --project-root .
+python3 scripts/test_model_registry.py --server "$server" --project-root .
 ```
 
 `test_yolo`/`test_ocr` 仍为交互演示，不作为上述 headless 验收。故障 fixture 已入库；仅重新生成时需要开发工具 `onnx` 和 `scripts/generate_reliability_fixtures.py`，不是服务运行依赖。
