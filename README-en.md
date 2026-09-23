@@ -28,33 +28,50 @@ english | [简体中文](./README.md)
 <a><img alt="ort rknpu" src="https://img.shields.io/badge/ort-rknpu-white.svg"></a>
 </p>
 
-`vision-simple` is a cross-platform visual inference library based on C++23, designed to provide **out-of-the-box** inference capabilities. With Docker, users can quickly set up inference services. This library currently supports popular YOLO models (including YOLOv10, YOLOv11 and YOLO26) and some OCR models (such as `PaddleOCR`). It features a **built-in HTTP API**, making the service more accessible. Additionally, `vision-simple` uses the `ONNXRuntime` engine, which supports multiple Execution Providers such as `DirectML`, `CUDA`, `TensorRT`, and can be compatible with specific hardware devices (such as RockChip's RKNPU), offering more efficient inference performance.
+`vision-simple` is a cross-platform C++23 vision inference library built on ONNXRuntime, with a C++ API and standalone HTTP server. It supports YOLO detection, instance segmentation, pose, oriented boxes and OCR, plus detection tracking, video text extraction, OpenAI-like HTTP and MCP SSE.
 
-## <div align="center">🚀 Features </div>
-- **Cross-platform**: Supports `windows/x64`, `linux/x86_64`, `linux/arm64`,and `linux/riscv64`
-- **Multi-device**: Supports CPU, GPU, and RKNPU
-- **Small size**: The statically compiled version is under 20 MiB, with YOLO and OCR inference occupying 300 MiB of memory
-- **Fast deployment**:
-  - **One-click compilation**: Provides verified build scripts for multiple platforms
-  - **[Container deployment](https://hub.docker.com/r/lonacn/vision_simple)**: One-click deployment with `docker`, `podman`, or `containerd`
-  - **[HTTP Service](doc/openapi/server.yaml)**: Offers a HTTP API for non-real-time applications
+This guide is for users building, deploying and making their first inference request. It describes **current source code**, not a guarantee that older release archives or images include every feature.
 
-### <div align="center"> yolov11n 3440x1440@60fps+ </div>
+**Quick links:** [Build and run](#build-project) · [Docker](#deploy-http-service-with-docker) · [Model configuration](#task-registry-and-unified-model-configuration) · [YOLO26](#yolo26-yolov26) · [Protocols](#shared-service-openai-like-http-and-mcp-sse) · [Tests](#run-tests)
+
+## Features
+
+- **Inference tasks:** YOLOv10/v11/26 detection; YOLO11/26 instance segmentation, pose and oriented boxes; PP-OCR v3/v4 CTC and a constrained SAR recognition contract.
+- **Bounded service:** lazy model loading, active leases, idle eviction, statistics, staged pipelines and cooperative cancellation.
+- **Temporal processing:** ByteTrack / BoT-SORT sessions; asynchronous OCR video subtitle jobs producing SRT/WebVTT, not speech transcription.
+- **Platforms:** Windows x64, Linux x86_64, and cross-build configurations for ARM64, ARMv7 and RISC-V 64. Cross-building is not target-hardware runtime verification.
+- **Execution providers:** CPU, DirectML, CUDA, TensorRT and RKNPU build options. Availability depends on dependencies, hardware and model exports; see compatibility notes. No fixed binary size, memory usage or frame rate is promised.
+- **Integration:**
+  - C++23 API returning errors through `std::expected`.
+  - [Containers](https://hub.docker.com/r/lonacn/vision_simple); the current publication workflow covers Linux amd64 CPU only.
+  - [HTTP API](doc/openapi/server.yaml) for application integration.
+
+### <div align="center"> YOLOv11 </div>
 ![hd2-yolo-gif](doc/images/hd2-yolo.gif)
 
 ### <div align="center"> OCR (HTTP API) </div>
 
 ![http-inferocr](doc/images/http-inferocr.png)
-## <div align="center">🚀 Using vision-simple </div>
+## Quick start
+
 ### Deploy HTTP Service with docker
-1. Start the server project:
-```powershell
-docker run -it --rm --name vs -p 11451:11451 lonacn/vision_simple:0.4.1-cpu-x86_64
+
+Build the CPU image from current source rather than treating the historical `0.4.1-cpu-x86_64` tag as the latest feature set:
+
+```sh
+git clone --recurse-submodules https://github.com/lona-cn/vision-simple.git
+cd vision-simple
+git lfs install
+git lfs pull
+docker build --platform linux/amd64 -t vision-simple:local -f docker/Dockerfile.debian-bookworm-x86_64-cpu .
+docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 ```
-2. Open the Swagger online editor and allow the site’s unsafe content.
-3. Copy the content from doc/openapi/server.yaml into the Swagger editor.
-4. On the right panel of the editor, select the APIs you want to test
-![swagger-right](doc/images/swagger-right.png)
+
+Requires Docker, Git LFS and an x86_64 CPU with AVX/AVX2/F16C. The first build downloads and compiles dependencies. The image includes default YOLO11/PP-OCR configuration and test models, not YOLO26 weights. See [Docker Hub publication](#docker-hub-publication) for published-image selection and verification.
+
+In another terminal, run `curl http://127.0.0.1:11451/v0/infer/models` (`curl.exe` on Windows). Successful discovery proves only that configuration is listed, not that weights load or inference succeeds. Use the [inference example](#send-an-inference-request) below with `hd2-fp32` for the default detection model.
+
+See [OpenAPI](doc/openapi/server.yaml) for the full API. The server has **no authentication or tenant isolation**; do not expose it directly to the Internet. Source defaults bind to `0.0.0.0`; this container example publishes only on loopback. For native execution, set `host: "127.0.0.1"` or use an authenticated proxy.
 
 ### HTTP v0 errors and batch semantics
 
@@ -72,12 +89,14 @@ Any image failure fails the entire batch, without partial results. Processing or
 | 400 | `invalid_image` | Zero-based image index |
 | 500 | `model_load_failed`, `model_config_failed`, `internal_error` | `null` |
 | 500 | `inference_failed` | Zero-based image index |
+| 503 | `service_overloaded`, `service_unavailable`, `request_cancelled` | `null` |
+| 504 | `request_timeout` | `null` |
 
 Clients relying on HTTP 200 with textual errors must migrate to HTTP status and `error.code`; do not branch on `message`. Third-party exception details remain in logs. See the [OpenAPI contract](doc/openapi/server.yaml).
 
 ### Model lifecycle and concurrency
 
-- `POST /v0/infer/unload` accepts `{"kind":"yolo","model":"hd2-fp32"}` (`kind` is `yolo` or `ocr`). An idle model returns `200 {"kind":"yolo","model":"hd2-fp32","unloaded":true}`; active models return `409 model_busy`; absent models return `404 model_not_loaded`. The next inference reloads transparently.
+- `POST /v0/infer/unload` accepts `{"kind":"yolo","model":"hd2-fp32"}`; `kind` supports `yolo`, `ocr`, `seg`, `pose` and `obb`. An idle model returns `200 {"kind":"yolo","model":"hd2-fp32","unloaded":true}`; active models return `409 model_busy`; absent models return `404 model_not_loaded`. The next inference reloads transparently. Unload and stats cover all five tasks; only the legacy `/v0/infer/models` catalog is restricted to `yolo`/`ocr`.
 - `GET /v0/infer/stats?limit=100&offset=0` returns `models`, `total`, `limit`, `offset`, and `idle_timeout_ms`; limit is 1–200. Entries sort by `(kind,name)` and contain `kind`, `name`, `active_requests`, `requests`, `failures`, `total_duration_ms`, and `last_used` (Unix milliseconds). Counters belong to the loaded instance and reset on reload. Errors before acquisition are excluded; duration includes waiting for the model workspace.
 - String options in `config/server.yaml`: `infer_idle_timeout_ms: "300000"` and `infer_sweep_interval_ms: "1000"`. Idle time starts at request completion and uses a monotonic clock. Timeout `"0"` disables eviction; sweep interval must be positive.
 - Active leases cover decoding, queued inference, postprocessing, and response serialization/send calls. Neither manual nor timer eviction removes active instances. Synchronous C++ `Run` calls serialize per model; HTTP pipeline tasks own workspaces and gate ORT execution per session.
@@ -98,16 +117,7 @@ Synchronous `InferYOLO/InferOCR::Run` signatures remain unchanged and share stag
 
 ### Task Registry and Unified Model Configuration
 
-The architecture is verified as four independent slices, not a rewrite of the inference APIs:
-
-| Slice | Boundary | Verification |
-|---|---|---|
-| Task registration | Server-private `TaskRegistry` owns typed loading, pipeline invocation and projection for `yolo`, `ocr`, `seg`, `pose`, `obb` | Task-specific inference and unknown-task rejection |
-| Configuration | `Config::Load` normalizes legacy/new YAML into `ModelConfig::models` | `test_config_load`: equivalence, conflicts, cross-task names and public DTO round-trip |
-| Service lifecycle | One `(task,name)` cache, lease, statistics and eviction path in `InferenceService` | Name isolation, active unload refusal, idle eviction and recovery |
-| Protocol adapters | v0 remains compatible; native v1/OpenAI-like/MCP use the same inference service | HTTP and protocol regressions |
-
-The default `app/config/base/models.yaml` now uses this schema:
+Declare models in `config/models.yaml`, identified by `(task,name)`. Native v1 and MCP use the configured name; OpenAI-like uses `<task>:<name>`. These are the default FP32 detection and OCR entries:
 
 ```yaml
 models:
@@ -127,9 +137,7 @@ models:
 
 Legacy `yolo`/`ocr` lists remain readable and may coexist with non-conflicting canonical entries. Duplicate `(task,name)` declarations are rejected; different tasks may share a name. Version/resource validation remains lazy at first model load. Legacy public DTOs retain compatibility projections; execution reads only canonical `models`, with no parallel cache or configuration lookup path.
 
-This is a static typed registry of implemented capabilities, not a dynamic plugin system. Registered tasks are `yolo`, `ocr`, `seg`, `pose`, and `obb`; unknown tasks are rejected at the service configuration boundary. The legacy v0 catalog remains limited to `yolo`/`ocr`. Tasks share cache, lease, statistics and eviction logic. Run `xmake build test_config_load && xmake run test_config_load` for configuration checks and `python3 scripts/test_model_registry.py --server <server-executable> --project-root .` for real service verification.
-
-ONNXRuntime is the implemented inference backend. [TVM backlog issue #20](https://github.com/lona-cn/vision-simple/issues/20) is archived as `wontfix` / `not planned`; the unimplemented public `InferFramework::kTVM` enum has been removed, while unknown frameworks still fail safely. This does not add another backend. Reopening TVM requires concrete deployment targets, model-artifact and dynamic-shape contracts, and reproducible correctness, performance and memory acceptance criteria.
+Registered tasks are `yolo`, `ocr`, `seg`, `pose` and `obb`; unknown tasks are rejected at the service configuration boundary. All tasks share caching, leases, statistics and eviction. ONNXRuntime is the implemented backend; TVM is unsupported, and the task registry is not a dynamic plugin system.
 
 ### YOLO segmentation, pose and oriented boxes
 
@@ -156,11 +164,12 @@ models:
 - New task responses contain `class_names` and per-image `results`. Every object has `class_id` and `confidence`. Segmentation adds integer original-image `bbox:[x,y,width,height]` and `mask_png_base64`: a binary 0/255 PNG cropped to that box, not a full-image mask. Place its top-left at the box origin. C++ `InferYOLOTask` returns a separate `YOLOTaskFrameResult` variant; each segmentation `CV_8UC1` mask owns its pixels independently of inference workspaces.
 - Pose adds the same box and `keypoints:[{x,y,confidence}]` in original-image floating-point pixels. Keypoints are not clipped to the image. OBB instead returns four ordered original-image `corners:[[x,y],...]` and `angle` in radians along corner 0 → 1; corners may lie outside the image and are not replaced by an axis-aligned box.
 - OpenAI-like model IDs are task-qualified (for example `seg:segment`, `pose:pose`, `obb:oriented`); MCP generates `infer_seg`, `infer_pose`, `infer_obb` alongside the existing tools. The result JSON retains each task's geometry.
-- Real model verification on one machine/sample produced 5 segmentation, 4 pose and 177 OBB objects on both CPU and DirectML. An independent CPU ORT oracle matched masks with IoU 1 and maximum coordinate error below 0.0003 pixels. This is implementation agreement, not a model-quality benchmark or a guarantee for other exports/providers.
 
 ### YOLO26 (YOLOv26)
 
 `kV26 = 26` supports detection, instance segmentation, pose and oriented boxes, preserving existing YOLOv10/YOLO11 behavior. Models must use static, single-image ONNX tensors with FP32 or FP16 inputs/outputs. FP16 weights do not imply that every I/O tensor is FP16.
+
+Start with **FP32 + NMS-free** detection before adding other tasks. The server build must contain the YOLO26 implementation; older release archives or Docker tags do not imply support.
 
 | Service task | Raw output (external NMS) | NMS-free output (no additional NMS) |
 |---|---|---|
@@ -171,16 +180,30 @@ models:
 
 Neither `A` nor `K` is hardcoded to 8400 or 300. Preserve `names`, the correct `task`, explicit `end2end`, and `args.nms` metadata; pose also requires `kpt_shape`. Missing/conflicting metadata, invalid shapes and embedded NMS are rejected rather than inferred from filenames or `[1,K,6]` alone.
 
-**Reproducible export** (development tools, not service dependencies; downloads official nano checkpoints on first use):
+#### Export models
+
+Run from the repository root. Export tools are development dependencies, not service runtime dependencies; the first run downloads official nano checkpoints.
 
 ```bash
 python -m pip install ultralytics==8.4.159 onnx==1.20.1 onnxruntime==1.24.3 torch==2.14.0 torchvision==0.29.0
 python scripts/export_yolo26.py --output build/yolo26 --imgsz 640
 ```
 
-This exports 16 models: four tasks × raw/e2e × FP32/FP16, with batch=1, opset=17, dynamic=False and simplify=False. The generated `manifest.json` records dependency versions, checkpoint/ONNX SHA256 values, export arguments and actual tensor metadata. This exporter version uses `nms=None` for raw, `nms=False` for NMS-free and `quantize=16` for half precision. CPU FP16 conversion is followed by a topological sort to order appended I/O Cast nodes correctly, then ONNX checker and CPU ORT loading. Do not remove mode metadata or assume older exporters assign the same meaning to these arguments.
+For detection only, skip the other tasks and half-precision exports:
 
-Copy the desired ONNX files into your deployment and configure:
+```bash
+python scripts/export_yolo26.py --output build/yolo26 --imgsz 640 --tasks detect --precisions 32
+```
+
+This produces `detect_raw_fp32.onnx` and `detect_e2e_fp32.onnx`. Exporter task `detect` maps to service `task: yolo`; other task names are `seg`, `pose` and `obb`. Both `--tasks` and `--precisions` accept multiple values; precisions are `32` and `16`.
+
+Without task or precision filters, the script exports 16 models: four tasks × raw/e2e × FP32/FP16, with batch=1, opset=17, dynamic=False and simplify=False. The generated `manifest.json` records dependency versions, checkpoint/ONNX SHA256 values, export arguments and actual tensor metadata. This exporter version uses `nms=None` for raw, `nms=False` for NMS-free and `quantize=16` for half precision. CPU FP16 conversion is followed by a topological sort to order appended I/O Cast nodes correctly, then ONNX checker and CPU ORT loading. Do not remove mode metadata or assume older exporters assign the same meaning to these arguments.
+
+#### Configure and start
+
+The server reads `config/server.yaml` and `config/models.yaml` from its **working directory**. Relative model paths also resolve there. Place the required ONNX files under its `assets/` directory and add these entries to the `models` list. Keep only models actually exported and never repeat a `(task,name)` pair.
+
+Source builds copy base configuration beside the executable. The default Windows x64 Release output directory is `build/windows/x64/release/`. Launch from the directory containing `config/` and `assets/`; rebuilding may overwrite configuration, so use a separate deployment directory for production.
 
 ```yaml
 models:
@@ -202,9 +225,52 @@ models:
     files: {model: assets/obb_e2e_fp32.onnx}
 ```
 
+Select an execution provider in `config/server.yaml`, for example CPU:
+
+```yaml
+host: "127.0.0.1"
+port: 11451
+options:
+  infer_framework: "kONNXRUNTIME"
+  infer_ep: "kCPU"
+  infer_device: "0"
+```
+
+Launch the built `vision_simple-server` (`.exe` on Windows). Models load on first inference; restart after changing configuration or model files. Bind beyond loopback only on a trusted network or behind an authenticated proxy.
+
+#### Send an inference request
+
+This client uses only the Python standard library. Replace `image.jpg` with a local image path; `model` must match the configured `name`:
+
+```python
+import base64
+import json
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+image_path = Path("image.jpg")
+endpoint = "http://127.0.0.1:11451/v1/infer/yolo"
+payload = {
+    "model": "yolo26n",
+    "images": [base64.b64encode(image_path.read_bytes()).decode("ascii")],
+}
+request = Request(
+    endpoint,
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urlopen(request, timeout=120) as response:
+    print(json.dumps(json.load(response), ensure_ascii=False, indent=2))
+```
+
+`images` contains raw base64, **not** `data:image/...;base64,...` URLs. Use `/v1/infer/seg`, `/v1/infer/pose` or `/v1/infer/obb` and the corresponding model name for other tasks. Detection `bbox` uses original-image pixels `[x,y,width,height]`; no detections produces an empty array for that image.
+
 Use existing `POST /v1/infer/{task}` routes; detection also supports `/v0/infer/yolo`. Responses, caching, ordered batches and whole-batch failure semantics are unchanged. C++ detection uses `InferYOLO::Create(context, path, YOLOVersion::kV26)`. Other tasks now take an explicit version, for example `InferYOLOTask::Create(context, path, YOLOTask::kPose, YOLOVersion::kV26)`. Existing task callers must insert `YOLOVersion::kV11` after `task`, before the optional device ID.
 
 Postprocessing keeps this library's contract: raw detection uses NMS IoU 0.3; other raw tasks use 0.45. OBB uses polygon IoU, **not Ultralytics' probabilistic IoU**. NMS-free outputs never undergo another suppression pass. Letterbox uses black padding, keypoints retain out-of-frame coordinates, and masks interpolate logits before thresholding and cropping to integer bounding boxes. Comparisons against Ultralytics must align preprocessing and account for these documented differences.
+
+#### Verified compatibility and limitations
 
 **Verified environment:** Windows x64 Release, C++ ORT 1.20.0 / DirectML 1.15.4, with Python ORT 1.24.3 as the reference runtime.
 
@@ -213,11 +279,9 @@ Postprocessing keeps this library's contract: raw detection uses NMS IoU 0.3; ot
 | CPU | All four tasks passed | All four tasks passed | All four tasks passed | All four tasks passed |
 | DirectML | All four compared successfully | All four compared successfully | All four ran successfully | All four failed during ORT initialization |
 
-CPU verification exercised C++ `Run` and HTTP inference on 16 real nano exports with square/wide images, comparing classes, scores, boxes, masks, keypoints and rotated boxes. FP32 box error was <0.5 pixels and keypoint/OBB corner error <0.001 pixels. CPU FP16 maximum box error was 0.75 pixels, keypoint error 0.375 pixels, and absolute score error <0.007. Minimum mask IoU against Ultralytics' binary-mask resizing was 0.941 (see the differing interpolation contract above). Raw OBB used an independent polygon-IoU oracle: the square sample retained 180 boxes versus 175 under Ultralytics' probabilistic IoU, an intentional algorithm difference.
+This matrix records prior Windows verification, not a guarantee for every machine, driver or model export, and was not rerun for this documentation update. **Use FP32 or verified raw FP16 on the stated DML stack, not these NMS-free FP16 artifacts.** Initialization failures return controlled `model_load_failed` errors; no silent mode substitution occurs. Validate results and resource usage with your own images, exports and provider before deployment.
 
-One CPU square-image stage sample (preprocess/inference/postprocess, ms): raw FP32 detection `1.381 / 25.476 / 0.489`; NMS-free FP32 `1.200 / 21.912 / 0.010`. These are smoke observations, not a benchmark or speedup guarantee. **Use FP32 or verified raw FP16 on this DML stack, not these NMS-free FP16 artifacts.** Initialization failures return controlled `model_load_failed` errors; no silent mode substitution occurs.
-
-Classification, semantic segmentation, depth, YOLOE, dynamic shapes and batch>1 are outside this support. CUDA/TensorRT were not verified in this environment; this is not an all-provider compatibility claim. Model weights and exported artifacts are not checked into source control. Review the applicable Ultralytics software/model licenses before deployment.
+Classification, semantic segmentation, depth, YOLOE, dynamic shapes and batch>1 are outside this support. CUDA/TensorRT are outside the YOLO26 verification scope above. YOLO26 weights and exports are not distributed with this repository; review the applicable Ultralytics software/model licenses. YOLO11/PP-OCR test resources are separately fetched through Git LFS.
 
 ### Temporal tracking sessions
 
@@ -236,13 +300,15 @@ Tracking is a separate stateful `TrackingService`, not an inference task or an a
 {"frame_index":0,"timestamp":0.0,"detections":[{"class_id":0,"confidence":0.9,"bbox":[10,20,30,40]}]}
 ```
 
+Tracks created on the session's first frame are immediately confirmed; tracks created later must meet `min_hits`. An empty `tracks` array can still be successful, for example when there are no detections or a new target is not yet confirmed.
+
 - `timestamp` is finite, nonnegative seconds; `frame_index` is an integer in 0–9007199254740991. Both must strictly increase within a session. Elapsed seconds control motion prediction; index gaps count toward expiration. Rejected frames do not advance state. Reset starts a fresh sequence, including IDs and timing. Step returns `frame_index`, `timestamp`, and `tracks:[{track_id,class_id,confidence,bbox}]`; only confirmed tracks observed this frame are emitted, not lost predictions. Status contains nullable `last_frame_index`/`last_timestamp` and `active_tracks`/`lost_tracks`.
 - Algorithms: `"bytetrack"` or `"botsort"`. Defaults: `high_threshold:0.5`, `low_threshold:0.1`, `new_track_threshold:0.6`, `match_threshold:0.8`, `max_lost_frames:30`, `min_hits:2`, `max_tracks:256`, `max_detections:256`, `camera_motion:true`, `appearance:false`, `proximity_threshold:0.5`, `appearance_threshold:0.25`. Thresholds are in [0,1], with low < high ≤ new; matching thresholds are maximum costs, not minimum IoU. `min_hits` is 1–10000, `max_lost_frames` 0–10000, and both capacity options 1–256.
 - BoT-SORT camera motion requires an `image` containing raw base64 PNG/JPEG on every frame, same dimensions throughout the sequence and at least 8×8 pixels; disable it with `camera_motion:false` when supplying detections only. Images are bounded to 16,777,216 decoded pixels before decoding. Boxes are finite floating-point xywh with positive dimensions; confidence is in [0,1] and class IDs are nonnegative.
 - BoT-SORT `appearance:true` requires a finite, nonzero `embedding` array on every detection, at most 512 elements and a consistent dimension per session. Embeddings come from the caller: no ReID model or weights are bundled, and tracking does not run an embedding model.
 - Limits: 32 sessions, 256 detections/frame and tracks/session, 4 MiB request body. Sessions expire after 300 seconds since creation or the last successful step/reset; expiration is swept on service access, and status/list do not renew it. Concurrent access to a busy session returns 409 rather than queueing; separate sessions do not share track identities.
 - Errors use `error.{code,message,image_index}` with null `image_index`: 400 `invalid_request`/`invalid_image`, 404 `tracking_session_not_found`, 409 `tracking_session_busy`/`frame_out_of_order`, 503 `tracking_capacity`/`service_unavailable` (with `Retry-After: 1`), or 500 `tracking_failed`. Unknown JSON fields are rejected. POST requires exactly `Content-Type: application/json`; GET/DELETE cannot have bodies. Oversize bodies return 413; unsupported `Expect` returns 417.
-- Tracking rejects nonempty browser `Origin` with 403 and uses `Cache-Control: no-store`, but session IDs are not authentication and listing is not tenant-scoped. Use a trusted network or authenticated proxy. Pinned `libhv 1.3.3-vs.1` avoids eager body allocation from a header-only `Content-Length` declaration, so receiving limits are not bypassed by parser preallocation.
+- Tracking business requests reject nonempty browser `Origin` with 403 and use `Cache-Control: no-store`; ordinary OPTIONS preflight still passes through global CORS middleware. Neither Origin/CORS nor session IDs provide authentication, and listing is not tenant-scoped. Use a trusted network or authenticated proxy.
 
 ### Asynchronous video subtitles
 
@@ -268,10 +334,10 @@ curl -i -X DELETE http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
 - Normal states are `created → uploading → queued → running → completed`; failures become `failed`. Cancellation returns 202 and moves active native processing through `cancelling → cancelled`; it is cooperative, not a hard interruption of a decoder/ORT call. Cancelling an already terminal job leaves its result unchanged. Status returns `id`, `state`, `uploaded_bytes`, `decoded_frames`, `sampled_frames`, `position_ms`, nullable `duration_ms`, `cue_count`, and nullable `error_code`. Duration may be unknown; counts/position are progress, not a guaranteed percentage, and `cue_count` while running excludes the open cue. `GET /v1/subtitle/jobs?limit=100` lists job objects and nullable `next_cursor`; pass it unchanged as `cursor` (limit 1–100).
 - Upload is raw bytes in a separate PUT, not multipart/base64, a server-local path or a remote URL. Only `created` jobs accept upload; a consumed/interrupted/failed upload cannot restart on the same job. Retry by creating a new job and reuploading; create is not idempotent. A successful upload can still fail asynchronously, so poll `state` and inspect `error_code` (for example `upload_interrupted`, `unsupported_video`, `invalid_timestamps`, `ocr_failed`, `subtitle_limit`), not error-message wording. Partial failed results cannot be downloaded.
 - One worker serves at most **8 jobs**, including pending uploads and retained terminal results. Limits: 64 MiB/video, 1800 seconds, 1,000,000 decoded frames, 16,777,216 pixels/frame, 4096 OCR lines/observation, 4096 bytes/line and combined observation, 10,000 cues and 2 MiB accumulated cue text. JSON control bodies are limited to 64 KiB. Input files live in a private server-owned temporary directory and are removed on completion/failure/cancellation/deletion; orderly shutdown removes the directory. Created/uploading jobs expire after 60 seconds without upload activity; terminal results expire after 300 seconds. Polling/downloading does not renew retention; filesystem cleanup failures can retain capacity, and a process crash is not an orderly cleanup guarantee.
-- Supported decoding is platform-dependent: Windows uses direct Media Foundation for MP4-family files with a leading `ftyp` box and ASF, subject to installed native codecs. All platforms have a bounded MJPEG AVI reader (one MJPG/mjpg video stream starting at zero, including OpenDML AVI/AVIX); other AVI codecs are rejected. Container recognition is not a codec guarantee. Arbitrary codecs, playlists, image sequences and URL fetching are not supported; decoder errors are distinguished from clean EOF. These instructions describe the source build, not a newly published Docker image or TVM support.
+- HTTP video decoding is platform-dependent. All platforms have a bounded MJPEG AVI reader (one MJPG/mjpg video stream starting at zero, including OpenDML AVI/AVIX); other AVI codecs are rejected. Windows additionally uses Media Foundation for MP4-family files with a leading `ftyp` box, subject to installed native codecs. Although the underlying reader supports ASF, the current upload entry point rejects it. MKV can pass upload sniffing but fails decoding with `unsupported_video`. Container recognition or upload HTTP 202 does not guarantee decoding. Arbitrary codecs, playlists, image sequences and URL fetching are unsupported.
 - MJPEG AVI timestamps follow stream rate/scale; Media Foundation uses actual sample timestamps and positive sample durations, rounding starts down and ends up to milliseconds. `duration_ms` on completion is the actual video end, not an estimated frame count or a longer audio/container duration; native duration can remain null until completion.
 - Errors use `error.{code,message,image_index}` with null `image_index`: 400 `invalid_request`; 404 `model_not_found`/`subtitle_job_not_found`; 409 `subtitle_job_busy`/`subtitle_not_ready`; 413 `payload_too_large`; 415 `unsupported_media_type`/`invalid_video`; 503 `subtitle_capacity`/`service_unavailable` (`Retry-After: 1`); 500 `subtitle_failed`. Create/cancel require exactly `application/json`, upload exactly `application/octet-stream`; bodyless operations reject bodies, and unsupported `Expect` returns 417. DELETE returns 204 only for a created or terminal job; cancel and poll other states first.
-- This API has **no authentication or tenant isolation**. Nonempty browser `Origin` is rejected with 403 and responses use `Cache-Control: no-store`; job IDs are not credentials. Use a trusted network or authenticated proxy.
+- This API has **no authentication or tenant isolation**. Subtitle business requests reject nonempty browser `Origin` with 403 and use `Cache-Control: no-store`; ordinary OPTIONS still passes through global CORS middleware. Job IDs are not credentials. Use a trusted network or authenticated proxy.
 
 Real-video regression (run from the repository root with a built server):
 
@@ -291,7 +357,7 @@ Requires real `ppocr_det.onnx`, `ppocr_rec.onnx` and `ppocr_keys_v1.txt` in `app
 - Dynamic N: stably group crops having the same preprocessed width, run actual `[N,3,H,W]` minibatches up to the requested size, and restore detection order. Dynamic H defaults to 48; dynamic W retains the original height-multiple rounding and whole-crop resize. Different widths are not mixed using extra padding, avoiding new valid-length truncation.
 - Fixed N follows model metadata (1–64); partial tails receive normalized-zero dummy samples whose outputs are discarded. Fixed H/W resize the entire crop to those dimensions. No arbitrary `T × width_ratio` truncation is inferred: real samples decode all T, with SAR stopping at EOS. Exports requiring aspect-preserving padding or extra masks must match this preprocessing contract first.
 - DBNet detection uses a 1.5 unclip ratio before recognition cropping, expanding the shrunken text region to avoid truncated glyphs (for example, an `E`-only crop instead of `HELLO`). This changes crop geometry and can change recognized text across both synchronous and pipeline OCR.
-- `test_ocr_batch` covers mixed widths, ordering, fixed-N tails, workspace reuse, file-based SAR dictionaries and pipeline isolation. A real ONNX guard fails at N=1, preventing a single-image loop from masquerading as batching. Historical CPU/DML PP-OCR parity across 66 regions and CPU batch 1/4 two-image medians of 2074.8/1990.8 ms (2 warmups, 10 measured runs each) **predate the DBNet geometry correction**. They are not current text/box parity or latency guarantees; remeasure on the corrected crops and your workload.
+- `test_ocr_batch` covers mixed widths, ordering, fixed-N tails, workspace reuse, file-based SAR dictionaries and pipeline isolation. A real ONNX guard fails at N=1, preventing a single-image loop from masquerading as batching. Batching benefits depend on crop sizes, models and providers; measure your actual workload.
 
 ### Shared service, OpenAI-like HTTP and MCP SSE
 
@@ -310,6 +376,8 @@ v0, native v1, OpenAI-like and MCP call one `InferenceService`, sharing model lo
 
 Connect to `GET /mcp/sse`, read its `endpoint` event, then POST JSON-RPC 2.0 to that relative URI. Complete `initialize` and `notifications/initialized` before `tools/list` / `tools/call`. Supported versions: `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`. Select SSE in clients; this is not Streamable HTTP.
 
+Initialization `params` must include `protocolVersion`, an object `capabilities`, and `clientInfo` containing `name`/`version`. POST HTTP 202 acknowledges receipt only: read JSON-RPC responses from the original SSE connection, not the POST response body.
+
 - `list_models`: optional `limit` (1–200) and opaque `cursor`; returns `data:[{id,kind,name}]` and optional `next_cursor`.
 - Generated `infer_yolo` / `infer_ocr` / `infer_seg` / `infer_pose` / `infer_obb`: `{"model":"raw configured name","images":["raw base64"],"timeout_ms":60000}`. Do not pass prefixed catalog IDs or data URLs. Discovery includes input JSON Schemas.
 - Modern results contain `structuredContent` and equivalent JSON text; legacy versions retain the full structure in text. Execution errors use `isError:true` with stable `error.code`, `image_index` and recovery advice. Protocol failures use JSON-RPC errors and preserve string versus integer IDs.
@@ -323,6 +391,7 @@ Connect to `GET /mcp/sse`, read its `endpoint` event, then POST JSON-RPC 2.0 to 
 
 - `InferYOLO/InferOCR::Create/Run` signatures are unchanged. Run requires a nonempty two-dimensional `CV_8UC3` image and supports non-contiguous ROIs. Grayscale, BGRA, floating-point images and non-finite/out-of-range `[0,1]` confidence return parameter errors.
 - YOLO v11 uses class-aware NMS; v10 accepts only end-to-end `[1,N,6]` output and does not repeat NMS. Confidence defaults, black Letterbox padding and OCR detection normalization are unchanged.
+- YOLO26 detection uses `YOLOVersion::kV26`. Both path and memory overloads of `InferYOLOTask::Create` require an explicit version after `task`: use `YOLOVersion::kV11` for existing segmentation/pose/OBB callers and `YOLOVersion::kV26` for YOLO26. The optional `device_id` follows the version.
 - PP-OCR CTC file-based Create follows the Paddle dictionary convention: the file excludes blank and the trailing space class; the loader appends space. Map-based callers supply every nonblank class with key `class_id - 1`. SAR follows its separate dictionary contract above.
 - `HTTPServer::Run/StartAsync` return `HTTPServerResult<void>`; callers must check failures. Empty/overlong hosts and listen failures are rejected without silently binding wildcard. The repository's explicit `0.0.0.0` default is unchanged.
 - Helper consumers must recompile and migrate to one geometry path:
@@ -336,39 +405,62 @@ cv::Rect box = VisionHelper::ScaleCoords(transform, cv::Vec4f{x1, y1, x2, y2});
 
 `ScaleCoords` accepts floating-point model-space xyxy, reverses actual per-axis scaling, clips endpoints, then rounds endpoints into integer xywh. Old geometry signatures, `DataConverter` and unimplemented uint8 no-op conversions were removed. `Cvt` supports bidirectional FP32/FP16 conversion.
 
-This work does not provide user authentication, a global CORS redesign, general decoded-pixel limits for legacy inference, hot loading, full signal shutdown, RKNPU/container releases or arbitrary ONNX support. Tracking PNG/JPEG and subtitle video frames have the pixel bounds described above; legacy inference decoding is unchanged. It is not a blanket production-security guarantee. v1/MCP body limits do not cover existing v0 routes. Error messages use independent heap allocations and the logger cache is synchronized.
+The server has no built-in authentication, hot loading or arbitrary ONNX support. v1/MCP body limits do not cover legacy v0 routes, and legacy inference has no general decoded-pixel limit. Tracking PNG/JPEG and subtitle video frames have the bounds described above, not a blanket production-security guarantee.
 
-## <div align="center">🚀 Quick Start for Development </div>
+## Development and deployment
 
 ### Build Project
-#### windows/x64
-- xmake >= 2.9.7
-- msvc with C++23
-- Windows 11
-```powershell
-# pull project
-git clone https://github.com/lona-cn/vision-simple.git
-cd vision-simple
-# setup sln
-./scripts/dev-vs.bat
-# run server
-xmake build server
-xmake run server
-```
-#### linux/x86_64
-- xmake >= 2.9.7
-- gcc-13
-- Debian 12 / Ubuntu 2022
+
+#### Fetch source and model resources
+
+Install Git, Git LFS, [xmake](https://xmake.io) and the appropriate compiler. Use xmake ≥ 2.9.7 for MSVC/GCC; Clang 18 + libc++ uses xmake ≥ 3.1.1, matching CI.
+
 ```sh
-# pull project
-git clone https://github.com/lona-cn/vision-simple.git
+git clone --recurse-submodules https://github.com/lona-cn/vision-simple.git
 cd vision-simple
-# build release
-./scripts/build-release.sh
-# run server
-xmake build server
-xmake run server
+git lfs install
+git lfs pull
 ```
+
+Initial configuration downloads dependencies and needs network access and dependency build tools. For an existing checkout, run `git submodule update --init --recursive` first. LFS pointer files cannot be used as ONNX weights.
+
+#### windows/x64
+
+Use a C++23-capable Visual Studio 2022 MSVC toolchain and Windows SDK. This explicitly selects a CPU build; see the next section for DirectML.
+
+```powershell
+xmake f -p windows -a x64 --toolchain=msvc -m release --with_dml=n --with_cuda=n --with_tensorrt=n -y
+xmake build server
+Copy-Item app/assets/test/* build/windows/x64/release/assets/ -Recurse -Force
+# Set host to "127.0.0.1" in build/windows/x64/release/config/server.yaml before launching:
+Set-Location build/windows/x64/release
+.\vision_simple-server.exe
+```
+
+#### linux/x86_64
+
+The native CPU CI configuration uses Ubuntu 24.04 + GCC 14; Clang 18 + libc++ 18 is also configured. Install the corresponding C/C++ compiler, Python development tools and package build tools.
+
+```sh
+xmake f -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 -m release --with_cuda=n --with_tensorrt=n --with_rknpu=n -y
+xmake build server
+cp -R app/assets/test/. build/linux/x86_64/release/assets/
+# Set host to "127.0.0.1" in build/linux/x86_64/release/config/server.yaml before launching:
+cd build/linux/x86_64/release
+LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ./vision_simple-server
+```
+
+For Clang, replace the GCC configuration command with the following at the repository root; build and launch steps stay the same:
+
+```sh
+xmake f -p linux -a x86_64 --toolchain=clang --cc=clang-18 --cxx=clang++-18 -m release --runtimes=c++_shared --with_cuda=n --with_tensorrt=n --with_rknpu=n -y
+```
+
+The project supplies the experimental-library compile/link flags required by libc++ 18; no source edits are needed. These paths assume default output settings; with custom `-o`, use the actual targetfile.
+
+**Working directory matters:** the server reads `config/server.yaml`, `config/models.yaml` and relative model paths from it. Building copies base configuration and main assets, but the server target does not automatically copy test models; the commands above explicitly copy test resources. Production deployments need only the weights and dictionary referenced by configuration. Rebuilding may overwrite configuration: use a separate deployment directory and restart after configuration/model changes.
+
+Alternatively, choose a matching platform, architecture and EP archive from [GitHub Releases](https://github.com/lona-cn/vision-simple/releases). Check release checksums and the commit/build configuration in `build-info.json`. Archives collect configuration and resources present in that build directory; they do not guarantee every model is included. Cross-built artifacts still require validation on target hardware.
 
 #### linux/arm64 (Cross-compile)
 - Cross-compile toolchain: `aarch64-linux-gnu-`
@@ -388,6 +480,14 @@ xmake build server
 
 ### Enable Hardware Acceleration (Execution Provider)
 
+Build options and runtime configuration must agree: after enabling a provider, select `kDML`, `kCUDA`, `kTensorRT` or `kRKNPU` in the string option `infer_ep` in `config/server.yaml`, and choose a device with `infer_device`. Runtime defaults to `kCPU`. The Windows DML build option defaults to enabled, but that does not select DML at runtime.
+
+```powershell
+# DirectML (Windows)
+xmake f -p windows -a x64 -m release --with_dml=y
+xmake build server
+```
+
 ```sh
 # CUDA
 xmake f --with_cuda=y -m release
@@ -404,6 +504,8 @@ xmake build server
 
 ### Run Tests
 
+Run these commands from the repository root. If you just launched the server as above, open another terminal at the repository root. Configure a CPU build first and ensure Git LFS model resources have been downloaded.
+
 ```sh
 # Build CPU regression targets individually
 xmake build server
@@ -417,6 +519,8 @@ xmake build test_infer_inputs
 xmake build test_pipeline
 xmake build test_yolo_tasks
 xmake build test_tracker
+xmake build test_config_load
+xmake build test_subtitle_timeline
 
 xmake run test_common
 xmake run test_cvt
@@ -428,6 +532,8 @@ xmake run test_infer_inputs
 xmake run test_pipeline
 xmake run test_yolo_tasks --project-root .
 xmake run test_tracker
+xmake run test_config_load
+xmake run test_subtitle_timeline
 ```
 
 The Python 3 standard-library HTTP driver creates isolated configuration, ports and processes; it does not touch an existing port 11451 service. Missing models, dictionaries, images or failure fixtures fail the run rather than count as SKIP.
@@ -437,6 +543,7 @@ python scripts/test_http_regression.py --server build/windows/x64/release/vision
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_yolo_tasks_http.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_tracking_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_model_registry.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 ```
 
 For Linux or a custom build directory, discover the actual target:
@@ -447,6 +554,7 @@ python3 scripts/test_http_regression.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
 python3 scripts/test_yolo_tasks_http.py --server "$server" --project-root .
 python3 scripts/test_tracking_regression.py --server "$server" --project-root .
+python3 scripts/test_model_registry.py --server "$server" --project-root .
 ```
 
 `test_yolo`/`test_ocr` remain interactive demos, not headless acceptance tests. Tiny failure models are checked in; only regeneration requires the development package `onnx` and `scripts/generate_reliability_fixtures.py`, not a server runtime dependency.
@@ -497,7 +605,7 @@ docker build -t vision-simple:cuda -f docker/Dockerfile.debian-bookworm-x86_64-c
 docker build -t vision-simple:rknpu -f docker/Dockerfile.debian-bookworm-arm64-rknpu .
 ```
 
-### dev YOLOv11 Inference with `vision-simple`
+### YOLOv11 inference with `vision-simple`
 ```cpp
 #include <vision_simple/Infer.h>
 #include <opencv2/opencv.hpp>
@@ -514,7 +622,7 @@ int main() {
 }
 ```
 
-<div align="center">📄 License</div>
+## License
 The copyrights for the YOLO models and PaddleOCR models in this project belong to the original authors.
 
 This project is licensed under the Apache-2.0 license.
