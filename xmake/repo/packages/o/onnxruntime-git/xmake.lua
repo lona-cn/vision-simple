@@ -11,6 +11,7 @@ package("onnxruntime-git")
 
     add_patches("1.20.1", path.join(os.scriptdir(), "patches", "1.20.1_rknpu.patch"), "e40b832a224b1b503f14caa56a820041894b2301920dc3b3a9979d8c0ea33abf")
     add_patches("1.20.1", path.join(os.scriptdir(), "patches", "1.20.1_eigen_hash.patch"), "79692947cda8f82b47a785ae6c1fcbe08ea4bd463f589fc5e5b3ce58c496d74d")
+    add_patches("1.20.1", path.join(os.scriptdir(), "patches", "1.20.1_fixed_width_types.patch"), "a5df771c4352b8809147a9a4084ef7daabff69716eac49eb227dca3dd787f0f7")
 
     --##configs##
     add_configs("shared", { description = "Forced Shared Library", default = true, readonly = true })
