@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decide CPU release tags and publish the already smoke-tested local image."""
+"""Plan and publish verified multi-platform CPU container releases."""
 
 import argparse
 import json
@@ -10,16 +10,20 @@ import subprocess
 import sys
 
 
+IMAGE = "ghcr.io/lona-cn/vision-simple"
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?")
-REPOSITORY = re.compile(r"[a-z0-9]+(?:[_-][a-z0-9]+)*/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+ARCHITECTURES = {
+    "amd64": ("linux", "amd64"),
+    "arm64": ("linux", "arm64"),
+}
 
 
-def release_plan(event, ref, sha, image, manual_publish=False):
+def release_plan(event, ref, sha, image=IMAGE, manual_publish=False):
     if event not in {"push", "workflow_dispatch"}:
         raise ValueError("Only tag pushes and manual dispatches are supported")
-    if not REPOSITORY.fullmatch(image) or len(image) > 255 or image.split("/", 1)[0] == "localhost":
-        raise ValueError("DOCKERHUB_IMAGE must be an untagged Docker Hub namespace/repository")
+    if image != IMAGE:
+        raise ValueError(f"Publication target is fixed to {IMAGE}")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("Source commit must be a full 40-character SHA")
     publish = event == "push" or manual_publish
@@ -35,14 +39,22 @@ def release_plan(event, ref, sha, image, manual_publish=False):
     prerelease = match.group(4)
     if prerelease and any(part.isdigit() and len(part) > 1 and part[0] == "0" for part in prerelease.split(".")):
         raise ValueError("Numeric prerelease identifiers cannot have leading zeroes")
-    version_tag = version[1:] + "-cpu-x86_64"
-    if len(version_tag) > 128:
-        raise ValueError("Version exceeds Docker's 128-character tag limit")
-    result["tags"] = [version_tag, f"sha-{sha}-cpu-x86_64"]
+    version_tag = version[1:] + "-cpu"
+    result["tags"] = [version_tag, f"sha-{sha}-cpu"]
     result["latest"] = prerelease is None
     if result["latest"]:
         result["tags"].append("latest")
+    if any(len(tag) > 128 for tag in result["tags"]):
+        raise ValueError("Version exceeds Docker's 128-character tag limit")
+    if any(len(tag + "-arm64") > 128 for tag in result["tags"] if tag != "latest"):
+        raise ValueError("Version exceeds Docker's 128-character platform tag limit")
     return result
+
+
+def platform_tags(plan, architecture):
+    if architecture not in ARCHITECTURES:
+        raise ValueError(f"Unsupported published architecture: {architecture}")
+    return [f"{tag}-{architecture}" for tag in plan["tags"] if tag != "latest"]
 
 
 def docker(*args):
@@ -55,13 +67,10 @@ def registry_digest(reference, local):
     if not DIGEST.fullmatch(digest):
         raise ValueError(f"Registry returned no valid digest for {reference}")
     if local_descriptor := local.get("Descriptor"):
-        # The containerd image store can expose a manifest/index ID, not the
-        # config ID used by the classic store. Match the complete local content.
         expected = local_descriptor.get("digest", "")
         if not DIGEST.fullmatch(expected) or digest != expected:
             raise ValueError(f"Registry manifest does not match the tested local image: {reference}")
     else:
-        # Classic image stores expose the config digest as Id.
         repository = reference.rsplit(":", 1)[0]
         manifest = json.loads(docker("buildx", "imagetools", "inspect", f"{repository}@{digest}", "--raw"))
         if manifest.get("config", {}).get("digest") != local["Id"]:
@@ -69,43 +78,115 @@ def registry_digest(reference, local):
     return digest
 
 
-def publish(plan, local_image):
+def publish_platform(plan, local_image, architecture):
     if not plan["publish"]:
         raise ValueError("Refusing publication of a build-only run")
+    if architecture not in ARCHITECTURES:
+        raise ValueError(f"Unsupported published architecture: {architecture}")
     local = json.loads(docker("image", "inspect", local_image))[0]
-    image_id = local["Id"]
-    if not DIGEST.fullmatch(image_id) or (local.get("Os"), local.get("Architecture")) != ("linux", "amd64"):
-        raise ValueError("The tested local image must be linux/amd64 with a valid image ID")
-    expected_digest = None
+    if not DIGEST.fullmatch(local.get("Id", "")) or (local.get("Os"), local.get("Architecture")) != ARCHITECTURES[architecture]:
+        raise ValueError(f"The tested local image must be {ARCHITECTURES[architecture][0]}/{ARCHITECTURES[architecture][1]}")
     references = []
-    for tag in plan["tags"]:
+    expected_digest = None
+    for tag in platform_tags(plan, architecture):
         reference = f"{plan['image']}:{tag}"
-        # Pin every tag to the inspected local ID; never rebuild or pull for publication.
-        docker("image", "tag", image_id, reference)
+        docker("image", "tag", local["Id"], reference)
         docker("image", "push", reference)
         digest = registry_digest(reference, local)
         if expected_digest is not None and digest != expected_digest:
             raise ValueError(f"Registry digest mismatch for {reference}")
         expected_digest = digest
         references.append(reference)
-    # Recheck all mutable references after the final (latest, for stable releases) push.
     for reference in references:
         if registry_digest(reference, local) != expected_digest:
             raise ValueError(f"Registry digest changed during publication: {reference}")
-    return {"tags": references, "digest": expected_digest, "pull": f"{plan['image']}@{expected_digest}", "image_id": image_id}
+    return {"architecture": architecture, "tags": references, "digest": expected_digest, "image_id": local["Id"]}
+
+
+def registry_manifest(reference):
+    manifest = json.loads(docker("buildx", "imagetools", "inspect", reference, "--raw"))
+    entries = manifest.get("manifests")
+    if not isinstance(entries, list):
+        raise ValueError(f"Registry tag is not a multi-platform image index: {reference}")
+    return manifest, entries
+
+
+def manifest_source_tag(plan, tag):
+    return plan["tags"][0] if tag == "latest" else tag
+
+
+def manifest_source_refs(plan, tag):
+    base_tag = manifest_source_tag(plan, tag)
+    return [f"{plan['image']}:{base_tag}-{architecture}" for architecture in ARCHITECTURES]
+
+
+def validate_manifest_entries(entries, digests, source_tag):
+    platforms = {
+        (entry.get("platform", {}).get("os"), entry.get("platform", {}).get("architecture"))
+        for entry in entries
+    }
+    expected = set(ARCHITECTURES.values())
+    if platforms != expected or len(entries) != len(expected):
+        raise ValueError(f"Unexpected platforms in manifest: {sorted(platforms)}")
+    for entry in entries:
+        architecture = entry["platform"]["architecture"]
+        if entry.get("digest") != digests[architecture][source_tag]:
+            raise ValueError(f"Manifest entry does not match the tested {architecture} image")
+    return sorted(f"{os}/{architecture}" for os, architecture in platforms)
+
+
+def publish_manifest(plan):
+    if not plan["publish"]:
+        raise ValueError("Refusing publication of a build-only run")
+    sources = {
+        architecture: [
+            f"{plan['image']}:{tag}" for tag in platform_tags(plan, architecture)
+        ]
+        for architecture in ARCHITECTURES
+    }
+    digests = {}
+    for architecture, references in sources.items():
+        digests[architecture] = {}
+        for reference in references:
+            descriptor = json.loads(docker("buildx", "imagetools", "inspect", reference, "--format", "{{json .Manifest}}"))
+            digest = descriptor.get("digest", "")
+            if not DIGEST.fullmatch(digest):
+                raise ValueError(f"Registry returned no valid digest for {reference}")
+            base_tag = reference.rsplit(":", 1)[-1].rsplit("-", 1)[0]
+            digests[architecture][base_tag] = digest
+
+    results = []
+    expected_digest = None
+    for tag in plan["tags"]:
+        target = f"{plan['image']}:{tag}"
+        source_tag_base = manifest_source_tag(plan, tag)
+        docker("buildx", "imagetools", "create", "--tag", target, *manifest_source_refs(plan, tag))
+        descriptor = json.loads(docker("buildx", "imagetools", "inspect", target, "--format", "{{json .Manifest}}"))
+        digest = descriptor.get("digest", "")
+        if not DIGEST.fullmatch(digest):
+            raise ValueError(f"Registry returned no valid multi-platform digest for {target}")
+        if expected_digest is not None and digest != expected_digest:
+            raise ValueError(f"Multi-platform tags do not resolve to the same image: {target}")
+        expected_digest = digest
+        _, entries = registry_manifest(target)
+        platforms = validate_manifest_entries(entries, digests, source_tag_base)
+        results.append({"reference": target, "digest": digest, "platforms": platforms})
+    return {"tags": results, "digest": expected_digest, "pull": f"{plan['image']}@{expected_digest}"}
+
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "publish"))
+    parser.add_argument("command", choices=("plan", "publish-platform", "publish-manifest"))
     parser.add_argument("--local-image", default="vision-simple:ci")
+    parser.add_argument("--architecture", choices=tuple(ARCHITECTURES))
     args = parser.parse_args()
     manual = os.environ.get("MANUAL_PUBLISH", "false")
     if manual not in {"true", "false"}:
         raise ValueError("MANUAL_PUBLISH must be true or false")
     plan = release_plan(
         os.environ["GITHUB_EVENT_NAME"], os.environ["GITHUB_REF"],
-        os.environ["GITHUB_SHA"], os.environ.get("DOCKERHUB_IMAGE") or "lonacn/vision_simple",
+        os.environ["GITHUB_SHA"], os.environ.get("GHCR_IMAGE") or IMAGE,
         manual == "true",
     )
     if args.command == "plan":
@@ -114,14 +195,19 @@ def main():
                 stream.write(f"publish={str(plan['publish']).lower()}\n")
         print(json.dumps(plan))
         return
-    result = publish(plan, args.local_image)
-    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
-        text = "## Verified Docker publication\n\n"
-        text += "Built and HTTP smoke-tested `linux/amd64` image; all registry tags verified.\n\n"
-        text += "\n".join(f"- `{tag}`" for tag in result["tags"])
-        text += f"\n\nImmutable pull reference: `{result['pull']}`\n"
-        with Path(summary).open("a", encoding="utf-8") as stream:
-            stream.write(text)
+    if args.command == "publish-platform":
+        if not args.architecture:
+            raise ValueError("publish-platform requires --architecture")
+        result = publish_platform(plan, args.local_image, args.architecture)
+    else:
+        result = publish_manifest(plan)
+        if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+            text = "## Verified multi-platform Docker publication\n\n"
+            text += "Both CPU images passed HTTP smoke tests; every manifest tag contains `linux/amd64` and `linux/arm64`.\n\n"
+            text += "\n".join(f"- `{tag['reference']}` (`{tag['digest']}`)" for tag in result["tags"])
+            text += f"\n\nImmutable pull reference: `{result['pull']}`\n"
+            with Path(summary).open("a", encoding="utf-8") as stream:
+                stream.write(text)
     print(json.dumps(result))
 
 

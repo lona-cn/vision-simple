@@ -4,7 +4,7 @@ english | [简体中文](./README.md)
 <p align="center">
 <a><img alt="GitHub License" src="https://img.shields.io/github/license/lona-cn/vision-simple"></a>
 <a><img alt="GitHub Release" src="https://img.shields.io/github/v/release/lona-cn/vision-simple"></a>
-<a><img alt="Docker pulls" src="https://img.shields.io/docker/pulls/lonacn/vision_simple"></a>
+ <a href="https://github.com/users/lona-cn/packages/container/package/vision-simple"><img alt="GHCR image" src="https://img.shields.io/badge/GHCR-vision--simple-2496ED"></a>
 <a><img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/lona-cn/vision-simple/total"></a>
 </p>
 <p align="center">
@@ -43,7 +43,7 @@ This guide is for users building, deploying and making their first inference req
 - **Execution providers:** CPU, DirectML, CUDA, TensorRT and RKNPU build options. Availability depends on dependencies, hardware and model exports; see compatibility notes. No fixed binary size, memory usage or frame rate is promised.
 - **Integration:**
   - C++23 API returning errors through `std::expected`.
-  - [Containers](https://hub.docker.com/r/lonacn/vision_simple); the current publication workflow covers Linux amd64 CPU only.
+  - [Containers](https://github.com/users/lona-cn/packages/container/package/vision-simple); GHCR publishes multi-platform Linux amd64 and arm64 CPU images.
   - [HTTP API](doc/openapi/server.yaml) for application integration.
 
 ### <div align="center"> YOLOv11 </div>
@@ -67,7 +67,7 @@ docker build --platform linux/amd64 -t vision-simple:local -f docker/Dockerfile.
 docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 ```
 
-Requires Docker, Git LFS and an x86_64 CPU with AVX/AVX2/F16C. The first build downloads and compiles dependencies. The image includes default YOLO11/PP-OCR configuration and test models, not YOLO26 weights. See [Docker Hub publication](#docker-hub-publication) for published-image selection and verification.
+Requires Docker, Git LFS and an x86_64 CPU with AVX/AVX2/F16C. The first build downloads and compiles dependencies. The image includes default YOLO11/PP-OCR configuration and test models, not YOLO26 weights. See [GHCR multi-platform publication](#ghcr-multi-platform-publication) for published-image selection and verification.
 
 In another terminal, run `curl http://127.0.0.1:11451/v0/infer/models` (`curl.exe` on Windows). Successful discovery proves only that configuration is listed, not that weights load or inference succeeds. Use the [inference example](#send-an-inference-request) below with `hd2-fp32` for the default detection model.
 
@@ -574,22 +574,22 @@ python3 scripts/test_docker_smoke.py --image vision-simple:ci
 docker run -it --rm -p 127.0.0.1:11451:11451 --name vs vision-simple:ci
 ```
 
-#### Docker Hub Publication
+#### GHCR Multi-platform Publication
 
-`.github/workflows/docker.yml` currently validates and publishes only the `linux/amd64` CPU image:
+`.github/workflows/docker.yml` builds and publishes Linux amd64 and arm64 CPU images to `ghcr.io/lona-cn/vision-simple`:
 
-- Configure repository Actions secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` with write access to the destination repository. Optional Actions variable `DOCKERHUB_IMAGE` accepts `namespace/repository`, defaulting to `lonacn/vision_simple`; other registry addresses are rejected.
-- Pushing a `vX.Y.Z` or `vX.Y.Z-prerelease` tag triggers publication. Manual runs default to build-and-test only; explicitly selecting `publish=true` requires a valid version tag, not a branch. SemVer `+build` suffixes are not accepted.
-- Order: recursive checkout and Git LFS → build and load → pin local image ID → HTTP/container health and cleanup → login → push that tested image → verify registry digests. Publication does not perform a second build.
-- Tags are `<version>-cpu-x86_64` and `sha-<full commit SHA>-cpu-x86_64`. Stable releases update `latest` last; prereleases do not. `latest` means the last successfully published stable release, not necessarily the highest historical version.
-- Build, health, login, push, or digest failures fail the job. A publication success summary is written only after all checks pass. Updating multiple tags is not atomic; a failed run may have pushed some tags.
-- Deploy using the summary's `lonacn/vision_simple@sha256:...` reference (or your configured repository), not a mutable tag. Debian/APT and online package inputs remain mutable; a commit tag does not guarantee bit-for-bit reproducibility.
+- Pushing a `vX.Y.Z` or `vX.Y.Z-prerelease` tag triggers publication. Manual runs default to build-and-test only; explicitly selecting `publish=true` enables publication. Publishing uses the automatically provided `GITHUB_TOKEN` with `packages: write`; no PAT secrets are required.
+- amd64 and arm64 are built on native GitHub-hosted runners. Each image passes the HTTP/HEALTHCHECK smoke test, graceful shutdown and cleanup before that tested image is pushed.
+- Each architecture is published as `<version>-cpu-amd64` / `<version>-cpu-arm64` and `sha-<full commit SHA>-cpu-amd64` / `sha-<full commit SHA>-cpu-arm64`. After both builds succeed, those images are assembled as multi-platform `<version>-cpu` and `sha-<full commit SHA>-cpu` manifests. Stable releases also update `latest`; prereleases do not.
+- Manifest verification checks both platform descriptors and confirms their registry digests match the smoke-tested images. The release summary is written only after all manifest tags pass. Platform-specific tags already pushed are not automatically rolled back if a later step fails.
+- `docker pull ghcr.io/lona-cn/vision-simple:latest` selects amd64 or arm64 for the client platform. Prefer the immutable `ghcr.io/lona-cn/vision-simple@sha256:...` reference from the successful summary for deployment. A newly published GHCR package is private by default; change its visibility in GitHub package settings for anonymous pulls.
+- ARMv7's Dockerfile still copies artifacts from an `arm64` directory. ARMv7, RISC-V, CUDA/TensorRT and RKNPU images are outside this multi-platform publication; hardware-accelerated backends need separate image variants and device validation.
 
-Release-policy boundary tests: `python3 -m unittest discover -s scripts -p test_docker_release.py`. The x86 CPU build enables AVX/AVX2/F16C and requires a compatible host CPU.
+Release-policy boundary tests: `python3 -m unittest discover -s scripts -p test_docker_release.py`. The amd64 CPU build enables AVX/AVX2/F16C and requires a compatible CPU.
 
 #### Other Platforms / Hardware Acceleration
 
-These Dockerfiles do not imply validated multi-platform publication. CPU `amd64` and `arm64` can share a manifest after both pass actual runtime validation; no multi-platform manifest is currently published by this workflow. ARMv7 still copies artifacts from an `arm64` directory and needs correction and validation; RISC-V has not been runtime-tested in this work. CUDA/TensorRT and RKNPU require their respective hardware and separate variant tags; same-architecture manifest entries cannot distinguish execution providers.
+The GHCR multi-platform manifest currently contains only Linux CPU `amd64` and `arm64`. ARMv7's Dockerfile still copies artifacts from an `arm64` directory, and RISC-V has not been runtime-tested on target hardware. CUDA/TensorRT and RKNPU require matching hardware validation and separate image variants; do not merge them with CPU images of the same architecture in one manifest.
 
 ```sh
 # ARM64 CPU

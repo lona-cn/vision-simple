@@ -4,7 +4,7 @@
 <p align="center">
 <a><img alt="GitHub License" src="https://img.shields.io/github/license/lona-cn/vision-simple"></a>
 <a><img alt="GitHub Release" src="https://img.shields.io/github/v/release/lona-cn/vision-simple"></a>
-<a><img alt="Docker pulls" src="https://img.shields.io/docker/pulls/lonacn/vision_simple"></a>
+ <a href="https://github.com/users/lona-cn/packages/container/package/vision-simple"><img alt="GHCR image" src="https://img.shields.io/badge/GHCR-vision--simple-2496ED"></a>
 <a><img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/lona-cn/vision-simple/total"></a>
 </p>
 
@@ -44,7 +44,7 @@
 - **执行提供者**：CPU、DirectML、CUDA、TensorRT、RKNPU 构建选项；实际可用性取决于依赖、硬件和模型导出，见兼容性说明。不承诺固定体积、内存占用或帧率。
 - **接入方式**：
   - C++23 API，使用 `std::expected` 返回错误。
-  - [容器部署](https://hub.docker.com/r/lonacn/vision_simple)，当前发布工作流仅覆盖 Linux amd64 CPU。
+  - [容器部署](https://github.com/users/lona-cn/packages/container/package/vision-simple)，GHCR 发布 Linux amd64、arm64 CPU 多架构镜像。
   - **[HTTP服务](doc/openapi/server.yaml)**：提供HTTP API供Web应用调用
 
 
@@ -69,7 +69,7 @@ docker build --platform linux/amd64 -t vision-simple:local -f docker/Dockerfile.
 docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 ```
 
-需要 Docker、Git LFS 及支持 AVX/AVX2/F16C 的 x86_64 CPU。首次构建会下载并编译依赖；镜像包含默认 YOLO11/PP-OCR 配置及测试模型，不包含 YOLO26 权重。发布镜像的选择与校验见[Docker Hub 发布](#docker-hub-发布)。
+需要 Docker、Git LFS 及支持 AVX/AVX2/F16C 的 x86_64 CPU。首次构建会下载并编译依赖；镜像包含默认 YOLO11/PP-OCR 配置及测试模型，不包含 YOLO26 权重。发布镜像的选择与校验见[GHCR 多平台发布](#ghcr-多平台发布)。
 
 在另一终端执行 `curl http://127.0.0.1:11451/v0/infer/models`（Windows 可用 `curl.exe`）检查模型目录。目录成功只证明配置可发现，不证明权重加载或推理成功；完整请求示例见[发起推理](#发起推理)，默认检测模型改用 `hd2-fp32` 即可。
 
@@ -579,22 +579,22 @@ python3 scripts/test_docker_smoke.py --image vision-simple:ci
 docker run -it --rm -p 127.0.0.1:11451:11451 --name vs vision-simple:ci
 ```
 
-#### Docker Hub 发布
+#### GHCR 多平台发布
 
-`.github/workflows/docker.yml` 目前只验收并发布 `linux/amd64` CPU 镜像：
+`.github/workflows/docker.yml` 构建并发布 `ghcr.io/lona-cn/vision-simple` 的 Linux amd64、arm64 CPU 镜像：
 
-- 在仓库 Actions secrets 配置 `DOCKERHUB_USERNAME`、具有目标仓库写权限的 `DOCKERHUB_TOKEN`。可选 Actions variable `DOCKERHUB_IMAGE` 使用 `namespace/repository`，默认 `lonacn/vision_simple`；不接受其他 registry 地址。
-- 推送 `vX.Y.Z` 或 `vX.Y.Z-prerelease` tag 触发发布。手动运行默认只构建、验收；显式选择 `publish=true` 时必须选择合法版本 tag，不能从 branch 发布。不接受 SemVer `+build` 后缀。
-- 顺序为：递归 checkout 和 Git LFS → 构建并加载镜像 → 固定本地镜像 ID → HTTP/容器健康检查和清理 → 登录 → 推送这个已经验收的镜像 → 校验远端 digest。不会为发布再次构建。
-- 发布 `<version>-cpu-x86_64` 和 `sha-<完整 commit SHA>-cpu-x86_64`。稳定版本最后更新 `latest`；预发布不更新。`latest` 表示最后成功发布的稳定版本，不保证是历史最高版本。
-- 构建、健康检查、登录、推送或 digest 校验失败都会令任务失败；只有全部发布校验通过才生成成功摘要。多个 tag 的更新不是原子事务，失败时可能已推送部分 tag。
-- 生产部署使用成功摘要中的 `lonacn/vision_simple@sha256:...`（自定义仓库时使用相应名称），不要依赖可变 tag。当前 Debian/APT 和在线包依赖仍可变化，commit tag 不代表逐字节可重复构建。
+- 推送 `vX.Y.Z` 或 `vX.Y.Z-prerelease` tag 触发；手动运行默认只构建、验收，显式选择 `publish=true` 才发布。发布使用自动提供的 `GITHUB_TOKEN` 和 `packages: write` 权限，不需要 PAT secrets。
+- amd64、arm64 分别在原生 GitHub-hosted runner 构建，运行 HTTP/HEALTHCHECK smoke test、优雅停止和清理后，才推送已验收镜像。
+- 每个平台分别发布 `<version>-cpu-amd64` / `<version>-cpu-arm64` 和 `sha-<完整 commit SHA>-cpu-amd64` / `sha-<完整 commit SHA>-cpu-arm64`。两边成功后合并为 `<version>-cpu`、`sha-<完整 commit SHA>-cpu` 多架构 manifest；稳定版本还更新 `latest`，预发布不更新。
+- manifest 校验确认 amd64、arm64 两个平台的 registry digest 与 smoke-tested 镜像一致。只有 manifest 步骤成功才生成发布摘要；失败时已推送的平台专属 tag 不会自动回滚。
+- `docker pull ghcr.io/lona-cn/vision-simple:latest` 会按客户端平台选择 amd64 或 arm64。部署优先使用成功摘要中的 `ghcr.io/lona-cn/vision-simple@sha256:...`。GHCR 包首次发布默认为 private；若需匿名拉取，在 GitHub 包设置中将其改为 public。
+- ARMv7 Dockerfile 的产物路径仍指向 arm64，RISC-V 及 CUDA/TensorRT、RKNPU 镜像未纳入此次多架构发布；硬件加速后端需独立镜像变体和设备验收。
 
-发布策略边界测试：`python3 -m unittest discover -s scripts -p test_docker_release.py`。x86 CPU 构建启用 AVX/AVX2/F16C，运行机器必须支持这些指令。
+发布策略边界测试：`python3 -m unittest discover -s scripts -p test_docker_release.py`。amd64 CPU 构建启用 AVX/AVX2/F16C，需支持这些指令的 CPU。
 
 #### 其他平台 / 硬件加速
 
-以下 Dockerfile 的存在不代表多架构发布已经验收。CPU `amd64`/`arm64` 可在各自通过真实运行验收后合并 manifest；目前不发布多架构 manifest。ARMv7 Dockerfile 的产物路径仍指向 `arm64`，需要先修正并验证；RISC-V 尚无本轮运行验收。CUDA/TensorRT 和 RKNPU 需要对应硬件验证，且应使用独立变体 tag，不能用同架构的 manifest 条目区分执行提供者。
+GHCR 多架构 manifest 目前仅包含 Linux CPU `amd64` 和 `arm64`。ARMv7 Dockerfile 的产物路径仍指向 `arm64`，RISC-V 尚未通过目标设备运行验收；CUDA/TensorRT 和 RKNPU 需要对应硬件验证及独立镜像变体，不能与同架构 CPU 镜像合并到同一 manifest。
 
 ```sh
 # ARM64 CPU

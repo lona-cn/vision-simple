@@ -95,7 +95,8 @@ def interrupt(signum, frame):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", required=True, help="Already built local linux/amd64 image")
+    parser.add_argument("--image", required=True, help="Already built local Linux container image")
+    parser.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), default="linux/amd64")
     parser.add_argument("--timeout", type=int, default=120, help="Readiness deadline in seconds")
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -105,11 +106,9 @@ def main():
     created = False
     passed = False
     try:
-        # --pull=never prevents accidentally testing an unrelated remote image.
-        # A UUID name allows cleanup even if the create command times out.
         created = True
         docker(
-            "create", "--pull=never", "--platform", "linux/amd64",
+            "create", "--pull=never", "--platform", args.platform,
             "--name", name, "--publish", "127.0.0.1::11451", args.image,
         )
         docker("start", name)
