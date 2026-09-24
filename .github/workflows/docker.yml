@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the selected version tag to Docker Hub
+        description: Publish the selected version tag to GHCR
         type: boolean
         required: true
         default: false
@@ -14,20 +14,55 @@ on:
 permissions:
   contents: read
 
-# Serialize all registry writers, including manually dispatched releases.
 concurrency:
   group: docker-cpu-publication
   cancel-in-progress: false
 
 jobs:
-  build:
+  release:
+    name: Resolve release policy
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
     env:
-      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'lonacn/vision_simple' }}
+      GHCR_IMAGE: ghcr.io/lona-cn/vision-simple
       MANUAL_PUBLISH: ${{ inputs.publish == true && 'true' || 'false' }}
-      # Only our final step may report end-to-end success.
-      DOCKER_BUILD_SUMMARY: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Test release policy boundaries
+        run: python3 -m unittest discover -s scripts -p test_docker_release.py
+
+      - name: Resolve release policy
+        id: plan
+        run: python3 scripts/docker_release.py plan
+
+  build:
+    name: Build and test ${{ matrix.platform }}
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            architecture: amd64
+            runner: ubuntu-24.04
+            dockerfile: docker/Dockerfile.debian-bookworm-x86_64-cpu
+          - platform: linux/arm64
+            architecture: arm64
+            runner: ubuntu-24.04-arm
+            dockerfile: docker/Dockerfile.debian-bookworm-arm64-cpu
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GHCR_IMAGE: ghcr.io/lona-cn/vision-simple
+      MANUAL_PUBLISH: ${{ inputs.publish == true && 'true' || 'false' }}
 
     steps:
       - name: Checkout
@@ -37,46 +72,27 @@ jobs:
           submodules: recursive
           lfs: true
 
-      - name: Test release policy boundaries
-        run: python3 -m unittest discover -s scripts -p test_docker_release.py
-
-      - name: Resolve release policy
-        id: release
-        run: python3 scripts/docker_release.py plan
-
-      - name: Require publishing credentials
-        if: steps.release.outputs.publish == 'true'
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        shell: bash
-        run: |
-          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
-            echo "::error::Publishing requires DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets."
-            exit 1
-          fi
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Build Docker image
+      - name: Build ${{ matrix.platform }} image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: docker/Dockerfile.debian-bookworm-x86_64-cpu
-          platforms: linux/amd64
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
           push: false
+          load: true
           provenance: false
           sbom: false
-          load: true
           tags: vision-simple:ci
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=vision-simple-linux-x86_64-cpu
-          cache-to: type=gha,mode=max,scope=vision-simple-linux-x86_64-cpu
+          cache-from: type=gha,scope=vision-simple-${{ matrix.architecture }}-cpu
+          cache-to: type=gha,mode=max,scope=vision-simple-${{ matrix.architecture }}-cpu
 
-      - name: Pin the local image identity
+      - name: Pin tested image identity
         id: tested-image
         shell: bash
         run: |
@@ -88,25 +104,60 @@ jobs:
         timeout-minutes: 5
         env:
           TEST_IMAGE_ID: ${{ steps.tested-image.outputs.id }}
-        run: python3 scripts/test_docker_smoke.py --image "$TEST_IMAGE_ID"
+        run: python3 scripts/test_docker_smoke.py --image "$TEST_IMAGE_ID" --platform "${{ matrix.platform }}"
 
-      - name: Log in to Docker Hub
-        if: steps.release.outputs.publish == 'true'
+      - name: Log in to GHCR
+        if: needs.release.outputs.publish == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Push the loaded, tested image, not a second build with push:true.
-      - name: Publish tested image and verify registry digests
-        if: steps.release.outputs.publish == 'true'
-        timeout-minutes: 15
+      - name: Publish tested ${{ matrix.architecture }} image
+        if: needs.release.outputs.publish == 'true'
         env:
           TEST_IMAGE_ID: ${{ steps.tested-image.outputs.id }}
-        run: python3 scripts/docker_release.py publish --local-image "$TEST_IMAGE_ID"
+          IMAGE_ARCHITECTURE: ${{ matrix.architecture }}
+        run: python3 scripts/docker_release.py publish-platform --local-image "$TEST_IMAGE_ID" --architecture "$IMAGE_ARCHITECTURE"
 
+  publish-manifest:
+    name: Publish multi-platform manifest
+    needs: [release, build]
+    if: needs.release.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GHCR_IMAGE: ghcr.io/lona-cn/vision-simple
+      MANUAL_PUBLISH: ${{ inputs.publish == true && 'true' || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish and verify multi-platform tags
+        run: python3 scripts/docker_release.py publish-manifest
+  build-only-summary:
+    name: Summarize multi-platform build verification
+    needs: [release, build]
+    if: needs.release.outputs.publish == 'false'
+    runs-on: ubuntu-24.04
+    steps:
       - name: Summarize build-only verification
-        if: steps.release.outputs.publish == 'false'
         run: |
-          echo "## Docker build verified (not published)" >> "$GITHUB_STEP_SUMMARY"
-          echo 'The linux/amd64 image passed the HTTP container smoke test and clean shutdown. No registry login or push was performed.' >> "$GITHUB_STEP_SUMMARY"
+          echo "## Multi-platform Docker build verified (not published)" >> "$GITHUB_STEP_SUMMARY"
+          echo "The linux/amd64 and linux/arm64 CPU images passed their HTTP container smoke tests and clean shutdown. No registry login or push was performed." >> "$GITHUB_STEP_SUMMARY"

@@ -48,9 +48,13 @@ RUN sed -i '/^\s*#/d' /app/config/log.properties
 FROM --platform=linux/arm64 arm64v8/debian:bookworm-slim
 RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\
     printf 'deb http://mirrors.huaweicloud.com/debian/ sid main contrib non-free non-free-firmware\ndeb http://mirrors.huaweicloud.com/debian/ bookworm main contrib non-free non-free-firmware\n' > /etc/apt/sources.list
-RUN DEBIAN_FRONTEND=noninteractive apt update&&apt install -y libc6 libstdc++6
+RUN DEBIAN_FRONTEND=noninteractive apt update &&\
+    apt install -y --no-install-recommends ca-certificates curl libc6 libstdc++6 &&\
+    rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app /app
 COPY --from=builder /src/app/assets/test /app/assets
 EXPOSE 11451
 WORKDIR /app
+HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=6 \
+    CMD curl --fail --silent --show-error --noproxy '*' --max-time 2 http://127.0.0.1:11451/v0/infer/models > /dev/null || exit 1
 ENTRYPOINT ["./vision_simple-server"]
