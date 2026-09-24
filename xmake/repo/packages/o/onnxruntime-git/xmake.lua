@@ -42,15 +42,19 @@ package("onnxruntime-git")
         end
         if package:is_plat("linux") then
             if is_arch("arm64") then
-                -- TODO:
-                -- 1. fix compile toolchain
-                local toolchain_file_path = path.join(package:scriptdir(), "cross-cmake","arm64.toolchain.cmake")
-                build_cmd = build_cmd.." --arm64"
+                -- ONNX Runtime's ARM64 mode and toolchain file are for cross-build hosts.
+                local arm64_cmake_defines = common_cmake_defines
+                local host_arch = os.arch()
+                if host_arch ~= "arm64" and host_arch ~= "aarch64" then
+                    local toolchain_file_path = path.join(package:scriptdir(), "cross-cmake", "arm64.toolchain.cmake")
+                    build_cmd = build_cmd .. " --arm64"
+                    arm64_cmake_defines = arm64_cmake_defines .. " CMAKE_TOOLCHAIN_FILE=" .. toolchain_file_path
+                end
                 if package:config("rknpu") then
                     local rknpu_ddk_path = package:dep("rknpu_ddk"):installdir()
-                    build_cmd = build_cmd.." --use_rknpu --cmake_extra_defines "..common_cmake_defines.." CMAKE_TOOLCHAIN_FILE="..toolchain_file_path.." RKNPU_DDK_PATH="..rknpu_ddk_path
+                    build_cmd = build_cmd .. " --use_rknpu --cmake_extra_defines " .. arm64_cmake_defines .. " RKNPU_DDK_PATH=" .. rknpu_ddk_path
                 else
-                    build_cmd = build_cmd.." --cmake_extra_defines "..common_cmake_defines.." CMAKE_TOOLCHAIN_FILE="..toolchain_file_path
+                    build_cmd = build_cmd .. " --cmake_extra_defines " .. arm64_cmake_defines
                 end
             elseif is_arch("arm") then
                 local toolchain_file_path = path.join(package:scriptdir(), "cross-cmake","armv7.toolchain.cmake")
