@@ -1,47 +1,23 @@
-# INFER MODULE
+# Inference runtime
 
-## OVERVIEW
-ONNXRuntime inference engine for YOLO (v10/v11) and OCR (PaddleOCR det+rec). 9 C++ files, plain-main tests, no gtest.
+Use this guide when changing inference models, image preprocessing, or the inference test targets. Public interfaces live in `Infer.h`, `InferYOLOTask.h`, `InferPipeline.h`, and `Tracker.h`; implementations and model parsers live in `private/`. The module's `xmake.lua` builds the `infer` object target with OpenCV, ONNX Runtime, and magic_enum; provider options are configured through xmake.
 
-## STRUCTURE
-```
-app/source/runtime/infer/
-├── Infer.h                 # public API: InferContext, InferYOLO, InferOCR
-├── VisionHelper.hpp        # Letterbox, HWC2CHW_BGR2RGB, NMS, ScaleCoords
-├── DXInfo.hpp              # Windows GPU enumeration
-├── private/
-│   ├── InferYOLO.h/.cpp    # YOLOFilter + InferYOLOOrtImpl
-│   ├── InferOCR.h/.cpp     # InferOCROrtPaddleImpl (PIMPL)
-│   ├── InferORT.h/.cpp     # ONNXRuntime context wrapper
-│   └── Infer.cpp           # InferContext factory
-├── test/
-│   ├── test_yolo.cpp       # video decode + inference + display loop
-│   ├── test_ocr.cpp        # det+rec end-to-end test
-│   └── Util.hpp            # ReadAll, SafeQueue, FPSCounter
-└── xmake.lua               # opencv + onnxruntime + magic_enum deps
-```
+## APIs and model exports
 
-## WHERE TO LOOK
-| Symbol | Type | Location | Role |
-|--------|------|----------|------|
-| `YOLOFilter` | Class | `private/InferYOLO.h:11` | Version dispatch + NMS + coordinate rescale |
-| `YOLOFilter::v10` / `v11` | Method | `private/InferYOLO.cpp:166` / `122` | Per-version post-processing logic |
-| `InferYOLOOrtImpl` | Class | `private/InferYOLO.h:48` | ONNX YOLO session + IOBinding |
-| `InferOCROrtPaddleImpl` | Class | `private/InferOCR.h:8` | PIMPL wrapper, delegates to `Impl` |
-| `InferOCROrtPaddleImpl::Impl` | Struct | `private/InferOCR.cpp:29` | det session + rec session + pre/post-process |
-| `InferContextORT` | Class | `private/InferORT.h` | Creates Ort::Session from model span |
-| `VisionHelper::HWC2CHW_BGR2RGB<T>` | Template | `VisionHelper.hpp` | In-place BGR->RGB channel reorder |
-| `Cvt::cvt` | Static | `VisionHelper.hpp:56` | fp32<->fp16 via AVX on x86_64 |
+- `InferContext::Create(InferFramework, InferEP, InferArgs)` returns a `VSResult` owning a context. Model factories accept that context, a model path or byte span, and an optional device ID. `InferYOLO::Create` and `InferOCR::Create` also accept arithmetic spans, reinterpreted as bytes. The factory accepts ONNX Runtime with CPU, DML, CUDA, or TensorRT EP values; non-CPU providers also depend on compiled support and available runtimes. Other enum values do not imply factory support. Check `private/Infer.cpp` and `private/InferORT.cpp` when extending providers.
+- `InferYOLO::Create` handles detection exports: `kV10` expects end-to-end `[1,N,6]`, `kV11` raw `[1,4+classes,N]`, and `kV26` selects raw or end-to-end using explicit export metadata (`task=detect` plus supported export flags). All require valid `names` class metadata, one fixed-size `[1,3,H,W]` float/float16 input, and one float/float16 output. Raw detection applies class-aware NMS; end-to-end detection does not run a second NMS.
+- `InferYOLOTask::Create` supports segmentation, pose, and oriented boxes for YOLO11 and YOLO26, with task-specific outputs. YOLO26 task exports require compatible task/export metadata. Its `Run` returns `YOLOTaskFrameResult`, a variant of segmentation, pose, or OBB frame results.
+- `InferOCR::Create` takes a dictionary plus detection and recognition models. Supported types are `kPPOCRv3` and `kPPOCRv4` (CTC), and `kPaddleSAR` (SAR); `kEasyOCR` exists in the enum but has no postprocessor. `InferArgs["ocr_rec_batch_size"]` accepts decimal `1..64` (default `1`) for dynamic recognition batches; fixed-N exports use their declared batch size. Recognition groups crops by input width, pads fixed-N tail tensors, and restores original detection order. Do not reinstate the old rule forbidding recognition batching.
+- `InferPipeline::Create(PipelineOptions)` runs batches of images against an `InferYOLO`, `InferOCR`, or `InferYOLOTask` model through bounded preprocess/inference/postprocess queues. `Run` returns ordered frame results or a `PipelineFailure` with kind and optional image index. Keep model objects and input pixels alive and immutable until `Run` returns; cancellation and deadlines drain executing stages. Join callers before destroying the pipeline after `Close()`.
+- `Tracker::Create(TrackerOptions)` creates an independent ByteTrack or BoT-SORT stream. Call `Step(frame_index, timestamp, detections, image)` with strictly increasing indices and timestamps; timestamps are seconds and index gaps count toward expiry. BoT-SORT camera motion needs a same-sized `CV_8UC3` image each step, and appearance matching requires caller-supplied embeddings. `Reset()` starts a fresh sequence.
 
-## CONVENTIONS
-- **YOLO dispatch**: `YOLOFilter::operator()` branches on `YOLOVersion` enum to `v10()` or `v11()`
-- **OCR two-stage**: `DetPreProcess` -> det.Run -> `DetPostProcess` -> per-box `RecPreProcess` -> rec.Run -> `RecPostProcess`
-- **IOBinding**: All ORT inference uses `Ort::IoBinding` for zero-copy input/output
-- **Template `Create` overloads**: `InferYOLO::Create<T>` and `InferOCR::Create<T>` accept any `std::is_arithmetic_v<T>` span, cast to `uint8_t`
-- **Tests**: Plain `main()` with `CHECK_RESULT` macro, video loops with `std::jthread` + `SafeQueue`
+## Preprocessing and implementation conventions
 
-## ANTI-PATTERNS
-- DO NOT batch OCR rec inference, it degrades accuracy (comment at `InferOCR.cpp:272`)
-- DO NOT use `try/catch` in new code, existing catches in factory map are for ORT C++ API boundary only
-- DO NOT access `private/` headers from outside `infer/` module
-- DO NOT forget `PadLength()` when sizing OCR det input, model expects 32-aligned dimensions
+- `ValidateInferInput` requires a nonempty 2D `CV_8UC3` image and finite confidence threshold in `[0,1]`. `VisionHelper::Letterbox` records actual resize gains and padding in `LetterboxTransform`; use that transform with `ScaleCoords` when mapping detections back to original pixels.
+- YOLO detection/tasks letterbox to the model input, convert interleaved BGR to planar RGB, then normalize to `[0,1]`; float16 inputs convert from float. OCR detection letterboxes to dimensions padded to multiples of 32 and uses planar RGB `[0,1]`. Recognition resizes each crop to its model dimensions, converts BGR to planar RGB, then normalizes to `[-1,1]`.
+- OCR runs detection, maps expanded DBNet boxes back to source coordinates, then recognizes crops; preserve the DBNet unclip expansion and dictionary-specific CTC/SAR decoding. Keep ORT I/O bindings and model/workspace lifetimes aligned with staged pipeline execution; do not assume bindings of CPU inputs before preprocessing are safe for copying providers.
+- Return `VSResult`/`InferResult` errors at API boundaries rather than allowing OpenCV/ORT exceptions to escape `noexcept` APIs. Keep internal headers under `private/`; tests may include them for postprocessor and metadata coverage.
+
+## Verification targets
+
+From the repository root, xmake auto-registers each `test/test_*.cpp` as a target with the same basename. Build/run the targeted executable with `xmake build <target>` and `xmake run <target>`. For preprocessing and decoding use `test_vision_helper`, `test_cvt`, `test_yolo_postprocess`, and `test_ocr_decode`; for factory/model input checks use `test_infer_inputs`; for recognition batching use `test_ocr_batch`; for staged concurrency use `test_pipeline`; for task variants use `test_yolo_tasks`; for tracking use `test_tracker`. Asset-backed tests accept `--project-root .` where their usage requires it (notably `test_ocr_batch` and `test_yolo_tasks`). The older `test_yolo` video/display loop and `test_ocr` DML example require local assets and a suitable provider; they are not substitutes for focused tests.

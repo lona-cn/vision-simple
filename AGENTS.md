@@ -1,108 +1,31 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-05-08
-**Commit:** 3913972
-**Branch:** main
-
 ## OVERVIEW
-vision-simple — C++23 vision inference library with YOLO/OCR support via ONNXRuntime, served through embedded HTTP API. Cross-platform: Windows(x64), Linux(x86_64/arm64/riscv64).
+vision-simple 是 C++23 视觉推理库及内嵌 libhv HTTP 服务。推理由 ONNX Runtime 执行，公开 YOLO、OCR 接口；服务还提供模型目录、跟踪及字幕相关能力。支持 Windows x64 和 Linux 多架构；具体构建选项以 xmake 配置为准。
 
-## STRUCTURE
-```
-./
-├── app/source/
-│   ├── runtime/
-│   │   ├── infer/        # 推理引擎: YOLO, OCR, VisionHelper
-│   │   └── common/       # 共享: Error, Config, IOUtil
-│   └── programs/
-│       ├── server/       # HTTP 推理服务 (libhv, port 11451)
-│       └── demo/         # Demo 程序
-├── xmake/                # xmake 构建配置
-│   ├── project.lua       # 主构建配置
-│   ├── options.lua       # 可选特性开关 (DML/CUDA/TensorRT/RKNPU)
-│   ├── funcs/            # 构建函数
-│   └── repo/             # 预编译包定义
-├── docker/               # 6 个平台的 Dockerfile
-├── scripts/              # 编译脚本 (Win/Linux)
-└── xmake.lua             # 根构建入口
-```
+## NAVIGATION
+- `app/source/runtime/infer/`：`Infer.h` 公开推理接口；`InferYOLOTask.h`、`InferPipeline.h`、`Tracker.h` 是任务/流水线/跟踪接口；实现见 `private/`。该目录的 `AGENTS.md` 说明推理细节。
+- `app/source/runtime/common/`：`VisionSimpleError.h`、`VisionSimpleConfig.h`、`IOUtil.h` 及日志接口；`Config::Load` 从 YAML 加载模型定义，`ModelConfig::models` 为统一目录，`yolo`/`ocr` 为兼容投影。
+- `app/source/programs/server/`：HTTP 路由、服务启动、模型管理；先读该目录的 `AGENTS.md` 再修改协议。
+- `app/source/programs/demo/`：示例程序。
+- `app/config/base/`：服务、模型和日志示例配置；默认监听端口由 `server.yaml` 指定（目前 11451）。
+- `app/assets/test/`：模型及回归测试夹具；`app/assets/main/` 存放运行时资源。
+- `xmake/project.lua`、`xmake/options.lua`、`xmake/funcs/`：语言/平台配置、执行提供者选项、目标及测试生成规则。
+- `scripts/`：服务协议、模型注册、推理任务、跟踪、字幕和容器发布等 Python 回归脚本；`doc/openapi/` 是 HTTP 协议描述，`.github/workflows/` 是 CI。
+- `docker/`：按平台划分的容器构建文件。
 
-## WHERE TO LOOK
-| Task | Location | Notes |
-|------|----------|-------|
-| YOLO 推理实现 | `app/source/runtime/infer/private/InferYOLO.cpp` | 315 lines |
-| OCR 推理实现 | `app/source/runtime/infer/private/InferOCR.cpp` | 303 lines |
-| ONNX 执行提供者 | `app/source/runtime/infer/private/InferORT.cpp` | ONNXRuntime wrapper |
-| HTTP 路由/API | `app/source/programs/server/private/HTTPServer.cpp` | 440 lines, libhv |
-| 公开 API 头文件 | `app/source/runtime/infer/Infer.h` | InferYOLO, InferOCR, InferContext |
-| 错误处理系统 | `app/source/runtime/common/VisionSimpleError.h` | VSResult<T> = expected<T, Error> |
-| 构建选项 | `xmake/options.lua` | DML/CUDA/TensorRT/RKNPU 开关 |
-| 测试文件 | `app/source/runtime/infer/test/` | C++ main() 测试, 非框架 |
+## CODE AND CHANGE CONVENTIONS
+- 公开推理 API 使用 `InferContext::Create`、`InferYOLO::Create`、`InferOCR::Create` 与 `Run`；返回值为 `VSResult<T>` / `InferResult<T>`（`std::expected`），错误使用 `VisionSimpleError`，不要把异常作为公开错误协议。ONNX Runtime 异常在实现边界转换为错误结果。
+- 公开接口头文件使用 `#pragma once`，导出符号使用 `VISION_SIMPLE_API`；`private/` 的实现头文件不跨模块引用。`InferContext`、`InferYOLO`、`InferOCR` 不可复制。
+- 模型定义写入 `app/config/base/models.yaml` 的 `models` 列表（`task`、`name`、`version`、`files`）；更改模型 schema 同时检查配置加载器、服务注册逻辑、OpenAPI 和回归脚本。
+- 修改 HTTP 请求/响应或路由时同步检查 `doc/openapi/server.yaml` 及 `scripts/` 中对应的协议、模型注册、任务、跟踪或字幕回归脚本；不要只改 handler。
+- `xmake/funcs/funcs_target.lua` 为模块 `test/test_*.cpp` 自动创建同名可执行目标，测试仍是普通 C++ `main()`；`scripts/test_*.py` 覆盖跨进程协议与发布流程。
 
-## CODE MAP
-| Symbol | Type | Location | Role |
-|--------|------|----------|------|
-| `vision_simple` | Namespace | Infer.h:16 | 所有 API 的命名空间 |
-| `InferContext` | Class | Infer.h:40 | 推理上下文: 框架+EP+参数 |
-| `InferYOLO` | Class | Infer.h:82 | YOLO 推理接口 (Create + Run) |
-| `InferOCR` | Class | Infer.h:133 | OCR 推理接口 (Create + Run) |
-| `VisionHelper` | Class | VisionHelper.hpp:177 | 图像预处理: Letterbox, BGR2RGB, NMS |
-| `Cvt` | Class | VisionHelper.hpp:56 | 图像数据类型转换 (fp32↔fp16↔u8) |
-| `VSResult<T>` | Type alias | Infer.h:18 | `std::expected<T, VisionSimpleError>` |
-| `VisionSimpleError` | Class | VisionSimpleError.h:27 | 统一错误类型 |
-| `MK_VSERROR` | Macro | VisionSimpleError.h:46 | 创建错误结果 |
-| `HTTPServerImpl` | Class | HTTPServer.cpp:59 | HTTP 服务实现 (libhv) |
-
-## CONVENTIONS
-- **C++23**: concepts (`requires`), `std::expected`, `std::span`, `std::pmr`, `std::source_location`
-- **头文件**: `#pragma once` (不用 include guards)
-- **命名**: 下划线后缀 `_` 标记成员变量; `kPascalCase` 标记枚举值
-- **工厂模式**: 公开类通过 `static CreateResult Create(...)` 构造, 禁止拷贝, 允许移动
-- **错误处理**: 禁止异常, 使用 `VSResult<T>` / `std::expected` + 显式 `if (!result)` 检查
-- **`private/` 目录**: 内部实现隐藏 — 每个模块的实现文件放在 `private/` 子目录
-- **`VISION_SIMPLE_API`**: DLL 导出宏 — 所有公开类/函数需标注
-- **测试**: `test/` 子目录下普通 `main()` 可执行文件, 未使用 gtest/gmock 框架
-
-## ANTI-PATTERNS (THIS PROJECT)
-- DO NOT throw exceptions — 使用 `VSResult<T>` 返回错误
-- DO NOT copy InferContext / InferYOLO / InferOCR — 拷贝构造已删除
-- DO NOT include 内部头文件 (`private/`) 跨模块
-- DO NOT use include guards — 用 `#pragma once`
-
-## UNIQUE STYLES
-- `unordered_map<string,string>` 用于 `InferArgs` — 类型擦除的参数传递
-- `std::span<T>` 用于模型数据传递 — 零拷贝, 支持 `uint8_t` 和算术类型模板
-- `std::expected` + `std::unexpected` 错误链, 配合 `MK_VSERROR` 宏
-- `magic_enum` 库用于枚举反射日志
-
-## COMMANDS
+## BUILD AND VERIFICATION
 ```bash
-# 构建
-xmake build server          # 构建 HTTP 服务
-
-# 运行
-xmake run server            # 运行 HTTP 服务 (port 11451)
-
-# 配置 (Windows + DML)
-xmake f -p windows -a x64 -m release --with_dml=y
-
-# 配置 (Linux + CPU)
-xmake f -p linux -a x86_64 --toolchain=gcc -m release
-
-# Docker 构建
-docker build -t vision-simple -f docker/Dockerfile.debian-bookworm-x86_64-cpu .
-
-# Docker 运行
-docker run -it --rm -p 11451:11451 vision-simple
-
-# 测试 (手动运行可执行文件)
-xmake build test_yolo
-xmake run test_yolo
+xmake build server
+xmake run server
+xmake build test_yolo_postprocess
+xmake run test_yolo_postprocess
 ```
-
-## NOTES
-- Windows 开发: 使用 `scripts/dev-vs.bat` 生成 VS 项目
-- 模型文件 `.onnx` 位于 `app/assets/test/` 目录
-- 默认编译器: Windows=MSVC, Linux=GCC-13/Clang
-- 3 个 Git Submodule: `third/` 包含第三方依赖 (libhv, struct_yaml, struct_json)
-- 公开 API 头文件安装路径: `<vision_simple/Infer.h>` (通过 include 路径约定)
+运行服务需要相应配置、模型文件和动态库；具体复制规则见 `xmake/rules/`。变更推理/HTTP 行为时选对应的 C++ 目标或 Python 回归脚本，并用真实服务和模型验证端到端路径；不要把只检查接口存在的测试当作推理验证。
