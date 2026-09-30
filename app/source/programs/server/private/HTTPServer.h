@@ -35,6 +35,10 @@ constexpr std::string_view HTTPSERVER_OPT_KEY_MAX_INFLIGHT_DECODED_BYTES{
     "infer_max_inflight_decoded_bytes"};
 constexpr std::string_view HTTPSERVER_OPT_KEY_OCR_REC_BATCH_SIZE{
     "ocr_rec_batch_size"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_HTTP_DATA_WORKERS{"http_data_workers"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_HTTP_DATA_QUEUE_CAPACITY{"http_data_queue_capacity"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_HTTP_CONTROL_WORKERS{"http_control_workers"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_HTTP_CONTROL_QUEUE_CAPACITY{"http_control_queue_capacity"};
 
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_STATIC_DIR{"assets/static"};
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_INFER_FRAMEWORK{
@@ -55,6 +59,10 @@ constexpr std::string_view HTTPSERVER_OPT_DEFVAL_MAX_BATCH_DECODED_BYTES{
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_MAX_INFLIGHT_DECODED_BYTES{
     "268435456"};
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_OCR_REC_BATCH_SIZE{"1"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_HTTP_DATA_WORKERS{"4"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_HTTP_DATA_QUEUE_CAPACITY{"4"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_HTTP_CONTROL_WORKERS{"1"};
+constexpr std::string_view HTTPSERVER_OPT_DEFVAL_HTTP_CONTROL_QUEUE_CAPACITY{"4"};
 
 struct HTTPServerOptions {
   using ServerOptions = std::map<std::string, std::string>;

@@ -2,6 +2,19 @@ openapi: 3.0.1
 info:
   title: vision-simple
   description: >-
+    HTTP共享同listener与四IOloops，阻塞业务使用独立有界data/control调度。
+    字符串options：http_data_workers=4、http_data_queue_capacity=4、
+    http_control_workers=1、http_control_queue_capacity=4，workers1-32，queues1-128。
+    每lane包括等待IOcallback的completed handler驻留不超过workers+queue。
+    完整正文Submit后、业务解析前接纳；满/停止返回该端点503 service_overloaded与Retry-After:1。
+    Transport handler额度不等于共享服务ImageCredit：排队不占image credit或decoded bytes；
+    接纳后保持模型/配置优先级，服务图像额度仅由实际Run持有。
+    HTTP timeout从完整正文Submit开始，包含排队、模型加载、解码；断连合作式取消且须物理drain。
+    Health绕过调度队列、cache/inference锁及模型加载；不保证模型有效或warmup；
+    暂时queuefull不改变ready，control lane也可能overload。Docker HEALTHCHECK使用/livez。
+    字幕video上传使用data lane（含streaming写盘/网络等待），metadata管理使用control lane。
+    Streaming video上传可在正文完整前持有transport handler，但不取得推理ImageCredit；完整正文接纳描述JSON推理。
+    支持顺序HTTP keepalive；活动异步handler期间同连接第二pipeline请求安全关闭，并发请用独立连接。
     共享 v0/v1/OpenAI/MCP 推理服务的解码预算：infer_max_image_pixels 默认16777216，
     infer_max_batch_decoded_bytes 默认67108864，infer_max_inflight_decoded_bytes 默认268435456，
     均为正整数字符串 options，不覆盖独立 tracking 服务。模型/配置错误优先；随后检查取消、
@@ -16,11 +29,50 @@ info:
     OpenCV4.10灰度Pf即使用彩色标志仍输出CV_8UC1，因此拒绝且不额外归一化。
     额度估算是BGR3像素字节，不是RSS，不含压缩正文、codec临时内存和模型/工作区。
     credit覆盖预检至物理Run结束；任务drain、输入析构后返还额度，不挂响应或模型租约。
-    普通HTTP断连不能打断ORT或提前返还；MCP取消/断连及timeout/shutdown同样须等待原生工作。
-    有效模型空批次保留原有空结果及控制检查，不占image credit/字节/decode_calls，预算满时也如此。
+    普通HTTP及MCP断连请求合作式取消，但不能打断ORT或提前返还；timeout/shutdown同样等待原生drain。
+    共享service及原生v0/v1有效模型空批次保留空结果/控制检查，不占image credit/字节/decode_calls，图像预算满也如此；
+    仍须通过transport接纳。MCP工具images minItems=1，空数组invalid_request；OpenAI chat要求实际图像，不提供原生空批次语义。
   version: 0.4.6
 tags: []
 paths:
+  /livez:
+    get:
+      summary: Listener liveness (no model or queue dependency)
+      responses:
+        '200':
+          description: Process HTTP loop is alive; not a model validity or warmup guarantee.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [alive]}
+              example: {status: alive}
+  /readyz:
+    get:
+      summary: Accepting work and not stopping (queue saturation is not draining)
+      responses:
+        '200':
+          description: Operational and accepting, regardless of temporary dispatch overload.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [ready]}
+              example: {status: ready}
+        '503':
+          description: Draining; new work is no longer accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [not_ready]}
+              example: {status: not_ready}
   /v0/infer/yolo:
     post:
       summary: YOLO推理

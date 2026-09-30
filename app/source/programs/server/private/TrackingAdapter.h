@@ -6,13 +6,14 @@ namespace hv {
 struct HttpService;
 }
 namespace vision_simple {
+class HttpDispatch;
 class TrackingAdapter {
  public:
   static VSResult<std::unique_ptr<TrackingAdapter>> Create() noexcept;
   ~TrackingAdapter();
   TrackingAdapter(const TrackingAdapter&) = delete;
   TrackingAdapter& operator=(const TrackingAdapter&) = delete;
-  void Mount(hv::HttpService& service);
+  void Mount(hv::HttpService& service, HttpDispatch& dispatch);
   void Stop() noexcept;
 
  private:

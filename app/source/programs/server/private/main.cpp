@@ -4,8 +4,12 @@
 
 #include <csignal>
 #include <iostream>
-#include <magic_enum.hpp>
+#include <chrono>
 #include <thread>
+#if !defined(_WIN32)
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 #include "HTTPServer.h"
 #include "IOUtil.h"
@@ -15,24 +19,96 @@
 
 namespace {
 constexpr std::string_view SERVER_YAML_PATH = "config/server.yaml";
-std::function<void()> CleanUp = nullptr;
+volatile std::sig_atomic_t received_signal = 0;
 
-[[noreturn]] void signal_handler(int signal) {
-  if (CleanUp) CleanUp();
-  std::exit(signal);
-}
+void signal_handler(int signal) { received_signal = signal; }
 
 void RegisterSignals() {
   std::signal(SIGINT, signal_handler);
-  // std::signal(SIGILL, signal_handler);
-  // std::signal(SIGFPE, signal_handler);
-  // std::signal(SIGSEGV, signal_handler);
   std::signal(SIGTERM, signal_handler);
   std::signal(SIGABRT, signal_handler);
 #if defined(_WIN32)
   std::signal(SIGBREAK, signal_handler);
   std::signal(SIGABRT_COMPAT, signal_handler);
 #endif
+}
+
+// Do not block in getchar: stdin may remain open without any input while
+// shutdown signals arrive. EOF disables input, but keeps waiting for signals.
+int WaitForShutdown() {
+  bool input_open = true;
+#if defined(_WIN32)
+  const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD console_mode = 0;
+  const bool console = input != INVALID_HANDLE_VALUE && input != nullptr &&
+                       GetConsoleMode(input, &console_mode);
+  const DWORD input_type = GetFileType(input);
+#endif
+  while (received_signal == 0) {
+    if (input_open) {
+#if defined(_WIN32)
+      if (console) {
+        DWORD count = 0;
+        if (!GetNumberOfConsoleInputEvents(input, &count)) {
+          input_open = false;
+        } else if (count != 0) {
+          INPUT_RECORD event{};
+          DWORD read = 0;
+          if (!ReadConsoleInputW(input, &event, 1, &read)) {
+            input_open = false;
+          } else if (read && event.EventType == KEY_EVENT &&
+                     event.Event.KeyEvent.bKeyDown &&
+                     event.Event.KeyEvent.uChar.UnicodeChar == L'\r') {
+            return received_signal;
+          }
+        }
+      } else {
+        DWORD available = 0;
+        bool readable = input_type == FILE_TYPE_DISK;
+        if (input_type == FILE_TYPE_PIPE) {
+          if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr))
+            input_open = false;
+          else
+            readable = available != 0;
+        } else if (!readable) {
+          input_open = false;
+        }
+        if (input_open && readable) {
+          char bytes[256];
+          DWORD read = 0;
+          const DWORD capacity = input_type == FILE_TYPE_PIPE
+              ? (available < sizeof(bytes) ? available : sizeof(bytes))
+              : sizeof(bytes);
+          if (!ReadFile(input, bytes, capacity, &read, nullptr) || read == 0) {
+            input_open = false;
+          } else {
+            for (DWORD i = 0; i < read; ++i)
+              if (bytes[i] == '\n') return received_signal;
+          }
+        }
+      }
+#else
+      pollfd input{STDIN_FILENO, POLLIN, 0};
+      if (::poll(&input, 1, 100) > 0) {
+        if (input.revents & (POLLIN | POLLHUP)) {
+          char bytes[256];
+          const auto count = ::read(STDIN_FILENO, bytes, sizeof(bytes));
+          if (count <= 0) {
+            input_open = false;
+          } else {
+            for (ssize_t i = 0; i < count; ++i)
+              if (bytes[i] == '\n') return received_signal;
+          }
+        } else if (input.revents & (POLLERR | POLLNVAL)) {
+          input_open = false;
+        }
+      }
+      if (input_open) continue;
+#endif
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+  }
+  return received_signal;
 }
 }  // namespace
 
@@ -64,26 +140,14 @@ int main(int argc, char* argv[]) try {
               << '\n';
     return 1;
   }
-  CleanUp = [&, mutex = std::make_shared<std::mutex>(),
-             cleaned = std::make_shared<std::atomic<bool>>(false)] {
-    if (!cleaned->load()) {
-      auto lock = std::lock_guard{*mutex};
-      if (!cleaned->load()) {
-        cleaned->store(true);
-        (*server_result)->Stop();
-        hv::async::cleanup();
-      }
-    }
-  };
   auto logger_result = vision_simple::Logger::Instance();
   logger_result->get().Info(
       LOG_DOMAIN_NAME, std::format("current workdir: {}",
                                    std::filesystem::current_path().string()));
-  while (getchar() != '\n') {
-    std::this_thread::sleep_for(std::chrono::milliseconds{100});
-  }
-  if (CleanUp) CleanUp();
-  return 0;
+  const int exit_code = WaitForShutdown();
+  (*server_result)->Stop();
+  hv::async::cleanup();
+  return exit_code;
 } catch (const std::exception& error) {
   std::cerr << "Server failed: " << error.what() << '\n';
   return 1;

@@ -1,15 +1,20 @@
 #include "SubtitleAdapter.h"
 
 #include <hv/HttpServer.h>
+#include <hv/EventLoop.h>
 
 #include <algorithm>
 #include <bit>
 #include <charconv>
+#include <condition_variable>
+#include <deque>
 #include <limits>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string_view>
 
 #include "HTTPExpectation.h"
+#include "HttpDispatch.h"
 #include "SubtitleService.h"
 
 namespace vision_simple {
@@ -161,27 +166,39 @@ int Error(const HttpContextPtr& ctx, SubtitleFailure failure,
                finish);
 }
 
-// An aliasing request pointer makes this guard live exactly as long as the
-// context's request, including disconnect and exception paths. The original
-// request is retained without a context/guard reference cycle.
+// Own parser chunks, never the parser buffer or a socket. File operations
+// belong to the accepted dispatch worker, including physical abort/close.
 struct RequestState {
   HttpRequestPtr original;
-  std::shared_ptr<SubtitleService> service;
   std::string id;
   size_t received = 0;
-  bool uploading = false;
-  ~RequestState() { Abort(); }
+  std::mutex mutex;
+  std::condition_variable ready;
+  std::deque<std::string> chunks;
+  size_t buffered = 0;
+  bool done = false;
+  bool cancelled = false;
+  bool resume_pending = false;
+  // Intrusive membership exists only while a data worker owns Upload.
+  RequestState* next_upload = nullptr;
   void Abort() noexcept {
-    if (uploading) {
-      uploading = false;
-      service->AbortUpload(id);
-    }
+    std::lock_guard lock(mutex);
+    cancelled = true;
+    ready.notify_all();
   }
 };
 }  // namespace
 
-struct SubtitleAdapter::State {
+struct SubtitleAdapter::State : std::enable_shared_from_this<SubtitleAdapter::State> {
   std::shared_ptr<SubtitleService> service;
+  HttpDispatch* dispatch = nullptr;
+  std::mutex uploads_mutex;
+  RequestState* uploads = nullptr;
+  void AbortUploads(const std::string& id) noexcept {
+    // Caller holds uploads_mutex; entries are bounded by data worker count.
+    for (auto* request = uploads; request; request = request->next_upload)
+      if (request->id == id) request->Abort();
+  }
   enum class Route {
     kCreate,
     kList,
@@ -192,6 +209,117 @@ struct SubtitleAdapter::State {
     kSrt,
     kVtt
   };
+  HttpDispatch::Reply Upload(const std::shared_ptr<RequestState>& request,
+                             hv::EventLoop* loop, std::weak_ptr<hv::HttpContext> weak,
+                             bool expect_continue, std::stop_token stop) {
+    // Cancellation returns no Reply: after this worker physically drains its
+    // file/buffers, HttpDispatch finalizes the incomplete socket on its IO loop.
+    std::stop_callback cancel(stop, [request] { request->Abort(); });
+    bool active = false;
+    struct Cleanup {
+      State& owner;
+      std::shared_ptr<RequestState> request;
+      bool& active;
+      ~Cleanup() {
+        {
+          std::unique_lock lock(request->mutex);
+          request->cancelled = true;
+          request->ready.wait(lock, [&] { return !request->resume_pending; });
+          request->chunks.clear();
+          request->buffered = 0;
+        }
+        std::lock_guard lock(owner.uploads_mutex);
+        if (active) owner.service->AbortUpload(request->id);
+        auto** entry = &owner.uploads;
+        while (*entry && *entry != request.get()) entry = &(*entry)->next_upload;
+        if (*entry) *entry = request->next_upload;
+      }
+    } cleanup{*this, request, active};
+    {
+      std::lock_guard lock(request->mutex);
+      if (request->cancelled) return {};
+    }
+    // Serialize BeginUpload plus registration with public cancel/delete. A
+    // queued upload cancelled before this point fails BeginUpload instead.
+    auto begin = [&] {
+      std::lock_guard lock(uploads_mutex);
+      auto result = service->BeginUpload(request->id);
+      if (result) {
+        request->next_upload = uploads;
+        uploads = request.get();
+      }
+      return result;
+    }();
+    if (!begin) return [failure = begin.error()](const HttpContextPtr& ctx) {
+      if (ctx->response->status_code >= 400) return;
+      ctx->setHeader("Connection", "close");
+      Error(ctx, failure);
+    };
+    active = true;
+    const auto resume = [&](bool send_continue) {
+      {
+        std::lock_guard lock(request->mutex);
+        if (request->cancelled || request->done || request->resume_pending) return;
+        request->resume_pending = true;
+      }
+      try {
+        loop->queueInLoop([weak, request, send_continue] {
+          auto ctx = weak.lock();
+          bool resume_read = false;
+          {
+            std::lock_guard lock(request->mutex);
+            request->resume_pending = false;
+            resume_read = !request->cancelled && !request->done;
+            request->ready.notify_all();
+          }
+          if (!ctx || !resume_read || !ctx->writer->isConnected() ||
+              ctx->response->status_code >= 400) return;
+          if (send_continue) ctx->writer->write("HTTP/1.1 100 Continue\r\n\r\n");
+          hio_read_start(ctx->writer->io());
+        });
+      } catch (...) {
+        std::lock_guard lock(request->mutex);
+        request->resume_pending = false;
+        request->ready.notify_all();
+        throw;
+      }
+    };
+    resume(expect_continue);
+    for (;;) {
+      std::string chunk;
+      {
+        std::unique_lock lock(request->mutex);
+        request->ready.wait(lock, [&] {
+          return request->cancelled || request->done || !request->chunks.empty();
+        });
+        if (request->cancelled) return {};
+        if (request->chunks.empty()) break;
+        chunk = std::move(request->chunks.front());
+        request->chunks.pop_front();
+      }
+      auto appended = service->AppendUpload(request->id,
+                                           std::span<const char>(chunk.data(), chunk.size()));
+      {
+        std::lock_guard lock(request->mutex);
+        request->buffered -= chunk.size();
+      }
+      if (!appended) return [failure = appended.error()](const HttpContextPtr& ctx) {
+        if (ctx->response->status_code >= 400) return;
+        ctx->setHeader("Connection", "close");
+        Error(ctx, failure);
+      };
+      resume(false);
+    }
+    if (stop.stop_requested()) return {};
+    auto finished = service->FinishUpload(request->id);
+    if (finished) active = false;
+    auto reply = finished ? Status(request->id, 202) : Failure(finished.error());
+    return [reply = std::move(reply)](const HttpContextPtr& ctx) mutable {
+      if (ctx->response->status_code >= 400) return;
+      reply(ctx);
+      if (ctx->writer->isConnected()) hio_read_start(ctx->writer->io());
+    };
+  }
 
   int Receive(const HttpContextPtr& ctx, Route route, http_parser_state phase,
               const char* data, size_t size) {
@@ -226,7 +354,6 @@ struct SubtitleAdapter::State {
       if (phase == HP_HEADERS_COMPLETE) {
         auto owned = std::make_shared<RequestState>();
         owned->original = ctx->request;
-        owned->service = service;
         owned->id = ctx->param("id");
         request = owned.get();
         ctx->request = HttpRequestPtr(owned, owned->original.get());
@@ -267,12 +394,23 @@ struct SubtitleAdapter::State {
             !TokenValid(request->id))
           return reject_failure(SubtitleFailure::kInvalid);
         if (upload) {
-          auto result = service->BeginUpload(request->id);
-          if (!result) return reject_failure(result.error());
-          request->uploading = true;
-        }
-        if (expected == HTTPExpectation::kContinue)
+          auto* loop = hv::tlsEventLoop();
+          if (!loop || loop->loop() != hevent_loop(ctx->writer->io()))
+            return reject(503, "service_overloaded", "HTTP dispatch unavailable");
+          hio_read_stop(ctx->writer->io());
+          auto self = shared_from_this();
+          if (!dispatch->Submit(ctx, HttpDispatch::Lane::kData,
+              [self, owned, loop, weak = std::weak_ptr<hv::HttpContext>(ctx),
+               expect_continue = expected == HTTPExpectation::kContinue]
+              (std::stop_token stop, HttpDispatch::Clock::time_point) {
+                return self->Upload(owned, loop, weak, expect_continue, stop);
+              }, false)) {
+            ctx->setHeader("Connection", "close");
+            return Error(ctx, 503, "service_overloaded", "HTTP dispatch capacity reached");
+          }
+        } else if (expected == HTTPExpectation::kContinue) {
           ctx->writer->write("HTTP/1.1 100 Continue\r\n\r\n");
+        }
       } else if (phase == HP_BODY) {
         if (!request) return reject_failure(SubtitleFailure::kFailed);
         if (!has_body && size)
@@ -283,25 +421,41 @@ struct SubtitleAdapter::State {
                         "Request body exceeds its limit");
         request->received += size;
         if (upload) {
-          if (!request->uploading)
-            return reject_failure(SubtitleFailure::kBusy);
-          auto result = service->AppendUpload(
-              request->id, std::span<const char>(data, size));
-          if (!result) return reject_failure(result.error());
+          hio_read_stop(ctx->writer->io());
+          bool full = false;
+          {
+            std::lock_guard lock(request->mutex);
+            full = size > 1024 * 1024 - request->buffered;
+            if (!full && !request->cancelled) {
+              request->chunks.emplace_back(data, size);
+              request->buffered += size;
+              request->ready.notify_one();
+            }
+          }
+          if (full) {
+            ctx->setHeader("Connection", "close");
+            request->Abort();
+            return Error(ctx, 503, "service_overloaded", "Upload buffer capacity reached");
+          }
         } else if (json) {
           ctx->request->body.append(data, size);
         }
       } else if (phase == HP_MESSAGE_COMPLETE) {
         if (!request) return reject_failure(SubtitleFailure::kFailed);
         if (upload) {
-          if (!request->uploading)
-            return reject_failure(SubtitleFailure::kBusy);
-          auto result = service->FinishUpload(request->id);
-          if (!result) return reject_failure(result.error());
-          request->uploading = false;
-          return Status(ctx, request->id, 202);
+          std::lock_guard lock(request->mutex);
+          request->done = true;
+          request->ready.notify_one();
+          return HTTP_STATUS_UNFINISHED;
         }
-        return Handle(ctx, route, request->id);
+        auto self = shared_from_this();
+        if (!dispatch->Submit(ctx, HttpDispatch::Lane::kControl,
+            [self, route, id = request->id, body = std::move(ctx->request->body),
+             params = ctx->params()](std::stop_token stop, HttpDispatch::Clock::time_point) mutable {
+              if (stop.stop_requested()) return HttpDispatch::Reply{};
+              return self->Handle(route, id, std::move(body), params);
+            })) return Error(ctx, 503, "service_overloaded", "HTTP dispatch capacity reached");
+        return HTTP_STATUS_UNFINISHED;
       }
       return HTTP_STATUS_UNFINISHED;
     } catch (...) {
@@ -311,76 +465,87 @@ struct SubtitleAdapter::State {
     }
   }
 
-  int Status(const HttpContextPtr& ctx, const std::string& id, int status) {
-    auto result = service->Get(id);
-    return result ? Send(ctx, status, Info(*result).dump())
-                  : Error(ctx, result.error());
+  using Reply = HttpDispatch::Reply;
+  static Reply Failure(SubtitleFailure failure) {
+    return [failure](const HttpContextPtr& ctx) { Error(ctx, failure); };
   }
-  int Handle(const HttpContextPtr& ctx, Route route, const std::string& id) {
+  static Reply Response(int status, std::string body) {
+    return [status, body = std::move(body)](const HttpContextPtr& ctx) mutable {
+      Send(ctx, status, std::move(body));
+    };
+  }
+  Reply Status(const std::string& id, int status) {
+    auto result = service->Get(id);
+    return result ? Response(status, Info(*result).dump())
+                  : Failure(result.error());
+  }
+  Reply Handle(Route route, const std::string& id, std::string body_text,
+               const hv::QueryParams& params) {
     if (route == Route::kCreate || route == Route::kCancel) {
-      const auto body = Json::parse(ctx->body(), nullptr, false);
-      if (body.is_discarded()) return Error(ctx, SubtitleFailure::kInvalid);
+      const auto body = Json::parse(body_text, nullptr, false);
+      if (body.is_discarded()) return Failure(SubtitleFailure::kInvalid);
       if (route == Route::kCreate) {
         SubtitleOptions options;
-        if (!Options(body, options))
-          return Error(ctx, SubtitleFailure::kInvalid);
+        if (!Options(body, options)) return Failure(SubtitleFailure::kInvalid);
         auto result = service->Add(std::move(options));
-        if (!result) return Error(ctx, result.error());
-        ctx->setHeader("Location", std::string(kRoot) + "/" + result->id);
-        return Send(ctx, 201, Info(*result).dump());
+        if (!result) return Failure(result.error());
+        return [location = std::string(kRoot) + "/" + result->id,
+                body = Info(*result).dump()](const HttpContextPtr& ctx) mutable {
+          ctx->setHeader("Location", location);
+          Send(ctx, 201, std::move(body));
+        };
       }
       if (!body.is_object() || !body.empty())
-        return Error(ctx, SubtitleFailure::kInvalid);
+        return Failure(SubtitleFailure::kInvalid);
+      std::lock_guard lock(uploads_mutex);
       auto result = service->Cancel(id);
-      return result ? Status(ctx, id, 202) : Error(ctx, result.error());
+      if (result) AbortUploads(id);
+      return result ? Status(id, 202) : Failure(result.error());
     }
     if (route == Route::kList) {
       size_t limit = 100;
-      const auto limit_it = ctx->params().find("limit");
-      if (limit_it != ctx->params().end()) {
+      const auto limit_it = params.find("limit");
+      if (limit_it != params.end()) {
         const auto& text = limit_it->second;
-        const auto parsed =
-            std::from_chars(text.data(), text.data() + text.size(), limit);
-        if (parsed.ec != std::errc{} ||
-            parsed.ptr != text.data() + text.size() || limit < 1 || limit > 100)
-          return Error(ctx, SubtitleFailure::kInvalid);
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), limit);
+        if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() ||
+            limit < 1 || limit > 100) return Failure(SubtitleFailure::kInvalid);
       }
       std::string cursor;
-      const auto cursor_it = ctx->params().find("cursor");
-      if (cursor_it != ctx->params().end()) {
+      const auto cursor_it = params.find("cursor");
+      if (cursor_it != params.end()) {
         const auto& text = cursor_it->second;
-        if (!text.starts_with("s1.") ||
-            !TokenValid(std::string_view(text).substr(3)))
-          return Error(ctx, SubtitleFailure::kInvalid);
+        if (!text.starts_with("s1.") || !TokenValid(std::string_view(text).substr(3)))
+          return Failure(SubtitleFailure::kInvalid);
         cursor = text.substr(3);
       }
       auto result = service->List(limit, cursor);
-      if (!result) return Error(ctx, result.error());
+      if (!result) return Failure(result.error());
       Json jobs = Json::array();
       for (const auto& job : result->jobs) jobs.push_back(Info(job));
-      return Send(ctx, 200,
-                  Json{{"jobs", std::move(jobs)},
-                       {"next_cursor", result->next_cursor.empty()
-                                           ? Json(nullptr)
-                                           : Json("s1." + result->next_cursor)}}
-                      .dump());
+      return Response(200, Json{{"jobs", std::move(jobs)},
+          {"next_cursor", result->next_cursor.empty() ? Json(nullptr)
+                                                    : Json("s1." + result->next_cursor)}}.dump());
     }
-    if (route == Route::kGet) return Status(ctx, id, 200);
+    if (route == Route::kGet) return Status(id, 200);
     if (route == Route::kDelete) {
+      std::lock_guard lock(uploads_mutex);
       auto result = service->Delete(id);
-      return result ? Send(ctx, 204, {}) : Error(ctx, result.error());
+      if (result) AbortUploads(id);
+      return result ? Response(204, {}) : Failure(result.error());
     }
     const bool webvtt = route == Route::kVtt;
     auto result = service->Download(id, webvtt);
-    if (!result) return Error(ctx, result.error());
-    ctx->response->status_code = HTTP_STATUS_OK;
-    ctx->setHeader("Cache-Control", "no-store");
-    ctx->setHeader("Content-Type", webvtt ? "text/vtt; charset=utf-8"
-                                          : "text/plain; charset=utf-8");
-    ctx->setHeader("Content-Disposition", "attachment; filename=\"" + id +
+    if (!result) return Failure(result.error());
+    return [webvtt, id, body = std::move(*result)](const HttpContextPtr& ctx) mutable {
+      ctx->response->status_code = HTTP_STATUS_OK;
+      ctx->setHeader("Cache-Control", "no-store");
+      ctx->setHeader("Content-Type", webvtt ? "text/vtt; charset=utf-8" : "text/plain; charset=utf-8");
+      ctx->setHeader("Content-Disposition", "attachment; filename=\"" + id +
                                               (webvtt ? ".vtt\"" : ".srt\""));
-    ctx->response->body = std::move(*result);
-    return ctx->send();
+      ctx->response->body = std::move(body);
+      ctx->send();
+    };
   }
 };
 
@@ -403,7 +568,8 @@ VSResult<std::unique_ptr<SubtitleAdapter>> SubtitleAdapter::Create(
   }
 }
 SubtitleAdapter::~SubtitleAdapter() { Stop(); }
-void SubtitleAdapter::Mount(hv::HttpService& service) {
+void SubtitleAdapter::Mount(hv::HttpService& service, HttpDispatch& dispatch) {
+  state_->dispatch = &dispatch;
   const auto handler = [state = state_](State::Route route) {
     return [state, route](const HttpContextPtr& ctx, http_parser_state phase,
                           const char* data, size_t size) {

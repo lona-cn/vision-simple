@@ -224,15 +224,12 @@ def lifetime_matrix(executable, root, image, pixels):
                         'Native request did not reserve input quota')
             connection.sock.shutdown(socket.SHUT_RDWR)
             connection.close()
-            state = budget(server)
-            require(state['in_use_bytes'] == charge and state['active_requests'] == 1,
-                    f'Native disconnect released physical quota early: {state}')
         finally:
             connection.close()
-        # Native disconnect does not cancel this 300-second request. Allow its
-        # actual deadline plus physical-stage drain, while keeping early-error
-        # and cooperative cancellation leak checks at their shorter deadline.
-        drained(server, timeout=300 + 60)
+        # Disconnect now requests cooperative cancellation. It may have already
+        # physically drained when stats is sampled; an instantaneous zero is valid.
+        # The pipeline/service lifetime tests prove refund follows native drain.
+        drained(server, timeout=120)
         infer(server, 'ocr', 'ppocr-v4', [image])
         drained(server)
     print('PASS real runtime exception, cancellation, timeout, MCP/native disconnect and quota recovery')

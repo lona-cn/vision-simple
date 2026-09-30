@@ -374,13 +374,84 @@ def invalid_media_matrix(server, media, temp_root):
         delete(server, job)
 
 
-def disconnect_matrix(server, media, temp_root):
-    for chunked in (False, True):
+def wait_uploaded(server, job, received):
+    deadline = time.monotonic() + 10
+    while True:
+        current = info(server, job)
+        require(current["state"] not in TERMINAL,
+                f"Incomplete upload terminated before body completion: {current}")
+        if current["state"] == "uploading" and current["uploaded_bytes"] == received:
+            require(current["decoded_frames"] == 0 and current["sampled_frames"] == 0,
+                    f"Incomplete video entered OCR processing: {current}")
+            return current
+        require(time.monotonic() < deadline,
+                f"Upload did not physically receive {received} bytes: {current}")
+        time.sleep(0.03)
+
+
+def responsive_during_upload(server):
+    for route, expected_status in (("/livez", "alive"), ("/readyz", "ready"),
+                                   ("/v0/infer/models", None), ("/v0/infer/stats", None)):
+        started = time.monotonic()
+        result = expect(request(server, "GET", route, timeout=2), 200,
+                        f"control/health while upload awaits network: {route}")
+        elapsed = time.monotonic() - started
+        require(elapsed < 2, f"Paused upload blocked {route} for {elapsed:.3f}s")
+        if expected_status:
+            require(result.get("status") == expected_status,
+                    f"Paused upload changed health state: {route}: {result}")
+
+
+def paused_upload_cancel(server, media, temp_root):
+    # This server has one data worker: an unwoken producer makes chat wait
+    # forever even though cancellation, health and discovery still succeed.
+    for chunked, received in ((False, 0), (False, 16384), (True, 16384)):
         job = create(server)
         connection = partial_upload(server, job, media, chunked=chunked)
         try:
-            send_piece(connection, media[:16384], chunked)
-            wait_state(server, job, {"uploading"}, timeout=10)
+            if received:
+                send_piece(connection, media[:received], chunked)
+            wait_uploaded(server, job, received)
+            responsive_during_upload(server)
+            require(any(job in path.name and path.is_file() for path in temp_root.rglob("*")),
+                    "Paused upload never created its physical source")
+            cancel(server, job)
+            cancel(server, job)  # Successful retries must not strand transport work.
+            no_source_files(temp_root, [job])
+            final = info(server, job)
+            require(final["uploaded_bytes"] == received and final["decoded_frames"] == 0,
+                    f"Cancelled incomplete producer was processed: {final}")
+            delete(server, job)  # Deletion may race the upload worker unwind.
+            started = time.monotonic()
+            expect(request(server, "POST", "/v1/chat/completions", b"{}",
+                           "application/json", timeout=2), 400,
+                   "data lane recovery while cancelled producer stays open")
+            require(time.monotonic() - started < 2, "Cancellation retained the data worker")
+            native = expect(request(server, "POST", "/v1/infer/ocr",
+                                    json.dumps({"model": "ppocr-v4", "images": []}).encode(),
+                                    "application/json", timeout=2), 200,
+                            "native data lane recovery after upload cancellation")
+            require(native.get("results") == [], f"Native empty inference changed: {native}")
+            responsive_during_upload(server)
+            # No client EOF/body completion has occurred. Server finalization
+            # must itself close the incomplete PUT, not await the producer.
+            connection.sock.settimeout(2)
+            require(connection.sock.recv(1) == b"", "Cancelled PUT socket remained open")
+        finally:
+            connection.close()
+
+
+def disconnect_matrix(server, media, temp_root):
+    # Header-only requests must acquire upload ownership without waiting for a
+    # body; partial fixed-length/chunked requests must flush before completion.
+    for chunked, received in ((False, 0), (False, 16384), (True, 16384)):
+        job = create(server)
+        connection = partial_upload(server, job, media, chunked=chunked)
+        try:
+            if received:
+                send_piece(connection, media[:received], chunked)
+            wait_uploaded(server, job, received)
+            responsive_during_upload(server)
             # Observe an actual private file before asserting that it disappears.
             deadline = time.monotonic() + 5
             while not any(job in path.name for path in temp_root.rglob("*")):
@@ -389,10 +460,34 @@ def disconnect_matrix(server, media, temp_root):
         finally:
             connection.close()
         final = wait_state(server, job, timeout=15)
-        require(final["state"] == "failed" and final["error_code"] == "upload_interrupted",
-                f"Disconnected upload was not terminally aborted: {final}")
+        require(final["state"] == "failed" and final["error_code"] == "upload_interrupted" and
+                final["uploaded_bytes"] == received,
+                f"Disconnected upload did not drain its received bytes and abort: {final}")
         no_source_files(temp_root, [job])
         delete(server, job)
+
+
+def paused_upload_shutdown(server, media, temp_root, server_stack):
+    process = server.process
+    jobs = []
+    with contextlib.ExitStack() as connections:
+        for received in (0, 16384):
+            job = create(server)
+            jobs.append(job)
+            connection = partial_upload(server, job, media)
+            connections.callback(connection.close)
+            if received:
+                send_piece(connection, media[:received], False)
+            wait_uploaded(server, job, received)
+        # Leave both network producers open while the normal owner performs
+        # stdin shutdown. It must cancel resident uploads rather than await EOF.
+        started = time.monotonic()
+        server_stack.close()
+        elapsed = time.monotonic() - started
+        require(process.returncode == 0, f"Paused upload shutdown exited {process.returncode}")
+        require(elapsed < 15, f"Paused uploads delayed physical shutdown: {elapsed:.3f}s")
+        no_source_files(temp_root, jobs)
+
 
 
 def cancellation_and_isolation(server, media, temp_root):
@@ -487,6 +582,11 @@ def run(args):
         media = make_media(ffmpeg, directory, font)
         temp_root = directory / "server-temp"
         temp_root.mkdir()
+        with child_temp_environment(temp_root):
+            with Server(executable, root, config, options={
+                    "http_data_workers": "1", "http_data_queue_capacity": "1"}) as single_data:
+                single_data.wait_ready()
+                paused_upload_cancel(single_data, media["semantic.avi"], temp_root)
         with contextlib.ExitStack() as stack:
             with child_temp_environment(temp_root):
                 server = stack.enter_context(Server(executable, root, config))
@@ -501,8 +601,10 @@ def run(args):
                 require(all(detection["confidence"] >= 0.9 for detection in detections),
                         f"PP-OCR fixture confidence is insufficient: {detections}")
             validation_matrix(server)
-            capacity_and_pagination(server)
             disconnect_matrix(server, media["semantic.avi"], temp_root)
+            # Reuse the existing public capacity-bound scenario after physical
+            # abort/delete: every retained slot must be available again.
+            capacity_and_pagination(server)
             invalid_media_matrix(server, media["semantic.avi"], temp_root)
             for chunked in (False, True):
                 job = create(server)
@@ -525,6 +627,7 @@ def run(args):
                 expect(request(server, "GET", f"{ROOT}/{job}/subtitles.srt"), 409, "unsupported result")
             no_source_files(temp_root, [job])
             delete(server, job)
+            paused_upload_shutdown(server, media["semantic.avi"], temp_root, stack)
         require(not list(temp_root.iterdir()),
                 "Owned server left its private temporary directory after shutdown")
 

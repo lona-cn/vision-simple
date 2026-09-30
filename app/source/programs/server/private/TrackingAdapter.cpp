@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "HTTPExpectation.h"
+#include "HttpDispatch.h"
 #include "TrackingService.h"
 
 namespace vision_simple {
@@ -75,29 +76,39 @@ int Error(const HttpContextPtr& ctx, int status, const char* code,
           .dump(),
       finish);
 }
-int Error(const HttpContextPtr& ctx, TrackingFailure failure) {
+HttpDispatch::Reply ReplySend(int status, std::string body,
+                              std::string location = {}) {
+  return [status, body = std::move(body), location = std::move(location)](
+             const HttpContextPtr& ctx) mutable {
+    if (!location.empty()) ctx->setHeader("Location", location.c_str());
+    if (status == 503) ctx->setHeader("Retry-After", "1");
+    Send(ctx, status, std::move(body));
+  };
+}
+HttpDispatch::Reply ReplyError(int status, const char* code, const char* message) {
+  return ReplySend(status,
+                   Json{{"error", {{"code", code}, {"message", message},
+                                   {"image_index", nullptr}}}}.dump());
+}
+HttpDispatch::Reply ReplyError(TrackingFailure failure) {
   switch (failure) {
     case TrackingFailure::kInvalid:
-      return Error(ctx, 400, "invalid_request", "Invalid tracking request");
+      return ReplyError(400, "invalid_request", "Invalid tracking request");
     case TrackingFailure::kInvalidImage:
-      return Error(ctx, 400, "invalid_image", "Invalid encoded image");
+      return ReplyError(400, "invalid_image", "Invalid encoded image");
     case TrackingFailure::kMissing:
-      return Error(ctx, 404, "tracking_session_not_found",
-                   "Tracking session not found");
+      return ReplyError(404, "tracking_session_not_found", "Tracking session not found");
     case TrackingFailure::kBusy:
-      return Error(ctx, 409, "tracking_session_busy",
-                   "Tracking session is busy");
+      return ReplyError(409, "tracking_session_busy", "Tracking session is busy");
     case TrackingFailure::kOrder:
-      return Error(ctx, 409, "frame_out_of_order",
-                   "Frame index and timestamp must increase strictly");
+      return ReplyError(409, "frame_out_of_order",
+                        "Frame index and timestamp must increase strictly");
     case TrackingFailure::kCapacity:
-      return Error(ctx, 503, "tracking_capacity",
-                   "Tracking session capacity reached");
+      return ReplyError(503, "tracking_capacity", "Tracking session capacity reached");
     case TrackingFailure::kClosed:
-      return Error(ctx, 503, "service_unavailable",
-                   "Tracking service is stopping");
+      return ReplyError(503, "service_unavailable", "Tracking service is stopping");
     default:
-      return Error(ctx, 500, "tracking_failed", "Tracking failed");
+      return ReplyError(500, "tracking_failed", "Tracking failed");
   }
 }
 const char* Algorithm(TrackerAlgorithm algorithm) {
@@ -236,8 +247,9 @@ bool ParseFrame(const Json& body, Frame& frame) {
   return true;
 }
 }  // namespace
-struct TrackingAdapter::State {
+struct TrackingAdapter::State : std::enable_shared_from_this<State> {
   TrackingService service;
+  HttpDispatch* dispatch = nullptr;
   enum class Route { kCreate, kList, kGet, kStep, kReset, kDelete };
   int Receive(const HttpContextPtr& ctx, Route route, http_parser_state phase,
               const char* data, size_t size) {
@@ -290,116 +302,117 @@ struct TrackingAdapter::State {
           return reject(413, "Tracking body exceeds 4 MiB");
         if (post) ctx->request->body.append(data, size);
       } else if (phase == HP_MESSAGE_COMPLETE) {
-        return Handle(ctx, route);
+        const auto lane = route == Route::kStep ? HttpDispatch::Lane::kData
+                                                : HttpDispatch::Lane::kControl;
+        if (!dispatch->Submit(
+                ctx, lane,
+                [state = shared_from_this(), route,
+                 body = std::move(ctx->request->body), id = ctx->param("id"),
+                 limit = ctx->param("limit"), cursor = ctx->param("cursor")](
+                    std::stop_token stop, HttpDispatch::Clock::time_point) mutable {
+                  return state->Handle(route, std::move(body), std::move(id),
+                                       std::move(limit), std::move(cursor), stop);
+                }))
+          return Error(ctx, 503, "service_overloaded", "HTTP dispatch capacity reached");
+        return HTTP_STATUS_UNFINISHED;
       }
       return HTTP_STATUS_UNFINISHED;
     } catch (...) {
       ctx->setHeader("Connection", "close");
-      return Error(ctx, TrackingFailure::kFailed);
+      return Error(ctx, 500, "tracking_failed", "Tracking failed");
     }
   }
-  int Handle(const HttpContextPtr& ctx, Route route) {
+  HttpDispatch::Reply Handle(Route route, std::string request_body,
+                             std::string id, std::string limit_text,
+                             std::string cursor, std::stop_token stop) {
     try {
-      if (!ctx->header("Origin").empty())
-        return Error(ctx, 403, "invalid_request",
-                     "Browser origins are not accepted");
+      if (stop.stop_requested()) return ReplyError(TrackingFailure::kClosed);
       const bool post = route == Route::kCreate || route == Route::kStep ||
                         route == Route::kReset;
       Json body;
       if (post) {
-        if (ctx->header("Content-Type") != "application/json" ||
-            ctx->body().size() > kBodyLimit)
-          return Error(ctx, TrackingFailure::kInvalid);
-        body = Json::parse(ctx->body(), nullptr, false);
-        if (body.is_discarded()) return Error(ctx, TrackingFailure::kInvalid);
+        body = Json::parse(request_body, nullptr, false);
+        if (body.is_discarded()) return ReplyError(TrackingFailure::kInvalid);
       }
-      const auto id = ctx->param("id");
       if (route == Route::kCreate) {
         TrackerOptions options;
         if (!Options(body, options))
-          return Error(ctx, TrackingFailure::kInvalid);
+          return ReplyError(TrackingFailure::kInvalid);
         auto new_id = Token();
         auto response = Json{
             {"id", new_id},
             {"algorithm", Algorithm(options.algorithm)},
-            {"status",
-             Status({})}}.dump();
+            {"status", Status({})}}.dump();
         auto location = std::string(kRoot) + "/" + new_id;
         auto result = service.Add(new_id, options);
-        if (!result) return Error(ctx, result.error());
-        ctx->setHeader("Location", location.c_str());
-        return Send(ctx, 201, std::move(response));
+        if (!result) return ReplyError(result.error());
+        return ReplySend(201, std::move(response), std::move(location));
       }
       if (route == Route::kList) {
         size_t limit = 100;
-        const auto text = ctx->param("limit");
-        if (!text.empty()) {
-          auto parsed =
-              std::from_chars(text.data(), text.data() + text.size(), limit);
+        if (!limit_text.empty()) {
+          auto parsed = std::from_chars(
+              limit_text.data(), limit_text.data() + limit_text.size(), limit);
           if (parsed.ec != std::errc{} ||
-              parsed.ptr != text.data() + text.size() || !limit || limit > 100)
-            return Error(ctx, TrackingFailure::kInvalid);
+              parsed.ptr != limit_text.data() + limit_text.size() || !limit || limit > 100)
+            return ReplyError(TrackingFailure::kInvalid);
         }
-        auto cursor = ctx->param("cursor");
         if (!cursor.empty()) {
           if (!cursor.starts_with("t1.") ||
               !TokenValid(std::string_view(cursor).substr(3)))
-            return Error(ctx, TrackingFailure::kInvalid);
+            return ReplyError(TrackingFailure::kInvalid);
           cursor.erase(0, 3);
         }
         auto page = service.List(limit, cursor);
-        if (!page) return Error(ctx, page.error());
+        if (!page) return ReplyError(page.error());
         Json response{{"sessions", page->ids},
                       {"next_cursor", page->next_cursor.empty()
                                           ? Json(nullptr)
                                           : Json("t1." + page->next_cursor)}};
-        return Send(ctx, 200, response.dump());
+        return ReplySend(200, response.dump());
       }
       if (route == Route::kGet) {
         auto info = service.Get(id);
-        if (!info) return Error(ctx, info.error());
-        return Send(ctx, 200,
-                    Json{{"id", info->id},
-                         {"algorithm", Algorithm(info->algorithm)},
-                         {"status", Status(info->status)}}
-                        .dump());
+        if (!info) return ReplyError(info.error());
+        return ReplySend(200,
+                         Json{{"id", info->id},
+                              {"algorithm", Algorithm(info->algorithm)},
+                              {"status", Status(info->status)}}.dump());
       }
       if (route == Route::kReset) {
         if (!body.is_object() || !body.empty())
-          return Error(ctx, TrackingFailure::kInvalid);
+          return ReplyError(TrackingFailure::kInvalid);
         std::string response = "{\"reset\":true}";
         auto result = service.Reset(id);
-        return result ? Send(ctx, 200, std::move(response))
-                      : Error(ctx, result.error());
+        return result ? ReplySend(200, std::move(response))
+                      : ReplyError(result.error());
       }
       if (route == Route::kDelete) {
         auto result = service.Delete(id);
-        return result ? Send(ctx, 204, {}) : Error(ctx, result.error());
+        return result ? ReplySend(204, {}) : ReplyError(result.error());
       }
       Frame frame;
       if (!ParseFrame(body, frame))
-        return Error(ctx, TrackingFailure::kInvalid);
+        return ReplyError(TrackingFailure::kInvalid);
       std::optional<std::string_view> image;
       if (body.contains("image"))
         image = body["image"].get_ref<const std::string&>();
       auto result = service.Step(id, frame.index, frame.timestamp,
                                  frame.detections, image);
-      if (!result) return Error(ctx, result.error());
+      if (!result) return ReplyError(result.error());
       Json tracks = Json::array();
       for (const auto& track : result->tracks)
         tracks.push_back({{"track_id", track.track_id},
                           {"class_id", track.class_id},
                           {"confidence", track.confidence},
-                          {"bbox",
-                           {track.bbox.x, track.bbox.y, track.bbox.width,
-                            track.bbox.height}}});
-      return Send(ctx, 200,
-                  Json{{"frame_index", result->frame_index},
-                       {"timestamp", result->timestamp},
-                       {"tracks", std::move(tracks)}}
-                      .dump());
+                          {"bbox", {track.bbox.x, track.bbox.y, track.bbox.width,
+                                    track.bbox.height}}});
+      return ReplySend(200,
+                       Json{{"frame_index", result->frame_index},
+                            {"timestamp", result->timestamp},
+                            {"tracks", std::move(tracks)}}.dump());
     } catch (...) {
-      return Error(ctx, TrackingFailure::kFailed);
+      return ReplyError(TrackingFailure::kFailed);
     }
   }
 };
@@ -415,8 +428,10 @@ VSResult<std::unique_ptr<TrackingAdapter>> TrackingAdapter::Create() noexcept {
   }
 }
 TrackingAdapter::~TrackingAdapter() { Stop(); }
-void TrackingAdapter::Mount(hv::HttpService& service) {
+void TrackingAdapter::Mount(hv::HttpService& service,
+                            HttpDispatch& dispatch) {
   const auto state = state_;
+  state->dispatch = &dispatch;
   service.POST("/v1/tracking/sessions", [state](const HttpContextPtr& ctx,
                                                 http_parser_state phase,
                                                 const char* data, size_t size) {

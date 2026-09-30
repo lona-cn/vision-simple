@@ -101,7 +101,26 @@ Clients relying on HTTP 200 with textual errors must migrate to HTTP status and 
 - String options in `config/server.yaml`: `infer_idle_timeout_ms: "300000"` and `infer_sweep_interval_ms: "1000"`. Idle time starts at request completion and uses a monotonic clock. Timeout `"0"` disables eviction; sweep interval must be positive.
 - Active leases cover decoding, queued inference, postprocessing, and response serialization/send calls. Neither manual nor timer eviction removes active instances. Synchronous C++ `Run` calls serialize per model; HTTP pipeline tasks own workspaces and gate ORT execution per session.
 - Unloading releases sessions and model workspaces, but shared ORT arenas/providers may retain allocations: RSS/VRAM need not fall immediately. YOLO `class_name` results still reference model metadata; C++ callers must keep the model alive longer than these views.
-- Management endpoints retain the existing unauthenticated/CORS deployment model. Use a trusted network or authenticated proxy. If all four HTTP IO workers are occupied by inference, management traffic waits; there is no reserved management channel.
+- Management endpoints retain the existing unauthenticated/CORS deployment model. Use a trusted network or authenticated proxy. Blocking management uses a separate bounded control lane; health bypasses both lanes.
+
+### HTTP scheduling and health
+
+All endpoints share one listener and four IO loops. Blocking inference, model/cache operations, tracking and subtitle file/control work run outside IO loops. String options are `http_data_workers: "4"`, `http_data_queue_capacity: "4"`, `http_control_workers: "1"`, and `http_control_queue_capacity: "4"`; workers accept 1–32 and queue capacities 1–128. Data and control lanes are independently bounded. Each lane bounds accepted handler residents, including completed work awaiting its IO callback, by workers + queue capacity. Management can itself overload; it is not an unlimited priority channel.
+
+Subtitle video uploads use the data lane so a paused upload cannot monopolize the default single control worker; subtitle metadata management stays on the control lane. Cancelling a paused upload wakes its worker; after buffers and files physically drain, it releases the transport slot and closes the incomplete PUT without requiring client disconnect.
+
+Streaming video uploads may hold their transport handler while the body arrives; this does not acquire inference ImageCredit. Complete-body admission below describes inference/JSON requests.
+
+Sequential HTTP keepalive remains supported. Sending a second pipelined request on a connection with an active asynchronous handler closes that connection safely; use separate connections for concurrent work.
+
+Transport admission happens after the complete body arrives, before business JSON parsing. A full/stopping lane returns the endpoint's `503 service_overloaded` envelope with `Retry-After: 1`. Accepted inference retains model/configuration and empty/error precedence. Transport slots bound handler lifetimes, **not image pixels**: queued handlers do not acquire the shared service ImageCredit or decoded-input bytes. The service alone admits v0/v1/OpenAI/MCP image work using `infer_pipeline_max_batches` and the decoded-byte limits. Empty valid-model requests bypass image credit, but still need transport admission.
+
+`GET /livez` returns `200 {"status":"alive"}`. `GET /readyz` returns `200 {"status":"ready"}` while accepting work and `503 {"status":"not_ready"}` during draining. Both bypass model loading, cache/inference locks and dispatch queues. Temporary queue saturation does not make readiness false. Neither endpoint guarantees model validity, loaded weights or warmup. Docker probes `/livez` with a two-second deadline to avoid restarting a live server merely because inference is busy.
+
+HTTP inference deadlines start when the complete body is submitted; queue waiting, model loading and decoding count. Disconnect requests cooperative cancellation; already-running native calls and owned inputs must physically drain before image credit is refunded. Shutdown first marks not-ready/rejects admission, cancels queued/active handlers, stops adapters, drains workers and IO completions, then stops the listener.
+
+Run `python scripts/test_http_dispatch.py --server <executable> --project-root .` with real PP-OCR fixtures. It prints raw idle/load RTT samples and P50/P95/P99, stages four observed image admissions, and checks transport overload, queue timeout, control traffic, shared MCP budget, slow clients and shutdown. No RSS or machine-specific millisecond target is asserted; health uses the consumer's Docker two-second deadline.
+
 
 ### Bounded inference pipeline
 
@@ -114,12 +133,12 @@ This format list describes header-preflight coverage, not guaranteed acceptance 
 
 The estimate is `width * height * 3` for BGR input, not a bound on RSS, compressed request bytes, codec scratch space, model arenas, workspaces or response masks. The single-image limit or first cumulative batch overflow returns `400 image_limit_exceeded` with that input index, before any image decode; invalid base64/header returns `400 invalid_image` at the first invalid input. Request credit spans preflight through physical inference completion and is capped by `infer_pipeline_max_batches`, not resident-task capacity. Exhausted credit rejects before base64/codec work; exhausted global bytes reject after preflight but before decoding, both with `503 service_overloaded`.
 
-Stats include service-wide `image_budget`: `in_use_bytes`, `peak_bytes`, `active_requests`, `decode_calls` (real `imdecode` starts only), and `rejected_requests` (budget admission refusals). These counters do not reset on model unload. Inputs and drained tasks are destroyed before quota refunds; completed responses hold model leases, not input pixels or image quota. Errors, timeout, cancellation and shutdown refund only after physical work drains. Native HTTP disconnect does not interrupt ORT or refund early; MCP cancellation/disconnect is cooperative and likewise waits for native work.
-Valid-model empty batches keep the existing empty-result semantics and control checks: they consume no image credit, bytes or decode calls, even when other requests saturate the budget.
+Stats include service-wide `image_budget`: `in_use_bytes`, `peak_bytes`, `active_requests`, `decode_calls` (real `imdecode` starts only), and `rejected_requests` (budget admission refusals). Counters do not reset on model unload. Inputs and drained tasks are destroyed before refunds; completed responses hold model leases, not pixels/quota. Native HTTP and MCP disconnect request cooperative cancellation, but cannot interrupt ORT or refund before physical work drains.
+The shared service and native v0/v1 inference support valid-model empty batches with empty results and control checks: no image credit, bytes or decode calls, even under image-budget saturation; transport admission still applies. MCP tools retain images minItems=1 and reject empty arrays as invalid_request. OpenAI chat also requires actual images rather than exposing native empty-batch semantics.
 
-An optional integer request field `timeout_ms` (1–300000) overrides the deadline. Time starts on handler entry and includes loading/decoding; it controls inference stages, not serialization/network delivery or hard preemption of native calls. Expiry returns `504 request_timeout`; exhausted admission returns `503 service_overloaded` with `Retry-After: 1`. Control errors have null `image_index`. Cancellation takes precedence over timeout, then close. With request credit available, ordered image validation precedes global-byte admission; with no credit, overload takes precedence over invalid images.
+An optional integer `timeout_ms` (1–300000) overrides the deadline. HTTP time starts at complete-body dispatch submission and includes queue wait, loading and decoding, not serialization/network delivery or hard native preemption. Expiry returns `504 request_timeout`; admission exhaustion returns `503 service_overloaded` with `Retry-After: 1`. Control errors have null `image_index`. Cancellation precedes timeout, then close. With service credit available, ordered image validation precedes global-byte admission; with no credit, service overload precedes invalid images.
 
-C++ callers create `InferPipeline`, then call `Run(model, images, confidence, PipelineControl{stop_token, deadline})`. `Close()` rejects new work and cancels unfinished batches; join callers before destruction. Cancellation takes precedence over timeout, then close, then ordinary inference failures. `Run` drains executing native stages and task destruction before returning, so cancellation never releases a model still in use. Models and input pixels must remain alive throughout the call; external aliases must not modify pixels. Ordinary v0/v1 HTTP disconnect does not cancel work; an MCP session disconnect does request cooperative cancellation.
+C++ callers create `InferPipeline`, then call `Run(model, images, confidence, PipelineControl{stop_token, deadline})`. `Close()` rejects/cancels unfinished work; join callers before destruction. Cancellation precedes timeout, close and ordinary inference errors. `Run` drains native stages and input destruction before returning. Models and pixels must remain valid and unmodified throughout; HTTP/MCP disconnect requests cooperative cancellation, never hard native preemption.
 
 Synchronous `InferYOLO/InferOCR::Run` signatures remain unchanged and share stage algorithms/session execution gates with the pipeline. Tasks own independent workspaces; each model retains at most two idle pipeline workspaces. Unsupported custom backends return an explicit error rather than wrapping synchronous inference as a fake pipeline.
 
@@ -529,6 +548,14 @@ xmake build server
 
 Run these commands from the repository root. If you just launched the server as above, open another terminal at the repository root. Configure a CPU build first and ensure Git LFS model resources have been downloaded.
 
+**HTTP dispatch verification (Windows x64, CPU, real PP-OCR):** the final complete driver passed in 113.23 s, covering bounded overload/queue deadlines, shared native/MCP image budget, empty-input contract differences, slow/disconnected clients, sequential keepalive, split/combined-write pipelining rejection and active+queued shutdown. Every loaded health sample was bracketed by four active requests reserving exactly 73,744,128 decoded-input bytes; the final 18 samples gave P50 14.4028 ms and P95/P99 15.4099 ms. Before offloading, five of six loaded probes timed out at the two-second consumer deadline. Generic HTTP regression with explicit workload quotas also passed (278.17 s), as did the enhanced paused-upload/cancellation subtitle regression (38.67 s). These are observed samples, not portable latency or RSS guarantees.
+
+The native CPU run used the actually selected ORT SDK 1.20.0. Its matching DLL was staged beside the executable as a smoke prerequisite: file version `1.20.20241030.2.c4fb724`, source/destination SHA256 `09BFD8AE11E8E01FA5CD310B01FDB9384FD18EE61E7FAFF7E2F55D248B8C8E9B`. No build packaging rule or API version was changed for this staging. This evidence does not certify DirectML/CUDA/TensorRT/RKNPU execution, all platforms, bounded RSS or an online production Docker build.
+
+**Linux/Docker CPU verification (linux/amd64 under WSL Debian):** the complete Linux builder dispatch driver passed in 114.42 s. Its four 16-image OCR requests held exactly 73,744,128 decoded-input bytes throughout all 18 loaded health samples (P50 0.313115 ms, P95/P99/max 2.63656 ms). A separate real PID1 runtime-container smoke passed readiness, model discovery and nonempty OCR warmup, then sustained four 32-image OCR requests at exactly 147,488,256 bytes. Its 18 health samples measured P50 0.743417 ms and P95/P99/max 1.083073 ms; models/v1 models/stats took 2.087264/1.657175/1.268436 ms. A fresh Docker HEALTHCHECK tick remained healthy with zero failures while all four requests were active. With four active and four waiting handlers, malformed excess admission returned 503 before business parsing; SIGTERM drained in 2.045 s, exited 15 without OOM/forced kill, and the owned container was removed.
+
+This used a temporary cache-dependency/current-source recipe, GCC 16.2.0, Xmake 3.1.1 and official Linux ORT 1.22.0 (downloaded archive SHA256 `8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3`). Validation prerequisites included fixture transport, builder socket-inspection tools and explicit SDK shared-library staging; actual ELF dependencies resolved, and the pre-copy production output already resolved `libonnxruntime.so.1`. Runtime image digest began `ff27e5befdf60`; server SHA256 began `9401fbbef6de`. This verifies that local CPU amd64 recipe/runtime, not every provider/platform or the unchanged production Dockerfile's online build path.
+
 ```sh
 # Build CPU regression targets individually
 xmake build server
@@ -563,6 +590,7 @@ The Python 3 standard-library HTTP driver creates isolated configuration, ports 
 
 ```powershell
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_http_dispatch.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_image_budget.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_yolo_tasks_http.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
@@ -575,6 +603,7 @@ For Linux or a custom build directory, discover the actual target:
 ```sh
 server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
 python3 scripts/test_http_regression.py --server "$server" --project-root .
+python3 scripts/test_http_dispatch.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
 python3 scripts/test_image_budget.py --server "$server" --project-root .
 python3 scripts/test_yolo_tasks_http.py --server "$server" --project-root .

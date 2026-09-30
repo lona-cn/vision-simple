@@ -50,8 +50,12 @@ def wait_ready(name, timeout):
         binding = ports[0]
         if binding["HostIp"] != "127.0.0.1":
             raise RuntimeError(f"HTTP port is not loopback-only: {binding}")
-        url = f"http://127.0.0.1:{binding['HostPort']}/v0/infer/models"
+        base = f"http://127.0.0.1:{binding['HostPort']}"
         try:
+            with opener.open(base + "/readyz", timeout=2) as response:
+                if response.status != 200 or json.load(response) != {"status": "ready"}:
+                    raise RuntimeError("Server is not accepting requests")
+            url = base + "/v0/infer/models"
             with opener.open(url, timeout=min(3, max(0.1, deadline - time.monotonic()))) as response:
                 if response.status != 200:
                     raise RuntimeError(f"Unexpected HTTP status: {response.status}")
@@ -70,7 +74,7 @@ def wait_ready(name, timeout):
             if health is None:
                 raise RuntimeError("Image has no Docker HEALTHCHECK")
             if health == "healthy":
-                print(f"HTTP model discovery and Docker health passed: {json.dumps(payload)}")
+                print(f"HTTP readiness, model discovery and Docker health passed: {json.dumps(payload)}")
                 return
             last_error = f"HTTP passed, Docker health is {health}"
         except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
@@ -84,7 +88,7 @@ def stop_cleanly(name):
         raise RuntimeError("Container exited unexpectedly before normal shutdown")
     docker("stop", "--time", "15", name, timeout=25)
     state = inspect(name)["State"]
-    # main.cpp handles SIGTERM, cleans up the server, and calls std::exit(SIGTERM).
+    # main.cpp drains the server outside the signal handler, then returns SIGTERM.
     if state["Running"] or state["OOMKilled"] or state["ExitCode"] not in (0, 15):
         raise RuntimeError(f"Container did not shut down cleanly: {state}")
 

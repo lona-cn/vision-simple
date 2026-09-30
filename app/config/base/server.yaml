@@ -2,6 +2,10 @@ host: "0.0.0.0"
 port: 11451
 options:
   static_path: "assets/static"
+  http_data_workers: "4"
+  http_data_queue_capacity: "4"
+  http_control_workers: "1"
+  http_control_queue_capacity: "4"
   infer_framework: "kONNXRUNTIME"
   infer_ep: "kCPU"
   infer_device: "0"

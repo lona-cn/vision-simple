@@ -63,5 +63,5 @@ COPY --from=builder /src/app/assets/test /app/assets
 EXPOSE 11451
 WORKDIR /app
 HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=6 \
-    CMD curl --fail --silent --show-error --noproxy '*' --max-time 2 http://127.0.0.1:11451/v0/infer/models > /dev/null || exit 1
+    CMD curl --fail --silent --show-error --noproxy '*' --max-time 2 http://127.0.0.1:11451/livez > /dev/null || exit 1
 ENTRYPOINT ["./vision_simple-server"]

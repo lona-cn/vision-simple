@@ -103,7 +103,24 @@ docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 - `config/server.yaml` 的字符串 options：`infer_idle_timeout_ms: "300000"`，`infer_sweep_interval_ms: "1000"`。空闲时间从最后一次请求结束计算，使用单调时钟；timeout 为 `"0"` 关闭自动卸载，扫描间隔必须为正整数。
 - 活动租约涵盖解码、等待推理、后处理及响应序列化/发送调用；手动和定时卸载均不删除活动实例。同步 C++ `Run` 每模型串行；HTTP 流水线使用独立任务工作区，同一会话的 ORT 执行受锁保护。
 - 卸载释放 session 和模型工作区，但共享 ORT arena / provider 可能保留内存，不保证 RSS 或显存立即下降。YOLO 结果的 `class_name` 仍引用模型元数据，C++ 调用者须让模型活得比结果视图更久。
-- 生命周期接口沿用现有无认证/CORS 策略，仅应部署在可信网络或受鉴权代理保护的环境。4 个 HTTP IO worker 全被推理占用时，管理请求会等待；目前没有保留独立管理通道。
+- 生命周期接口沿用无认证/CORS 策略，仅部署在可信网络或受鉴权代理保护的环境。阻塞管理工作使用独立有界 control lane；health 绕过两条 lane。
+
+### HTTP 调度与健康检查
+
+所有端点共用同一 listener 和四个 IO loop；阻塞推理、模型/cache 操作、tracking 与字幕磁盘/管理工作移出 IO loop。字符串 options 为 `http_data_workers: "4"`、`http_data_queue_capacity: "4"`、`http_control_workers: "1"`、`http_control_queue_capacity: "4"`；worker 范围 1–32，queue 范围 1–128。data/control 两条 lane 分别有界，每条 lane 的已接纳 handler 驻留总数（包括等待 IO completion callback 的已完成工作）不超过 workers + queue。管理请求也可能 overload，不是无限优先通道。
+
+字幕 video 上传使用 data lane，避免暂停上传霸占默认唯一 control worker；字幕 metadata 管理仍使用 control lane。streaming 上传可在完整正文前持有 transport handler，但不取得推理 image credit。取消暂停上传会唤醒上传 worker；缓冲和文件实际排空后释放 transport 槽并关闭未完成的 PUT，无需客户端主动断连。
+
+支持顺序 HTTP keepalive；异步 handler 活动期间，同连接发送第二个 pipeline 请求将安全关闭连接。并发请求应使用不同连接。
+
+完整正文接收后、业务 JSON 解析前进行 transport 接纳；lane 满或停止时按该端点错误格式返回 `503 service_overloaded` 与 `Retry-After: 1`。接纳后的推理保持模型/配置及空批次/错误优先级。transport slot 限制 handler 生命周期，**不是图像像素额度**；排队不取得共享服务 ImageCredit 或解码字节。仅共享服务按 `infer_pipeline_max_batches` 与解码预算接纳 v0/v1/OpenAI/MCP 图像工作。有效模型空批次不占 image credit，但仍须通过 transport 接纳。
+
+`GET /livez` 返回 `200 {"status":"alive"}`；`GET /readyz` 在可接纳且未停止时返回 `200 {"status":"ready"}`，draining 返回 `503 {"status":"not_ready"}`。两者绕过模型加载、cache/inference 锁和 dispatch 队列。暂时 queue 满不改变 ready；健康端点不保证模型有效、权重已加载或已 warmup。Docker 用两秒期限探测 `/livez`，避免仅因推理繁忙而重启存活服务。
+
+HTTP 推理 deadline 从完整正文提交调度时开始，包含 queue 等待、模型加载和解码。断连请求合作式取消，已执行原生调用与输入仍须物理 drain 后才返还图像额度。关闭先置 not-ready 并拒绝接纳，取消排队/活动 handler，停止 adapters，等待 workers 与 IO completions drain，最后停止 listener。
+
+真实 PP-OCR 回归：`python scripts/test_http_dispatch.py --server <executable> --project-root .`。输出 idle/load 原始 RTT 与 P50/P95/P99，逐次观察四个图像接纳，再检查 transport overload、排队 timeout、control 请求、MCP 共享预算、慢客户端及关闭。不设置 RSS 或机器相关毫秒阈值；健康期限采用实际 Docker 消费者的两秒上限。
+
 
 ### 有界推理流水线
 
@@ -116,12 +133,12 @@ HTTP v0 在全部图片解码成功后，使用前处理、ORT、后处理三个
 
 字节估算仅为 BGR 输入的 `width * height * 3`，不是 RSS 上限，不含压缩正文、codec 临时内存、模型 arena、工作区及响应 mask。单图超限或第一个累计批次超限返回 `400 image_limit_exceeded` 和该图索引，整批尚未开始任何解码；base64/header 无效按顺序返回首个 `400 invalid_image`。请求 credit 从预检覆盖至物理推理结束，上限是 `infer_pipeline_max_batches`，不是驻留任务 capacity。credit 满时先返回 `503 service_overloaded`，不做 base64/codec 工作；全局字节满时在预检之后、解码之前返回同一错误。
 
-stats 新增服务级 `image_budget`：`in_use_bytes`、`peak_bytes`、`active_requests`、`decode_calls`（只计真实 `imdecode` 开始）、`rejected_requests`（预算接纳拒绝），模型卸载不会重置。先等待任务 drain 并析构输入，才返还额度；完成响应仅持模型租约，不持输入像素或图像额度。异常、超时、取消、shutdown 均不能提前返还物理占用；普通 HTTP 断连不打断 ORT，MCP 取消/断连是合作式且同样等待原生工作结束。
-有效模型的空批次保留原有空结果和控制检查语义，不消耗图像 credit、字节或 decode_calls；其他请求已占满预算也不改变此行为。
+stats 新增服务级 `image_budget`：`in_use_bytes`、`peak_bytes`、`active_requests`、`decode_calls`（只计真实 imdecode 开始）、`rejected_requests`（预算接纳拒绝），模型卸载不重置。任务 drain 并析构输入后才返还额度；完成响应仅持模型租约，不持像素或额度。普通 HTTP 与 MCP 断连请求合作式取消，但不能打断 ORT 或提前返还物理占用。
+共享服务与原生 v0/v1 推理支持有效模型空批次，保留空结果及控制检查，不消耗图像 credit、字节或 decode_calls；其他请求占满图像预算也不改变此行为，但仍须通过 transport 接纳。MCP 工具既有 images minItems=1，空数组返回 invalid_request；OpenAI chat 同样要求实际图像，不提供原生空批次语义。
 
-请求可附加整数 `timeout_ms`（1–300000）覆盖默认截止时间。计时从 handler 开始，包含模型加载和解码；截止时间控制推理阶段，不对序列化、网络传输或原生调用作硬实时保证。超时返回 `504 request_timeout`，容量耗尽返回 `503 service_overloaded` 和 `Retry-After: 1`；控制错误的 `image_index` 为 null。取消优先于超时，再优先于关闭；有 credit 时顺序图像校验优先于全局字节接纳，无 credit 时 overload 优先于 invalid_image。
+请求可附加整数 `timeout_ms`（1–300000）覆盖默认 deadline；HTTP 从完整正文提交调度时计时，包含 queue 等待、模型加载和解码，不对序列化、网络或原生调用作硬实时保证。超时为 `504 request_timeout`，接纳耗尽为 `503 service_overloaded` 与 `Retry-After: 1`，控制错误 image_index 为 null。取消优先于超时，再优先于关闭；有服务 credit 时图像校验优先于全局字节接纳，无 credit 时服务 overload 优先于无效图像。
 
-C++ 调用者可使用 `InferPipeline::Create`，再调用 `Run(model, images, confidence, PipelineControl{stop_token, deadline})`；`Close()` 拒绝新任务并取消未完成批次，销毁前必须等待所有调用者退出。取消优先于超时，超时优先于关闭及普通推理错误。取消仅阻止后续阶段，`Run` 等待已经执行的原生阶段及任务析构完成后才返回，避免活动模型被释放。输入像素及模型须在整个调用期间保持有效，外部不得修改像素。普通 v0/v1 HTTP 断连不自动取消正在运行的任务；MCP 会话断连会发出合作式取消。
+C++ 调用者可使用 `InferPipeline::Create`，再调用 `Run(model, images, confidence, PipelineControl{stop_token, deadline})`；`Close()` 拒绝新任务并取消未完成批次，销毁前等待所有调用者退出。取消优先于超时、关闭和普通错误；Run 等待已执行原生阶段与输入析构完成后才返回。输入像素及模型须在整个调用期间有效，外部不得修改像素。普通 HTTP 与 MCP 断连均请求合作式取消，不能硬打断原生调用。
 
 同步 `InferYOLO/InferOCR::Run` 签名不变，与流水线共享阶段算法和会话执行锁；流水线任务拥有独立工作区，每个模型最多缓存 2 个空闲流水线工作区。未加入流水线适配的自定义模型返回明确错误，不以同步调用伪装分阶段执行。
 
@@ -533,6 +550,14 @@ xmake build server
 
 以下命令均从仓库根目录运行；如果刚按上文启动了服务，请另开终端并回到仓库根目录。先使用 CPU 配置构建，确保 Git LFS 模型资源已经下载。
 
+**HTTP 调度验证（Windows x64、CPU、真实 PP-OCR）**：最终完整 driver 在 113.23 秒通过，覆盖有界 overload/排队 deadline、native/MCP 共享图像预算、空输入契约差异、慢客户端/断连、顺序 keepalive、分次/合并写入 pipeline 请求安全关闭及活动+排队 shutdown。18 次 loaded health 探测前后均观察到四个活动请求及精确 73,744,128 解码输入字节；最终 RTT P50 14.4028 ms、P95/P99 15.4099 ms。移出 IO loop 前六次 load 探测中五次超过消费者两秒期限。显式 workload quota 下的通用 HTTP 回归也通过（278.17 秒），增强的暂停上传/取消字幕回归通过（38.67 秒）。这是实测样本，不是跨机器延迟或 RSS 保证。
+
+本次原生 CPU 运行使用实际选中的 ORT SDK 1.20.0；仅为 smoke 前提将匹配 DLL 放到可执行文件旁，文件版本 `1.20.20241030.2.c4fb724`，来源/目标 SHA256 均为 `09BFD8AE11E8E01FA5CD310B01FDB9384FD18EE61E7FAFF7E2F55D248B8C8E9B`。此次 staging 没有修改打包规则或 API 版本。上述证据不代表 DirectML/CUDA/TensorRT/RKNPU 执行、全部平台、RSS 上限或生产 Docker 在线构建已验证。
+
+**Linux/Docker CPU 验证（WSL Debian 下 linux/amd64）**：Linux builder 完整 dispatch driver 在 114.42 秒通过；四个各 16 图 OCR 请求在全部 18 次 loaded health 探测期间占用精确 73,744,128 解码字节，P50 0.313115 ms、P95/P99/max 2.63656 ms。另一次真实 PID1 runtime 容器 smoke 通过 readyz、模型发现及非空 OCR warmup，再以四个各 32 图请求维持精确 147,488,256 字节；18 次 health RTT P50 0.743417 ms、P95/P99/max 1.083073 ms，models/v1 models/stats 为 2.087264/1.657175/1.268436 ms。四请求仍活动时，新一轮 Docker HEALTHCHECK 完整 tick 保持 healthy、失败次数 0。随后填满四个等待 handler，过量无效 JSON 在业务解析前返回 503；SIGTERM 在 2.045 秒 drain，exit15、无 OOM/强杀，所属容器已移除。
+
+此验证使用临时 cache-dependency/current-source recipe、GCC 16.2.0、Xmake 3.1.1 与官方 Linux ORT 1.22.0（实下载 archive SHA256 `8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3`）；前置包括 fixture 传输、builder socket 检查工具及显式 SDK 动态库 staging。真实 ELF 依赖无缺失，复制前的生产输出也已解析 `libonnxruntime.so.1`。runtime image digest 前缀 `ff27e5befdf60`，server SHA256 前缀 `9401fbbef6de`。证据仅覆盖该本地 CPU amd64 recipe/runtime，不等于所有 provider/平台或原生产 Dockerfile 在线构建路径已验证。
+
 ```sh
 # 构建 CPU 回归目标（逐个构建）
 xmake build server
@@ -567,6 +592,7 @@ HTTP 回归使用 Python 3 标准库，独立创建临时配置、端口和进�
 
 ```powershell
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_http_dispatch.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_image_budget.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_yolo_tasks_http.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
@@ -579,6 +605,7 @@ Linux 或自定义构建目录先查询实际可执行文件：
 ```sh
 server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
 python3 scripts/test_http_regression.py --server "$server" --project-root .
+python3 scripts/test_http_dispatch.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
 python3 scripts/test_image_budget.py --server "$server" --project-root .
 python3 scripts/test_yolo_tasks_http.py --server "$server" --project-root .

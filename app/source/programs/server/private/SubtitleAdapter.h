@@ -9,6 +9,7 @@ struct HttpService;
 }
 namespace vision_simple {
 class InferenceService;
+class HttpDispatch;
 class SubtitleAdapter {
  public:
   static VSResult<std::unique_ptr<SubtitleAdapter>> Create(
@@ -16,7 +17,7 @@ class SubtitleAdapter {
   ~SubtitleAdapter();
   SubtitleAdapter(const SubtitleAdapter&) = delete;
   SubtitleAdapter& operator=(const SubtitleAdapter&) = delete;
-  void Mount(hv::HttpService& service);
+  void Mount(hv::HttpService& service, HttpDispatch& dispatch);
   void Stop() noexcept;
 
  private:

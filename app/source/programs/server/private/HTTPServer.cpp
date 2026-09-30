@@ -5,6 +5,7 @@
 #include <hv/hv.h>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <format>
@@ -14,6 +15,7 @@
 #include <string_view>
 
 #include "HTTPExpectation.h"
+#include "HttpDispatch.h"
 #include "InferenceProtocol.h"
 #include "LogFacade.h"
 #include "Logger.h"
@@ -81,8 +83,7 @@ PreparedResponse ErrorResponse(const RequestStage& stage) {
   return ServiceErrorResponse({ServiceFailure::kInternal, {}});
 }
 template <typename Handler>
-int HandleRequest(const HttpContextPtr& ctx, RequestStage stage,
-                  Handler&& handler) {
+PreparedResponse PrepareRequest(RequestStage stage, Handler&& handler) {
   PreparedResponse response;
   try {
     response = handler(stage);
@@ -93,15 +94,36 @@ int HandleRequest(const HttpContextPtr& ctx, RequestStage stage,
     LogFailure("Unknown HTTP request failure");
     response = ErrorResponse(stage);
   }
-  // This is the only response owner. All processing and serialization finish
-  // before libhv's send() ends the response; its returned status is not a
-  // setter.
+  return response;
+}
+
+int SendResponse(const HttpContextPtr& ctx, PreparedResponse response) {
   ctx->setStatus(response.status);
   ctx->setContentType(APPLICATION_JSON);
   if (response.status == HTTP_STATUS_SERVICE_UNAVAILABLE)
     ctx->setHeader("Retry-After", "1");
   ctx->response->body = std::move(response.body);
   return ctx->send();
+}
+
+template <typename Handler>
+int DispatchRequest(HttpDispatch& dispatch, const HttpContextPtr& ctx,
+                    HttpDispatch::Lane lane, RequestStage stage,
+                    Handler&& handler) {
+  if (!dispatch.Submit(
+          ctx, lane,
+          [stage, handler = std::forward<Handler>(handler)](
+              std::stop_token stop, HttpDispatch::Clock::time_point started) {
+            auto response = PrepareRequest(stage, [&](RequestStage& current) {
+              return handler(current, stop, started);
+            });
+            return [response = std::move(response)](const HttpContextPtr& io) mutable {
+              SendResponse(io, std::move(response));
+            };
+          })) {
+    return SendResponse(ctx, ServiceErrorResponse({ServiceFailure::kBusy, {}}));
+  }
+  return HTTP_STATUS_UNFINISHED;
 }
 
 std::optional<InferRequest> ParseRequest(const std::string& body,
@@ -142,6 +164,8 @@ class HTTPServerImpl : public HTTPServer {
   hv::HttpService http_service_;
   hv::HttpServer http_server_;
   std::shared_ptr<InferenceService> service_;
+  std::unique_ptr<HttpDispatch> dispatch_;
+  std::atomic<bool> stopping_{false};
   std::unique_ptr<MCPAdapter> mcp_;
   std::unique_ptr<TrackingAdapter> tracking_;
   std::unique_ptr<SubtitleAdapter> subtitles_;
@@ -149,14 +173,26 @@ class HTTPServerImpl : public HTTPServer {
  public:
   HTTPServerImpl(HTTPServerOptions&& options,
                  std::shared_ptr<InferenceService> service,
+                 std::unique_ptr<HttpDispatch> dispatch,
                  std::unique_ptr<MCPAdapter> mcp,
                  std::unique_ptr<TrackingAdapter> tracking,
                  std::unique_ptr<SubtitleAdapter> subtitles)
       : options_(std::move(options)),
         service_(std::move(service)),
+        dispatch_(std::move(dispatch)),
         mcp_(std::move(mcp)),
         tracking_(std::move(tracking)),
         subtitles_(std::move(subtitles)) {
+    http_service_.GET("/livez", [](const HttpContextPtr& ctx) {
+      return SendResponse(ctx, {HTTP_STATUS_OK, R"({"status":"alive"})"});
+    });
+    http_service_.GET("/readyz", [this](const HttpContextPtr& ctx) {
+      const bool ready = !stopping_.load(std::memory_order_acquire) &&
+                         dispatch_->Accepting();
+      return SendResponse(ctx, ready
+          ? PreparedResponse{HTTP_STATUS_OK, R"({"status":"ready"})"}
+          : PreparedResponse{HTTP_STATUS_SERVICE_UNAVAILABLE, R"({"status":"not_ready"})"});
+    });
     http_service_.Static(
         "/", options_.options.at(std::string(HTTPSERVER_OPT_KEY_STATIC_DIR))
                  .c_str());
@@ -214,7 +250,7 @@ class HTTPServerImpl : public HTTPServer {
     http_server_.port = options_.port;
     http_server_.service = &http_service_;
     // Context handlers execute on libhv IO threads, not its async pool.
-    // Multiple workers allow lifecycle routes to run alongside inference.
+    // Bounded dispatch leaves all IO loops available for health probes.
     http_server_.setThreadNum(4);
     logger_set_handler(
         hv_default_logger(), [](int log_level, const char* buf, int len) {
@@ -240,10 +276,10 @@ class HTTPServerImpl : public HTTPServer {
           }
         });
 
-    RegisterOpenAI(http_service_, service_);
+    RegisterOpenAI(http_service_, service_, *dispatch_);
     mcp_->Mount(http_service_, http_server_);
-    tracking_->Mount(http_service_);
-    subtitles_->Mount(http_service_);
+    tracking_->Mount(http_service_, *dispatch_);
+    subtitles_->Mount(http_service_, *dispatch_);
   }
   ~HTTPServerImpl() override { Stop(); }
   const HTTPServerOptions& options() const noexcept override {
@@ -255,9 +291,12 @@ class HTTPServerImpl : public HTTPServer {
   HTTPServerResult<void> StartAsync() noexcept override { return Start(false); }
 
   void Stop() noexcept override {
+    if (stopping_.exchange(true, std::memory_order_acq_rel)) return;
+    dispatch_->BeginStop();
     if (subtitles_) subtitles_->Stop();
     if (tracking_) tracking_->Stop();
     if (mcp_) mcp_->Stop();
+    dispatch_->Stop();
     http_server_.stop();
   }
   HTTPServerResult<void> Start(bool wait) noexcept {
@@ -283,8 +322,10 @@ class HTTPServerImpl : public HTTPServer {
   }
 
   int HandleInferModels(const HttpContextPtr& ctx) {
-    return HandleRequest(ctx, {FailureStage::ModelConfig, {}},
-                         [this](RequestStage& stage) -> PreparedResponse {
+    return DispatchRequest(*dispatch_, ctx, HttpDispatch::Lane::kControl,
+                         {FailureStage::ModelConfig, {}},
+                         [this](RequestStage& stage, std::stop_token,
+                                HttpDispatch::Clock::time_point) -> PreparedResponse {
                            auto catalog = service_->ListModels();
                            if (!catalog)
                              return ServiceErrorResponse(catalog.error());
@@ -299,10 +340,12 @@ class HTTPServerImpl : public HTTPServer {
                          });
   }
   int HandleUnload(const HttpContextPtr& ctx) {
-    return HandleRequest(
-        ctx, {FailureStage::LifecycleRequest, std::nullopt},
-        [this, &ctx](RequestStage& stage) -> PreparedResponse {
-          const auto body = nlohmann::json::parse(ctx->body());
+    return DispatchRequest(
+        *dispatch_, ctx, HttpDispatch::Lane::kControl,
+        {FailureStage::LifecycleRequest, std::nullopt},
+        [this, text = std::move(ctx->request->body)](RequestStage& stage,
+            std::stop_token, HttpDispatch::Clock::time_point) -> PreparedResponse {
+          const auto body = nlohmann::json::parse(text);
           if (!body.is_object()) return ErrorResponse(stage);
           const auto kind = body.find("kind");
           const auto model = body.find("model");
@@ -328,11 +371,12 @@ class HTTPServerImpl : public HTTPServer {
         });
   }
   int HandleStats(const HttpContextPtr& ctx) {
-    return HandleRequest(
-        ctx, {FailureStage::Pagination, std::nullopt},
-        [this, &ctx](RequestStage& stage) -> PreparedResponse {
+    return DispatchRequest(
+        *dispatch_, ctx, HttpDispatch::Lane::kControl,
+        {FailureStage::Pagination, std::nullopt},
+        [this, params = ctx->params()](RequestStage& stage, std::stop_token,
+            HttpDispatch::Clock::time_point) -> PreparedResponse {
           size_t limit = 100, offset = 0;
-          const auto& params = ctx->params();
           if (const auto it = params.find("limit"); it != params.end()) {
             if (!ParseInteger(it->second, limit) || limit == 0 || limit > 200)
               return ErrorResponse(stage);
@@ -351,15 +395,16 @@ class HTTPServerImpl : public HTTPServer {
   }
   int HandleInfer(const HttpContextPtr& ctx, InferenceKind kind,
                   bool native_v1) {
-    const auto started = std::chrono::steady_clock::now();
-    std::optional<InferenceResponse> inference;
-    return HandleRequest(ctx, {}, [&](RequestStage& stage) -> PreparedResponse {
+    return DispatchRequest(*dispatch_, ctx, HttpDispatch::Lane::kData, {},
+        [this, kind, native_v1, body = std::move(ctx->request->body)](
+            RequestStage& stage, std::stop_token stop,
+            HttpDispatch::Clock::time_point started) -> PreparedResponse {
       auto request = ParseRequest(
-          ctx->body(), service_->options().pipeline.max_batch_images);
+          body, service_->options().pipeline.max_batch_images);
       if (!request) return ErrorResponse(stage);
       auto result = service_->Run(
           kind, request->model, request->images,
-          ServiceControl{.timeout = request->timeout, .started = started});
+          ServiceControl{.stop = stop, .timeout = request->timeout, .started = started});
       if (!result) {
         auto response = ServiceErrorResponse(result.error());
         // Native v1 alone uses the documented not-found status; keep the
@@ -368,10 +413,9 @@ class HTTPServerImpl : public HTTPServer {
           response.status = HTTP_STATUS_NOT_FOUND;
         return response;
       }
-      inference.emplace(std::move(*result));
       stage = {FailureStage::Serialization, {}};
-      PreparedResponse response{HTTP_STATUS_OK, SerializeInference(*inference)};
-      inference->Succeed();
+      PreparedResponse response{HTTP_STATUS_OK, SerializeInference(*result)};
+      result->Succeed();
       return response;
     });
   }
@@ -561,6 +605,24 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) try {
       .max_batch_decoded_bytes = max_batch_decoded_bytes,
       .max_inflight_decoded_bytes = max_inflight_decoded_bytes});
   if (!service) return std::unexpected(std::move(service.error()));
+  HttpDispatch::Options dispatch_options;
+  const auto parse_dispatch = [&](std::string_view key, std::string_view fallback,
+                                  size_t& value) {
+    return ParseInteger(options.OptionOrPut(key, fallback), value) && value > 0;
+  };
+  if (!parse_dispatch(HTTPSERVER_OPT_KEY_HTTP_DATA_WORKERS,
+                      HTTPSERVER_OPT_DEFVAL_HTTP_DATA_WORKERS, dispatch_options.data_workers) ||
+      !parse_dispatch(HTTPSERVER_OPT_KEY_HTTP_DATA_QUEUE_CAPACITY,
+                      HTTPSERVER_OPT_DEFVAL_HTTP_DATA_QUEUE_CAPACITY, dispatch_options.data_queue_capacity) ||
+      !parse_dispatch(HTTPSERVER_OPT_KEY_HTTP_CONTROL_WORKERS,
+                      HTTPSERVER_OPT_DEFVAL_HTTP_CONTROL_WORKERS, dispatch_options.control_workers) ||
+      !parse_dispatch(HTTPSERVER_OPT_KEY_HTTP_CONTROL_QUEUE_CAPACITY,
+                      HTTPSERVER_OPT_DEFVAL_HTTP_CONTROL_QUEUE_CAPACITY, dispatch_options.control_queue_capacity)) {
+    return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
+                      "HTTP dispatch limits must be positive integer strings within size_t range");
+  }
+  auto dispatch = HttpDispatch::Create(dispatch_options);
+  if (!dispatch) return std::unexpected(std::move(dispatch.error()));
   Logger::Instance()->get().Info(
       LOG_DOMAIN_NAME, std::format("Execution Provider:{}", infer_ep_str));
   auto mcp = MCPAdapter::Create(*service, options.host, options.port);
@@ -570,7 +632,7 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) try {
   auto subtitles = SubtitleAdapter::Create(*service);
   if (!subtitles) return std::unexpected(std::move(subtitles.error()));
   return std::make_unique<HTTPServerImpl>(
-      std::move(options), std::move(*service), std::move(*mcp),
+      std::move(options), std::move(*service), std::move(*dispatch), std::move(*mcp),
       std::move(*tracking), std::move(*subtitles));
 } catch (const std::exception& error) {
   return MK_VSERROR(

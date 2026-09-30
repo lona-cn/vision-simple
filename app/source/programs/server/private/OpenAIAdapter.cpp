@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "HTTPExpectation.h"
+#include "HttpDispatch.h"
 #include "InferenceProtocol.h"
 #include "LogFacade.h"
 
@@ -21,8 +22,7 @@ struct AdapterError {
   std::string param;
   std::optional<size_t> image_index;
 };
-int SendError(const HttpContextPtr& ctx, const AdapterError& error,
-              bool finish = true) {
+std::string ErrorBody(const AdapterError& error) {
   Json detail{
       {"code", error.code},
       {"message", error.message},
@@ -30,24 +30,36 @@ int SendError(const HttpContextPtr& ctx, const AdapterError& error,
       {"param", error.param.empty() ? Json(nullptr) : Json(error.param)},
       {"image_index",
        error.image_index ? Json(*error.image_index) : Json(nullptr)}};
+  return Json{{"error", std::move(detail)}}.dump();
+}
+int SendError(const HttpContextPtr& ctx, const AdapterError& error,
+              bool finish = true) {
   ctx->setStatus(static_cast<http_status>(error.status));
   if (error.status == 503) ctx->setHeader("Retry-After", "1");
   ctx->setContentType(APPLICATION_JSON);
-  ctx->response->body = Json{{"error", std::move(detail)}}.dump();
+  ctx->response->body = ErrorBody(error);
   return finish ? ctx->send() : error.status;
 }
-int SendError(const HttpContextPtr& ctx, const ServiceError& error) {
+HttpDispatch::Reply ErrorReply(const AdapterError& error) {
+  return [status = error.status, body = ErrorBody(error)](
+             const HttpContextPtr& ctx) mutable {
+    ctx->setStatus(static_cast<http_status>(status));
+    if (status == 503) ctx->setHeader("Retry-After", "1");
+    ctx->setContentType(APPLICATION_JSON);
+    ctx->response->body = std::move(body);
+    ctx->send();
+  };
+}
+HttpDispatch::Reply ErrorReply(const ServiceError& error) {
   const auto info = DescribeError(error.kind);
-  return SendError(
-      ctx,
+  return ErrorReply(
       AdapterError{info.status, info.code, info.message,
                    error.kind == ServiceFailure::kUnknownModel ? "model" : "",
                    error.image_index});
 }
-int InternalError(const HttpContextPtr& ctx, const std::exception& error) {
+HttpDispatch::Reply InternalError(const std::exception& error) {
   LogFacade::Error("openai", error.what());
-  return SendError(
-      ctx,
+  return ErrorReply(
       AdapterError{
           500, "internal_error", "Request could not be completed", {}, {}});
 }
@@ -176,31 +188,25 @@ std::expected<ChatRequest, AdapterError> ParseChat(const Json& json,
   return request;
 }
 
-int ListModels(const HttpContextPtr& ctx, InferenceService& service) {
+HttpDispatch::Reply ListModels(std::optional<std::string> limit_text, std::string after,
+                               InferenceService& service) {
   try {
     size_t limit = 100;
-    if (const auto it = ctx->params().find("limit");
-        it != ctx->params().end()) {
-      const auto& text = it->second;
-      const auto parsed =
-          std::from_chars(text.data(), text.data() + text.size(), limit);
-      if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
-        return SendError(ctx,
-                         AdapterError{400,
-                                      "invalid_request",
+    if (limit_text) {
+      const auto parsed = std::from_chars(
+          limit_text->data(), limit_text->data() + limit_text->size(), limit);
+      if (parsed.ec != std::errc{} ||
+          parsed.ptr != limit_text->data() + limit_text->size())
+        return ErrorReply(AdapterError{400, "invalid_request",
                                       "limit must be an integer from 1 to 200",
-                                      "limit",
-                                      {}});
+                                      "limit", {}});
     }
     auto catalog = service.ListModels();
-    if (!catalog) return SendError(ctx, catalog.error());
-    auto page = PaginateModels(*catalog, limit, ctx->param("after"));
+    if (!catalog) return ErrorReply(catalog.error());
+    auto page = PaginateModels(*catalog, limit, after);
     if (!page)
-      return SendError(ctx, AdapterError{400,
-                                         "invalid_request",
-                                         "Invalid limit or catalog cursor",
-                                         "after",
-                                         {}});
+      return ErrorReply(AdapterError{400, "invalid_request",
+                                    "Invalid limit or catalog cursor", "after", {}});
     auto data = Json::array();
     for (const auto& model : page->data)
       data.push_back({{"id", model.id},
@@ -212,47 +218,34 @@ int ListModels(const HttpContextPtr& ctx, InferenceService& service) {
               {"data", std::move(data)},
               {"has_more", !page->next_cursor.empty()}};
     if (!page->next_cursor.empty()) body["next_cursor"] = page->next_cursor;
-    ctx->setHeader("Cache-Control", "no-store");
-    return ctx->send(body.dump());
+    return [body = body.dump()](const HttpContextPtr& ctx) mutable {
+      ctx->setContentType(APPLICATION_JSON);
+      ctx->setHeader("Cache-Control", "no-store");
+      ctx->response->body = std::move(body);
+      ctx->send();
+    };
   } catch (const std::exception& error) {
-    return InternalError(ctx, error);
+    return InternalError(error);
   }
 }
 
-int Chat(const HttpContextPtr& ctx, InferenceService& service) {
-  const auto started = std::chrono::steady_clock::now();
+HttpDispatch::Reply Chat(std::string body, InferenceService& service,
+                         std::stop_token stop, HttpDispatch::Clock::time_point started) {
   try {
-    if (ctx->body().size() > kMaxBodyBytes)
-      return SendError(
-          ctx,
-          AdapterError{
-              413, "request_too_large", "Request body exceeds 64 MiB", {}, {}});
-    if (!ctx->is(APPLICATION_JSON))
-      return SendError(ctx, AdapterError{415,
-                                         "unsupported_media_type",
-                                         "Use Content-Type: application/json",
-                                         {},
-                                         {}});
-    const auto json = Json::parse(ctx->body(), nullptr, false);
+    const auto json = Json::parse(body, nullptr, false);
     if (json.is_discarded())
-      return SendError(
-          ctx,
-          AdapterError{
-              400, "invalid_json", "Request body must be valid JSON", {}, {}});
+      return ErrorReply(AdapterError{
+          400, "invalid_json", "Request body must be valid JSON", {}, {}});
     auto request = ParseChat(json, service.options().pipeline.max_batch_images);
-    if (!request) return SendError(ctx, request.error());
+    if (!request) return ErrorReply(request.error());
     auto result = service.Run(
         request->kind, request->model, request->images,
-        ServiceControl{.timeout = request->timeout, .started = started});
-    if (!result) return SendError(ctx, result.error());
+        ServiceControl{.stop = stop, .timeout = request->timeout, .started = started});
+    if (!result) return ErrorReply(result.error());
     auto content = SerializeInference(*result);
     if (content.size() > kMaxBodyBytes)
-      return SendError(
-          ctx, AdapterError{500,
-                            "response_too_large",
-                            "Result exceeds 64 MiB; submit fewer images",
-                            {},
-                            {}});
+      return ErrorReply(AdapterError{500, "response_too_large",
+                                    "Result exceeds 64 MiB; submit fewer images", {}, {}});
     static std::atomic<uint64_t> sequence{0};
     const auto created =
         std::chrono::duration_cast<std::chrono::seconds>(
@@ -271,9 +264,13 @@ int Chat(const HttpContextPtr& ctx, InferenceService& service) {
                                      {{"role", "assistant"},
                                       {"content", std::move(content)}}},
                                     {"finish_reason", "stop"}}})}};
-      auto body = response.dump();
-      result->Succeed();
-      return ctx->send(body);
+      return [body = response.dump(), completion = std::move(result->completion)](
+                 const HttpContextPtr& ctx) mutable {
+        ctx->setContentType(APPLICATION_JSON);
+        ctx->response->body = std::move(body);
+        if (completion) completion->Succeed();
+        ctx->send();
+      };
     }
     const auto chunk = [&](Json delta, Json finish) {
       return "data: " +
@@ -288,36 +285,48 @@ int Chat(const HttpContextPtr& ctx, InferenceService& service) {
                  .dump() +
              "\n\n";
     };
-    // Serialize every event before committing headers: model/decode/native
-    // errors remain ordinary JSON errors, and the batch never leaks partial
-    // results.
-    const auto role = chunk({{"role", "assistant"}}, nullptr);
-    const auto data = chunk({{"content", std::move(content)}}, nullptr);
-    const auto finish = chunk(Json::object(), "stop");
-    ctx->setHeader("Content-Type", "text/event-stream");
-    ctx->setHeader("Cache-Control", "no-cache, no-transform");
-    ctx->setHeader("X-Accel-Buffering", "no");
-    ctx->writer->WriteChunked(role);
-    ctx->writer->WriteChunked(data);
-    ctx->writer->WriteChunked(finish);
-    ctx->writer->WriteChunked("data: [DONE]\n\n");
-    result->Succeed();
-    ctx->writer->End();
-    return HTTP_STATUS_OK;
+    // Prepare the complete bounded SSE batch before committing any headers.
+    return [role = chunk({{"role", "assistant"}}, nullptr),
+            data = chunk({{"content", std::move(content)}}, nullptr),
+            finish = chunk(Json::object(), "stop"),
+            completion = std::move(result->completion)](
+               const HttpContextPtr& ctx) {
+      ctx->setHeader("Content-Type", "text/event-stream");
+      ctx->setHeader("Cache-Control", "no-cache, no-transform");
+      ctx->setHeader("X-Accel-Buffering", "no");
+      ctx->writer->WriteChunked(role);
+      ctx->writer->WriteChunked(data);
+      ctx->writer->WriteChunked(finish);
+      ctx->writer->WriteChunked("data: [DONE]\n\n");
+      if (completion) completion->Succeed();
+      ctx->writer->End();
+    };
   } catch (const std::exception& error) {
-    return InternalError(ctx, error);
+    return InternalError(error);
   }
 }
 }  // namespace
 
 void RegisterOpenAI(hv::HttpService& http,
-                    std::shared_ptr<InferenceService> service) {
-  http.GET("/v1/models", [service](const HttpContextPtr& ctx) {
-    return ListModels(ctx, *service);
+                    std::shared_ptr<InferenceService> service,
+                    HttpDispatch& dispatch) {
+  http.GET("/v1/models", [service, &dispatch](const HttpContextPtr& ctx) {
+    if (!dispatch.Submit(
+            ctx, HttpDispatch::Lane::kControl,
+            [service, limit = ctx->params().contains("limit")
+                                  ? std::optional<std::string>(ctx->param("limit"))
+                                  : std::optional<std::string>{},
+             after = ctx->param("after")](
+                std::stop_token, HttpDispatch::Clock::time_point) mutable {
+              return ListModels(std::move(limit), std::move(after), *service);
+            }))
+      return SendError(ctx, AdapterError{503, "service_overloaded",
+                                        "HTTP dispatch capacity reached", {}, {}});
+    return HTTP_STATUS_UNFINISHED;
   });
   http.POST(
       "/v1/chat/completions",
-      [service](const HttpContextPtr& ctx, http_parser_state phase,
+      [service, &dispatch](const HttpContextPtr& ctx, http_parser_state phase,
                 const char* data, size_t size) -> int {
         if (phase == HP_ERROR) return HTTP_STATUS_UNFINISHED;
         if (ctx->response->status_code >= 400)
@@ -365,7 +374,15 @@ void RegisterOpenAI(hv::HttpService& http,
                            {}});
           ctx->request->body.append(data, size);
         } else if (phase == HP_MESSAGE_COMPLETE) {
-          return Chat(ctx, *service);
+          if (!dispatch.Submit(
+                  ctx, HttpDispatch::Lane::kData,
+                  [service, body = std::move(ctx->request->body)](
+                      std::stop_token stop, HttpDispatch::Clock::time_point started) mutable {
+                    return Chat(std::move(body), *service, stop, started);
+                  }))
+            return SendError(ctx, AdapterError{503, "service_overloaded",
+                                              "HTTP dispatch capacity reached", {}, {}});
+          return HTTP_STATUS_UNFINISHED;
         }
         return HTTP_STATUS_UNFINISHED;
       });

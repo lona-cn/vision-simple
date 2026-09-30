@@ -21,6 +21,16 @@ import tempfile
 import time
 
 
+# Only this driver's repeated-fixture scenarios opt into these finite budgets.
+# The largest request is images * 16 (32 fixture images, <256 MiB BGR);
+# lifecycle overlaps two images * 8 requests. Service/pipeline admission limits
+# remain unchanged, and imported Server defaults stay untouched for quota tests.
+REPEATED_WORKLOAD_OPTIONS = {
+    "infer_max_batch_decoded_bytes": str(256 * 1024 * 1024),
+    "infer_max_inflight_decoded_bytes": str(512 * 1024 * 1024),
+}
+
+
 class RegressionFailure(RuntimeError):
     pass
 
@@ -462,7 +472,8 @@ def lifecycle_matrix(server, images):
 
 def idle_eviction_matrix(executable, root, config, images):
     with Server(executable, root, config,
-                options={"infer_idle_timeout_ms": "100", "infer_sweep_interval_ms": "20"}) as server:
+                options={**REPEATED_WORKLOAD_OPTIONS,
+                         "infer_idle_timeout_ms": "100", "infer_sweep_interval_ms": "20"}) as server:
         server.wait_ready()
         with ThreadPoolExecutor(max_workers=1) as pool:
             job = pool.submit(infer, server, "yolo", "hd2-fp32", images * 16)
@@ -510,7 +521,8 @@ def pipeline_controls_matrix(server, images):
 
 def pipeline_backpressure_matrix(executable, root, config, images):
     with Server(executable, root, config,
-                options={"infer_pipeline_capacity": "1", "infer_pipeline_max_batches": "1"}) as server:
+                options={**REPEATED_WORKLOAD_OPTIONS,
+                         "infer_pipeline_capacity": "1", "infer_pipeline_max_batches": "1"}) as server:
         server.wait_ready()
         expected = infer(server, "yolo", "hd2-fp32", images)
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -571,7 +583,7 @@ def run(args):
     images = [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths]
     require(images[0] != images[1], "Integration fixtures must contain distinct image bytes")
     config = model_yaml(root)
-    with Server(executable, root, config) as server:
+    with Server(executable, root, config, options=REPEATED_WORKLOAD_OPTIONS) as server:
         server.wait_ready()
         status, models = server.request("/v0/infer/models", method="GET")
         require(status == 200 and "error" not in models, f"Models endpoint failed: {models}")
