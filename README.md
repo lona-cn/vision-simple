@@ -603,13 +603,13 @@ docker run -it --rm -p 127.0.0.1:11451:11451 --name vs vision-simple:ci
 - 每个平台分别发布 `<version>-cpu-amd64` / `<version>-cpu-arm64` 和 `sha-<完整 commit SHA>-cpu-amd64` / `sha-<完整 commit SHA>-cpu-arm64`。两边成功后合并为 `<version>-cpu`、`sha-<完整 commit SHA>-cpu` 多架构 manifest；稳定版本还更新 `latest`，预发布不更新。
 - manifest 校验确认 amd64、arm64 两个平台的 registry digest 与 smoke-tested 镜像一致。只有 manifest 步骤成功才生成发布摘要；失败时已推送的平台专属 tag 不会自动回滚。
 - `docker pull ghcr.io/lona-cn/vision-simple:latest` 会按客户端平台选择 amd64 或 arm64。部署优先使用成功摘要中的 `ghcr.io/lona-cn/vision-simple@sha256:...`。GHCR 包首次发布默认为 private；若需匿名拉取，在 GitHub 包设置中将其改为 public。
-- ARMv7 Dockerfile 的产物路径仍指向 arm64，RISC-V 及 CUDA/TensorRT、RKNPU 镜像未纳入此次多架构发布；硬件加速后端需独立镜像变体和设备验收。
+- ARMv7 Dockerfile 通过 xmake 查询 server 的实际产物目录，并在构建阶段用 readelf 检查服务程序为 ELF32 ARM；这些检查不等于容器启动或目标设备运行验收。ARMv7、RISC-V 及 CUDA/TensorRT、RKNPU 镜像未纳入此次多架构发布；硬件加速后端需独立镜像变体和设备验收。
 
 发布策略边界测试：`python3 -m unittest discover -s scripts -p test_docker_release.py`。amd64 CPU 构建启用 AVX/AVX2/F16C，需支持这些指令的 CPU。
 
 #### 其他平台 / 硬件加速
 
-GHCR 多架构 manifest 目前仅包含 Linux CPU `amd64` 和 `arm64`。ARMv7 Dockerfile 的产物路径仍指向 `arm64`，RISC-V 尚未通过目标设备运行验收；CUDA/TensorRT 和 RKNPU 需要对应硬件验证及独立镜像变体，不能与同架构 CPU 镜像合并到同一 manifest。
+GHCR 多架构 manifest 目前仅包含 Linux CPU `amd64` 和 `arm64`。ARMv7 Dockerfile 已改为查询实际产物目录并设置 ELF32 ARM 构建检查；在 WSL Debian 的 QEMU ARM 模拟环境中，使用本地依赖缓存的镜像构建已完成，并通过 ELF32 ARM、动态库解析和 `GET /v0/infer/models` HTTP 模型目录启动烟测。该烟测使用临时构建配方供应本地依赖源（包括同版本 ONNX Runtime 和同提交 Eigen），不代表生产 Dockerfile 的在线依赖下载路径或真实 ARM 设备已通过验收，也不代表推理验收。RISC-V 尚未通过目标设备运行验收。CUDA/TensorRT 和 RKNPU 需要对应硬件验证及独立镜像变体，不能与同架构 CPU 镜像合并到同一 manifest。
 
 ```sh
 # ARM64 CPU
