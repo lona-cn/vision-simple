@@ -84,12 +84,39 @@ void Formats() {
   RoundTrip(ras, 6, "SunRAS");
   Check(!DecodeEncodedImage(Base64(pgm), 6), "legacy bounded decode remains PNG/JPEG only");
 }
+void PfmScaleBoundaries() {
+  const struct {
+    const char* header;
+    size_t pixels;
+  } accepted[] = {
+      {"PF\n2 3\n-2.5e-1\n", 6},
+      {"Pf\r\n\t4 2\r\n  1.25E+2\r\n", 8},
+      {"PF\n1 2\n3.4028234663852886e38\n", 2},
+      {"Pf\n3 1\n1e-40\n", 3},
+      {"PF\n2 2\n-1.401298464324817e-45\n", 4},
+  };
+  for (const auto& fixture : accepted) {
+    auto bytes = Bytes(fixture.header);
+    const size_t channels = fixture.header[1] == 'F' ? 3 : 1;
+    bytes.resize(bytes.size() + fixture.pixels * channels * sizeof(float), 0);
+    auto prepared = PrepareEncodedImage(Base64(bytes));
+    Check(prepared && prepared->pixels == fixture.pixels,
+          (std::string(fixture.header) + ": finite nonzero scale preserves admission pixel count").c_str());
+  }
+  for (const char* scale : {"0", "-0.0", "nan", "NaN(payload)", "inf", "-Infinity",
+                            "1e39", "1e-9999", "+1", "1,5", "0x1p0", "1e+", "1.0junk"}) {
+    auto bytes = Bytes(std::string("Pf\n3 2\n") + scale + "\n");
+    bytes.resize(bytes.size() + 6 * sizeof(float), 0);
+    Check(!PrepareEncodedImage(Base64(bytes)),
+          (std::string("Pf: reject invalid scale before admission: ") + scale).c_str());
+  }
+}
 void BadHeadersAndLimits() {
   for (const char* text : {"", "P6\n3 2\n", "P6\n0 2\n255\n", "P6\n-1 2\n255\n",
                           "P6\n2147483648 2\n255\n", "P6\n999999999999999999999999 2\n255\n",
                           "P7\nWIDTH 3\nHEIGHT 2\nDEPTH 3\nMAXVAL 255\n",
                           "P7\nWIDTH 3\nWIDTH 4\nHEIGHT 2\nDEPTH 3\nMAXVAL 255\nENDHDR\n",
-                          "Pf\n3 2\nnan\n", "#?RADIANCE\n\n-Y 2 +X 3\n"})
+                          "#?RADIANCE\n\n-Y 2 +X 3\n"})
     Check(!PrepareEncodedImage(Base64(Bytes(text))), "malformed or unrepresentable header rejected");
   for (const char* text : {"A===", "AA=A", "AB==", "AAB=", "AAAA\n", "data:image/png;base64,AAAA"})
     Check(!PrepareEncodedImage(text), "noncanonical base64 rejected");
@@ -191,6 +218,7 @@ void Orientation() {
 }  // namespace
 int main() {
   Formats();
+  PfmScaleBoundaries();
   BadHeadersAndLimits();
   BinaryHeaderBoundaries();
   Orientation();

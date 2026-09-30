@@ -82,44 +82,47 @@ std::map<InferFramework, InferYOLOFactory> infer_yolo_factories{std::make_pair(
             VisionSimpleError{VisionSimpleErrorCode::kModelError,
                               "Unsupported YOLO input shape or tensor type"});
       Ort::Allocator allocator{session, ort_ctx.env_memory_info()};
-      auto names = session.GetModelMetadata().LookupCustomMetadataMapAllocated(
-          "names", allocator);
-      if (!names || !*names.get())
-        return std::unexpected(
-            VisionSimpleError{VisionSimpleErrorCode::kModelError,
-                              "Missing YOLO class names metadata"});
       std::vector<std::string> class_names;
-      if (!vision_simple::detail::ParseYOLOClassNames(names.get(), class_names))
-        return std::unexpected(
-            VisionSimpleError{VisionSimpleErrorCode::kModelError,
-                              "Invalid YOLO class names metadata"});
       YOLODetectionLayout layout =
           version == YOLOVersion::kV10 ? YOLODetectionLayout::kEndToEnd
           : version == YOLOVersion::kV11 ? YOLODetectionLayout::kRaw
                                         : YOLODetectionLayout::kUnspecified;
-      if (version == YOLOVersion::kV26) {
-        auto metadata = session.GetModelMetadata();
-        auto task = metadata.LookupCustomMetadataMapAllocated("task", allocator);
-        auto args = metadata.LookupCustomMetadataMapAllocated("args", allocator);
-        auto end2end =
-            metadata.LookupCustomMetadataMapAllocated("end2end", allocator);
-        auto nms = metadata.LookupCustomMetadataMapAllocated("nms", allocator);
-        bool end_to_end = false;
-        if (!task || std::string_view(task.get()) != "detect" ||
-            !vision_simple::detail::ParseYOLO26Export(args ? args.get() : "",
-                                      end2end ? end2end.get() : "",
-                                      nms ? nms.get() : "", end_to_end))
-          return std::unexpected(VisionSimpleError{
-              VisionSimpleErrorCode::kModelError,
-              "YOLO26 requires detect task and explicit supported export metadata"});
-        layout = end_to_end ? YOLODetectionLayout::kEndToEnd
-                            : YOLODetectionLayout::kRaw;
+      // Release borrowed metadata before construction can take the allocator.
+      {
+        auto names = session.GetModelMetadata().LookupCustomMetadataMapAllocated(
+            "names", allocator);
+        if (!names || !*names.get())
+          return std::unexpected(
+              VisionSimpleError{VisionSimpleErrorCode::kModelError,
+                                "Missing YOLO class names metadata"});
+        if (!vision_simple::detail::ParseYOLOClassNames(names.get(), class_names))
+          return std::unexpected(
+              VisionSimpleError{VisionSimpleErrorCode::kModelError,
+                                "Invalid YOLO class names metadata"});
+        if (version == YOLOVersion::kV26) {
+          auto metadata = session.GetModelMetadata();
+          auto task = metadata.LookupCustomMetadataMapAllocated("task", allocator);
+          auto args = metadata.LookupCustomMetadataMapAllocated("args", allocator);
+          auto end2end =
+              metadata.LookupCustomMetadataMapAllocated("end2end", allocator);
+          auto nms = metadata.LookupCustomMetadataMapAllocated("nms", allocator);
+          bool end_to_end = false;
+          if (!task || std::string_view(task.get()) != "detect" ||
+              !vision_simple::detail::ParseYOLO26Export(args ? args.get() : "",
+                                        end2end ? end2end.get() : "",
+                                        nms ? nms.get() : "", end_to_end))
+            return std::unexpected(VisionSimpleError{
+                VisionSimpleErrorCode::kModelError,
+                "YOLO26 requires detect task and explicit supported export metadata"});
+          layout = end_to_end ? YOLODetectionLayout::kEndToEnd
+                              : YOLODetectionLayout::kRaw;
+        }
+        if (!ValidOutputShape(layout, output_tensor.GetShape(),
+                              class_names.size()))
+          return std::unexpected(
+              VisionSimpleError{VisionSimpleErrorCode::kModelError,
+                                "Unsupported YOLO output shape or class names"});
       }
-      if (!ValidOutputShape(layout, output_tensor.GetShape(),
-                            class_names.size()))
-        return std::unexpected(
-            VisionSimpleError{VisionSimpleErrorCode::kModelError,
-                              "Unsupported YOLO output shape or class names"});
       return std::make_unique<InferYOLOOrtImpl>(
           ort_ctx, std::move(*session_opt), std::move(allocator), version,
           std::move(class_names), layout);

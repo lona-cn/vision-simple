@@ -434,6 +434,8 @@ InferYOLOTask::CreateResult InferYOLOTask::Create(InferContext& context,
     if (session.GetInputCount() != 1 || session.GetOutputCount() != count)
       return ModelError("YOLO task requires one input and task outputs");
     Ort::Allocator allocator(session, ort->env_memory_info());
+    // Allocated metadata borrows the allocator, even after it moves into model.
+    std::unique_ptr<TaskModel> model;
     const auto metadata = session.GetModelMetadata();
     const auto args =
         metadata.LookupCustomMetadataMapAllocated("args", allocator);
@@ -459,8 +461,8 @@ InferYOLOTask::CreateResult InferYOLOTask::Create(InferContext& context,
       if (exported_nms)
         return ModelError("YOLO11 tasks require raw outputs");
     }
-    auto model = std::make_unique<TaskModel>(std::move(*created),
-                                             std::move(allocator), task);
+    model = std::make_unique<TaskModel>(std::move(*created),
+                                       std::move(allocator), task);
     model->end_to_end = end_to_end;
     const auto load = [&](size_t index, bool input,
                           TaskModel::Tensor& spec) -> bool {

@@ -635,6 +635,8 @@ xmake build server
 - ARM64 CPU/RKNPU、ARMv7 与 RISC-V64 交叉编译行保留产物架构检查，不执行目标二进制。DirectML 行不证明 GPU/DirectML 推理覆盖；这些 CPU 测试也不证明 CUDA、TensorRT 或 RKNPU 真实硬件推理。
 - 既有发布策略门控独立保留：**2 个产物测试 + 11 个 Docker 发布测试**。Docker 工作流保持独立；其原生 CPU 容器 smoke 不代表全部 Dockerfile 或硬件执行提供程序已经验证。
 
+图像 codec 回归通过实际 PFM 预检覆盖有限非零 scale（包括可表示的 subnormal）、有符号零、非有限值及非法数字格式；解析不依赖 libc++ 的浮点 `std::from_chars`。真实 YOLO 元数据回归覆盖成功创建与拒绝无效模型；ASan+UBSan 行同时检查这些路径上的 ONNX Runtime 分配器借用生命周期。
+
 运行模型回归前，先拉取 Git LFS 资源，再执行下方 fixture 预检。每个必需 fixture 都必须是包含实际字节的普通非空文件，不能是 LFS pointer。刻意无效的 ONNX 元数据及运行时故障 fixture 也必须存在，负向测试不能省略输入。缺失资源导致失败，不算成功跳过。
 
 ```sh

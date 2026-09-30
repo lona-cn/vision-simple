@@ -633,6 +633,8 @@ Run these commands from the repository root. If you just launched the server as 
 - ARM64 CPU/RKNPU, ARMv7 and RISC-V64 cross rows retain artifact architecture checks; they do not execute those binaries. The DirectML row does not establish GPU/DirectML inference coverage; these CPU tests do not verify real CUDA, TensorRT or RKNPU hardware inference either.
 - Existing release-policy gates remain separate: **2 artifact tests + 11 Docker release tests**. The Docker workflow remains independent; its native CPU container smoke is not proof for every Dockerfile or hardware execution provider.
 
+Image-codec regressions exercise actual PFM preflight for finite nonzero scales (including representable subnormals), signed zero, nonfinite values and malformed numeric syntax; parsing does not depend on floating-point `std::from_chars` support in libc++. Real YOLO metadata regressions cover successful creation and invalid-model rejection; the ASan+UBSan row also checks borrowed ONNX Runtime allocator lifetimes on these paths.
+
 Before model-backed runs, fetch Git LFS resources and run the fixture preflight below. Every required fixture must be a regular, nonempty file containing actual bytes, not an LFS pointer. This includes intentionally invalid ONNX metadata and runtime-failure fixtures: negative tests still require their inputs. Missing resources fail rather than become successful omissions.
 
 ```sh

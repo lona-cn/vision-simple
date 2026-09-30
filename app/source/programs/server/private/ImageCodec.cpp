@@ -1,11 +1,12 @@
 #include "ImageCodec.h"
 
+#include <iguana/detail/fast_float.h>
 #include <turbobase64/turbob64.h>
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <climits>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <opencv2/imgcodecs.hpp>
@@ -169,9 +170,12 @@ std::optional<Dimensions> PreparedDimensions(std::span<const uint8_t> bytes) {
       if (!w || !h || !scale) return std::nullopt;
       auto width = Positive(*w), height = Positive(*h);
       float value = 0;
-      auto parsed = std::from_chars(scale->data(), scale->data() + scale->size(), value);
+      auto parsed = fast_float::from_chars(scale->data(), scale->data() + scale->size(), value);
+      // Bit classification preserves finite subnormals under release fast-math.
+      const auto magnitude = std::bit_cast<uint32_t>(value) & UINT32_C(0x7fffffff);
       if (!width || !height || parsed.ec != std::errc{} ||
-          parsed.ptr != scale->data() + scale->size() || !std::isfinite(value) || value == 0)
+          parsed.ptr != scale->data() + scale->size() || magnitude == 0 ||
+          magnitude >= UINT32_C(0x7f800000))
         return std::nullopt;
       return Dimensions{*width, *height};
     }
