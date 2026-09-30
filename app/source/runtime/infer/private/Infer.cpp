@@ -30,6 +30,9 @@ const std::map<InferFramework, std::vector<InferEP>> supported_framework_eps = {
                                                 InferEP::kDML,
                                                 InferEP::kCUDA,
                                                 InferEP::kTensorRT,
+#ifdef VISION_SIMPLE_WITH_RKNPU
+                                                InferEP::kRKNPU,
+#endif
                                             }}};
 
 bool IsSupported(const InferFramework framework, const InferEP ep) {

@@ -211,6 +211,20 @@ int main(int argc, char** argv) {
     while (!fs::exists(root / "app/assets/test") && root != root.parent_path())
       root = root.parent_path();
   }
+  {
+    const auto rknpu =
+        InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kRKNPU);
+#ifdef VISION_SIMPLE_WITH_RKNPU
+    TEST_ASSERT(rknpu, "compiled RKNPU provider admits context creation");
+    TEST_ASSERT((*rknpu)->framework() == InferFramework::kONNXRUNTIME &&
+                    (*rknpu)->execution_provider() == InferEP::kRKNPU,
+                "RKNPU context preserves the requested framework and provider");
+#else
+    TEST_ASSERT(!rknpu && rknpu.error().code ==
+                             VisionSimpleErrorCode::kParameterError,
+                "uncompiled RKNPU provider returns a factory parameter error");
+#endif
+  }
   const auto assets = root / "app/assets/test";
   TEST_ASSERT(fs::exists(assets / "hd2-yolo11n-fp32.onnx"),
               "required model fixtures exist");

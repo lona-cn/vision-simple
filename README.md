@@ -484,6 +484,15 @@ xmake build server
 
 ### 启用硬件加速 (Execution Provider)
 
+RKNPU 公开支持矩阵（Linux ARM/ARM64）：
+
+| 编译条件 | `InferContext::Create` 上下文准入 | 模型会话初始化 | 真实设备推理 |
+| --- | --- | --- | --- |
+| 未定义 `VISION_SIMPLE_WITH_RKNPU` | `kRKNPU` 返回 `kParameterError` | 不进入 RKNPU 会话路径 | 不支持 |
+| `--with_rknpu=y`，定义 `VISION_SIMPLE_WITH_RKNPU` | 接受 ONNXRuntime + `kRKNPU` | 仍依赖 RKNPU-enabled ORT、DDK/驱动和兼容模型；需单独验证 | 需目标设备单独验收，未声明硬件已验证 |
+
+`test_infer_inputs` 按编译宏覆盖 RKNPU 工厂拒绝/准入，不创建 RKNPU 模型会话、不执行 NPU 推理；其中保留的 CPU 模型推理不构成 RKNPU 硬件验证。上下文创建成功不保证会话初始化或真实设备推理成功。
+
 编译选项与运行配置必须匹配：启用构建选项后，还要在 `config/server.yaml` 的字符串 `options.infer_ep` 中选择 `kDML`、`kCUDA`、`kTensorRT` 或 `kRKNPU`，`infer_device` 选择设备。默认运行配置为 `kCPU`；Windows 的 DML 构建选项默认开启，不等于运行时自动选择 DML。
 
 ```powershell
@@ -501,7 +510,7 @@ xmake build server
 xmake f --with_tensorrt=y -m release
 xmake build server
 
-# RKNPU (仅 Linux)
+# RKNPU (Linux ARM/ARM64；仍需目标设备验收)
 xmake f --with_rknpu=y -m release
 xmake build server
 ```

@@ -480,6 +480,15 @@ xmake build server
 
 ### Enable Hardware Acceleration (Execution Provider)
 
+Public RKNPU support matrix (Linux ARM/ARM64):
+
+| Build condition | `InferContext::Create` context admission | Model session initialization | Real-device inference |
+| --- | --- | --- | --- |
+| `VISION_SIMPLE_WITH_RKNPU` undefined | `kRKNPU` returns `kParameterError` | RKNPU session path is not entered | Unsupported |
+| `--with_rknpu=y`, defining `VISION_SIMPLE_WITH_RKNPU` | Accepts ONNXRuntime + `kRKNPU` | Still requires RKNPU-enabled ORT, DDK/drivers and a compatible model; verify separately | Requires separate target-device acceptance; no hardware-verification claim |
+
+`test_infer_inputs` covers RKNPU factory rejection/admission according to the build macro. It neither creates an RKNPU model session nor runs NPU inference; its retained CPU model inference does not verify RKNPU hardware. Successful context creation does not guarantee successful session initialization or real-device inference.
+
 Build options and runtime configuration must agree: after enabling a provider, select `kDML`, `kCUDA`, `kTensorRT` or `kRKNPU` in the string option `infer_ep` in `config/server.yaml`, and choose a device with `infer_device`. Runtime defaults to `kCPU`. The Windows DML build option defaults to enabled, but that does not select DML at runtime.
 
 ```powershell
@@ -497,7 +506,7 @@ xmake build server
 xmake f --with_tensorrt=y -m release
 xmake build server
 
-# RKNPU (Linux only)
+# RKNPU (Linux ARM/ARM64; target-device acceptance still required)
 xmake f --with_rknpu=y -m release
 xmake build server
 ```
