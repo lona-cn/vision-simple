@@ -270,7 +270,7 @@ with urlopen(request, timeout=120) as response:
 
 使用现有 `POST /v1/infer/{task}`；检测也支持原有 `/v0/infer/yolo`。响应结构、模型缓存、批次顺序与整批失败语义不变。C++ 检测仍使用 `InferYOLO::Create(context, path, YOLOVersion::kV26)`；其他任务改为显式版本，例如 `InferYOLOTask::Create(context, path, YOLOTask::kPose, YOLOVersion::kV26)`。旧任务调用者在 `task` 后补 `YOLOVersion::kV11`，可选 device_id 顺延。
 
-后处理沿用本项目契约：raw 检测 NMS IoU 为 0.3，其他 raw 任务为 0.45；OBB 使用多边形 IoU，**不同于 Ultralytics 的概率 IoU**。NMS-free 不作二次抑制。Letterbox 使用黑色 padding，关键点保留图外坐标；mask 先插值 logits 再二值化、裁剪至整数 bbox。因此直接与 Ultralytics 默认 padding、mask 缩放、关键点裁剪比较不会逐像素一致，应统一预处理并明确这些差异。
+后处理沿用本项目契约：YOLO11/YOLO26 raw 检测先以严格 `score > confidence` 筛选，在未裁剪、未取整的浮点模型空间框上按类别执行 NMS（IoU 阈值 0.3），再映射到原图、裁剪并取整；退化框及输出空框丢弃。固定模型输出的 NMS 候选选择不随原图尺寸改变，公开整数 `bbox:[x,y,width,height]` 格式不变。其他 raw 任务的 NMS IoU 为 0.45；OBB 使用多边形 IoU，**不同于 Ultralytics 的概率 IoU**。YOLO10/YOLO26 end-to-end（NMS-free）不作二次抑制，保留 `score >= confidence` 语义。Letterbox 使用黑色 padding，关键点保留图外坐标；mask 先插值 logits 再二值化、裁剪至整数 bbox。因此直接与 Ultralytics 默认 padding、mask 缩放、关键点裁剪比较不会逐像素一致，应统一预处理并明确这些差异。
 
 #### 已验证兼容性与限制
 
@@ -393,7 +393,7 @@ v0、原生 v1、OpenAI-like 和 MCP 共用 `InferenceService`，不重复加载
 ### C++ 迁移说明
 
 - `InferYOLO/InferOCR::Create/Run` 签名不变。Run 接受非空二维 `CV_8UC3`，支持非连续 ROI；灰度、BGRA、浮点图像以及非有限或超出 `[0,1]` 的 confidence 返回参数错误。
-- YOLO v11 默认按类别 NMS；v10 仅支持端到端 `[1,N,6]`，不再重复 NMS。原 confidence、黑色 Letterbox 填充和 OCR 检测归一化不变。
+- YOLO11/YOLO26 raw 检测在浮点模型空间按类别 NMS 后才裁剪/取整；v10 仅支持端到端 `[1,N,6]`，v10/v26 end-to-end 均不重复 NMS。confidence 阈值语义、黑色 Letterbox 填充和 OCR 检测归一化不变。
 - YOLO26 检测使用 `YOLOVersion::kV26`；`InferYOLOTask::Create` 的路径和内存重载现在都要求在 `task` 后显式传入版本。旧分割／姿态／OBB 调用补 `YOLOVersion::kV11`，YOLO26 调用传 `YOLOVersion::kV26`，可选 `device_id` 放在版本之后。
 - PP-OCR CTC 文件路径 Create 使用 Paddle 字典文件约定：文件不含 blank 和末尾空格类别，由加载器补空格；直接传入 map 时，调用者须提供全部非 blank 类别，键为 `class_id - 1`。SAR 使用上述独立字典约定。
 - `HTTPServer::Run/StartAsync` 现在返回 `HTTPServerResult<void>`，调用者必须检查错误。空/超长 host、监听失败会受控失败，不会静默绑定 wildcard。仓库显式 `0.0.0.0` 默认配置未改变。

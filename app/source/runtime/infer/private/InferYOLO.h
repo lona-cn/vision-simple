@@ -18,9 +18,6 @@ class YOLOFilter {
   std::vector<std::string> class_names_;
   std::vector<int64_t> shapes_;
 
-  static std::vector<YOLOResult> ApplyNMS(
-      const std::vector<YOLOResult>& detections, float iou_threshold);
-
  public:
   using FilterResult = InferResult<YOLOFrameResult>;
 

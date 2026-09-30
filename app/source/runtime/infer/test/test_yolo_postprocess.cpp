@@ -47,6 +47,98 @@ int test_v11_class_aware_nms() {
   return 0;
 }
 
+int test_raw_nms_before_clipping(YOLOVersion version) {
+  YOLOFilter filter(version, {"target"}, {1, 5, 2}, YOLODetectionLayout::kRaw);
+  // xyxy [-90,10,10,30] and [0,10,10,30]: unclipped IoU is 0.1.
+  const std::array<float, 10> output{
+      -40, 5, 20, 20, 100, 10, 20, 20, 0.9f, 0.8f};
+  for (int size : {640, 1280}) {
+    const double gain = 640.0 / size;
+    const LetterboxTransform transform{{size, size}, {640, 640}, {640, 640},
+                                       gain, gain, 0, 0};
+    auto result = filter(output, 0.5f, transform);
+    TEST_ASSERT(result.has_value(), "raw clipping witness accepted");
+    TEST_ASSERT_EQ(result->results.size(), size_t{2},
+                   "raw NMS keeps both unclipped model-space candidates");
+    bool high = false, low = false;
+    for (const auto& detection : result->results) {
+      TEST_ASSERT_EQ(detection.bbox,
+                     cv::Rect(0, 10 * size / 640, 10 * size / 640,
+                              20 * size / 640),
+                     "survivors are clipped only for output");
+      high |= detection.confidence == 0.9f;
+      low |= detection.confidence == 0.8f;
+    }
+    TEST_ASSERT(high && low, "both candidate scores survive at either size");
+  }
+  TEST_PASS("raw NMS uses unclipped model-space geometry");
+  return 0;
+}
+
+int test_raw_nms_before_rounding(YOLOVersion version) {
+  YOLOFilter filter(version, {"target"}, {1, 5, 2}, YOLODetectionLayout::kRaw);
+  // xyxy [10.49,10,14.49,14] and [12.51,10,16.51,14]: floating
+  // IoU is about 0.329, while rounded 640-pixel IoU is only 1/7.
+  const std::array<float, 10> output{
+      12.49f, 14.51f, 12, 12, 4, 4, 4, 4, 0.9f, 0.8f};
+  for (int size : {640, 1280}) {
+    const double gain = 640.0 / size;
+    const LetterboxTransform transform{{size, size}, {640, 640}, {640, 640},
+                                       gain, gain, 0, 0};
+    auto result = filter(output, 0.5f, transform);
+    TEST_ASSERT(result.has_value(), "raw subpixel witness accepted");
+    TEST_ASSERT_EQ(result->results.size(), size_t{1},
+                   "raw NMS suppresses using floating model-space IoU");
+    TEST_ASSERT_EQ(result->results[0].confidence, 0.9f,
+                   "same highest-score candidate survives at either size");
+    TEST_ASSERT_EQ(result->results[0].bbox,
+                   size == 640 ? cv::Rect(10, 10, 4, 4) : cv::Rect(21, 20, 8, 8),
+                   "floating NMS survivor is mapped and rounded for output");
+  }
+  TEST_PASS("raw NMS uses subpixel geometry independently of original size");
+  return 0;
+}
+
+int test_raw_nms_classes_and_empty_boxes(YOLOVersion version) {
+  const LetterboxTransform transform{{640, 640}, {640, 640}, {640, 640},
+                                     1, 1, 0, 0};
+  YOLOFilter filter(version, {"first", "second"}, {1, 6, 8},
+                    YOLODetectionLayout::kRaw);
+  const std::array<float, 48> output{
+      -40, -40, -40, 100, 200, 300, 700, 400.1f,
+      20, 20, 20, 100, 200, 300, 700, 400.1f,
+      100, 100, 100, 0, -10, 20, 10, 0.2f,
+      20, 20, 20, 20, 20, 20, 10, 0.2f,
+      0.9f, 0.8f, 0.1f, 0.95f, 0.95f, 0.5f, 0.95f, 0.95f,
+      0.1f, 0.1f, 0.85f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
+  auto result = filter(output, 0.5f, transform);
+  TEST_ASSERT(result.has_value(), "raw class and empty-box candidates accepted");
+  TEST_ASSERT_EQ(result->results.size(), size_t{2},
+                 "classes isolated; degenerate, clipped and rounded empty boxes discarded");
+  bool first = false, second = false;
+  for (const auto& detection : result->results) {
+    TEST_ASSERT_EQ(detection.bbox, cv::Rect(0, 10, 10, 20),
+                   "negative-coordinate cross-class survivors retain geometry");
+    if (detection.class_id == 0) {
+      first = true;
+      TEST_ASSERT_EQ(detection.confidence, 0.9f, "same-class lower score suppressed");
+    } else if (detection.class_id == 1) {
+      second = true;
+      TEST_ASSERT_EQ(detection.confidence, 0.85f, "overlapping second class retained");
+    }
+  }
+  TEST_ASSERT(first && second, "negative-coordinate NMS never mixes classes");
+  auto boundary = filter(output, 0.95f, transform);
+  TEST_ASSERT(boundary && boundary->results.empty(), "raw confidence equality is excluded");
+  auto empty = filter(output, 1.0f, transform);
+  TEST_ASSERT(empty && empty->results.empty(), "no eligible candidates yields empty output");
+  YOLOFilter zero(version, {"target"}, {1, 5, 0}, YOLODetectionLayout::kRaw);
+  auto zero_result = zero({}, 0.5f, transform);
+  TEST_ASSERT(zero_result && zero_result->results.empty(), "zero raw rows yield empty output");
+  TEST_PASS("raw class isolation, strict threshold and empty-box handling");
+  return 0;
+}
+
 int test_v10_coordinates_without_second_nms() {
   VisionHelper helper;
   LetterboxTransform transform;
@@ -248,6 +340,11 @@ int test_v26_layouts_and_metadata() {
 int main() {
   int failures = 0;
   failures += test_v11_class_aware_nms();
+  for (auto version : {YOLOVersion::kV11, YOLOVersion::kV26}) {
+    failures += test_raw_nms_before_clipping(version);
+    failures += test_raw_nms_before_rounding(version);
+    failures += test_raw_nms_classes_and_empty_boxes(version);
+  }
   failures += test_v10_coordinates_without_second_nms();
   failures += test_malformed_shapes_and_lengths();
   failures += test_malformed_class_and_nonfinite_values();

@@ -1,5 +1,6 @@
 #include "InferYOLO.h"
 
+#include <algorithm>
 #include <climits>
 #include <limits>
 
@@ -160,27 +161,6 @@ YOLOFilter::YOLOFilter(YOLOVersion version,
 
 YOLOVersion YOLOFilter::version() const noexcept { return version_; }
 
-std::vector<YOLOResult> YOLOFilter::ApplyNMS(
-    const std::vector<YOLOResult>& detections, float iou_threshold) {
-  std::vector<int> indices, class_ids;
-  std::vector<cv::Rect> boxes;
-  std::vector<float> scores;
-  boxes.reserve(detections.size());
-  scores.reserve(detections.size());
-  class_ids.reserve(detections.size());
-  for (const auto& detection : detections) {
-    boxes.push_back(detection.bbox);
-    scores.push_back(detection.confidence);
-    class_ids.push_back(detection.class_id);
-  }
-  cv::dnn::NMSBoxesBatched(boxes, scores, class_ids, 0.0f, iou_threshold,
-                           indices);
-  std::vector<YOLOResult> result;
-  result.reserve(indices.size());
-  for (int idx : indices) result.push_back(detections[idx]);
-  return result;
-}
-
 YOLOFilter::FilterResult YOLOFilter::DecodeRaw(
     std::span<const float> infer_output, float confidence_threshold,
     const LetterboxTransform& transform) const {
@@ -190,7 +170,15 @@ YOLOFilter::FilterResult YOLOFilter::DecodeRaw(
         VisionSimpleError{VisionSimpleErrorCode::kModelError,
                           "Invalid YOLO raw output shape or length"});
   const size_t num_detections = static_cast<size_t>(shapes_[2]);
-  std::vector<YOLOResult> detections;
+  struct Candidate {
+    cv::Vec4f xyxy;
+    double area;
+    float confidence;
+    int class_id;
+    size_t index;
+    bool suppressed = false;
+  };
+  std::vector<Candidate> candidates;
   for (size_t d = 0; d < num_detections; ++d) {
     const float cx = infer_output[d], cy = infer_output[num_detections + d];
     const float width = infer_output[2 * num_detections + d];
@@ -198,8 +186,10 @@ YOLOFilter::FilterResult YOLOFilter::DecodeRaw(
     if (!IsFinite(cx) || !IsFinite(cy) || !IsFinite(width) || !IsFinite(height))
       return std::unexpected(VisionSimpleError{
           VisionSimpleErrorCode::kModelError, "Non-finite YOLO coordinates"});
-    if (!IsFinite(cx - width * 0.5f) || !IsFinite(cy - height * 0.5f) ||
-        !IsFinite(cx + width * 0.5f) || !IsFinite(cy + height * 0.5f))
+    const cv::Vec4f xyxy{cx - width * 0.5f, cy - height * 0.5f,
+                         cx + width * 0.5f, cy + height * 0.5f};
+    if (!IsFinite(xyxy[0]) || !IsFinite(xyxy[1]) ||
+        !IsFinite(xyxy[2]) || !IsFinite(xyxy[3]))
       return std::unexpected(VisionSimpleError{
           VisionSimpleErrorCode::kModelError, "Overflowing YOLO coordinates"});
     int class_id = 0;
@@ -214,16 +204,45 @@ YOLOFilter::FilterResult YOLOFilter::DecodeRaw(
         class_id = static_cast<int>(c);
       }
     }
-    if (confidence > confidence_threshold) {
-      const auto box = VisionHelper::ScaleCoords(
-          transform, {cx - width * 0.5f, cy - height * 0.5f, cx + width * 0.5f,
-                      cy + height * 0.5f});
-      if (box.width > 0 && box.height > 0)
-        detections.emplace_back(class_id, box, confidence,
-                                class_names_[class_id]);
+    if (confidence > confidence_threshold && xyxy[2] > xyxy[0] &&
+        xyxy[3] > xyxy[1]) {
+      const double area = (static_cast<double>(xyxy[2]) - xyxy[0]) *
+                          (static_cast<double>(xyxy[3]) - xyxy[1]);
+      candidates.push_back({xyxy, area, confidence, class_id, d});
     }
   }
-  return YOLOFrameResult{ApplyNMS(detections, 0.3f)};
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate& a, const Candidate& b) {
+              return a.confidence != b.confidence
+                         ? a.confidence > b.confidence
+                         : a.index < b.index;
+            });
+  std::vector<YOLOResult> detections;
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    const auto& candidate = candidates[i];
+    if (candidate.suppressed) continue;
+    // Compare unclipped floating model-space boxes only within the class.
+    // Explicit class isolation also avoids offsets failing for negative boxes.
+    for (size_t j = i + 1; j < candidates.size(); ++j) {
+      auto& other = candidates[j];
+      if (other.suppressed || candidate.class_id != other.class_id) continue;
+      const double width = std::max(
+          0.0, static_cast<double>(std::min(candidate.xyxy[2], other.xyxy[2])) -
+                   std::max(candidate.xyxy[0], other.xyxy[0]));
+      const double height = std::max(
+          0.0, static_cast<double>(std::min(candidate.xyxy[3], other.xyxy[3])) -
+                   std::max(candidate.xyxy[1], other.xyxy[1]));
+      const double intersection = width * height;
+      const double iou = intersection /
+                         (candidate.area + other.area - intersection);
+      if (iou > 0.3f) other.suppressed = true;
+    }
+    const auto box = VisionHelper::ScaleCoords(transform, candidate.xyxy);
+    if (box.width > 0 && box.height > 0)
+      detections.emplace_back(candidate.class_id, box, candidate.confidence,
+                              class_names_[candidate.class_id]);
+  }
+  return YOLOFrameResult{std::move(detections)};
 }
 
 YOLOFilter::FilterResult YOLOFilter::DecodeEndToEnd(
