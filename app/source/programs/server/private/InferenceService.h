@@ -19,6 +19,7 @@ enum class ServiceFailure {
   kInvalidRequest,
   kUnknownModel,
   kInvalidImage,
+  kImageLimit,
   kModelLoad,
   kModelConfig,
   kInference,
@@ -120,12 +121,20 @@ struct ModelStatistics {
   double total_duration_ms;
   int64_t last_used;
 };
+struct ImageBudgetStatistics {
+  size_t in_use_bytes = 0;
+  size_t peak_bytes = 0;
+  size_t active_requests = 0;
+  uint64_t decode_calls = 0;
+  uint64_t rejected_requests = 0;
+};
 struct ServiceStatistics {
   std::vector<ModelStatistics> models;
   int64_t idle_timeout_ms;
   size_t total;
   size_t limit;
   size_t offset;
+  ImageBudgetStatistics image_budget;
 };
 struct InferenceServiceOptions {
   InferFramework framework = InferFramework::kONNXRUNTIME;
@@ -136,6 +145,9 @@ struct InferenceServiceOptions {
   PipelineOptions pipeline;
   std::chrono::milliseconds request_timeout{60000};
   size_t ocr_rec_batch_size = 1;
+  size_t max_image_pixels = 16777216;
+  size_t max_batch_decoded_bytes = 67108864;
+  size_t max_inflight_decoded_bytes = 268435456;
 };
 struct ServiceControl {
   std::stop_token stop;

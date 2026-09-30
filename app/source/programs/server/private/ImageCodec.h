@@ -6,10 +6,18 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace vision_simple {
-// Canonical raw base64 only. Codec/allocation exceptions belong to the caller's
-// request error boundary; malformed data returns nullopt.
+struct PreparedImage {
+  std::vector<uint8_t> bytes;
+  size_t pixels;
+};
+// Decode canonical base64 once and inspect dimensions without invoking a codec.
+// Reserve decoded storage before DecodeImageBytes and verify its pixel count;
+// preflight validates headers, not the compressed image payload.
+std::optional<PreparedImage> PrepareEncodedImage(std::string_view text);
+// Codec/allocation exceptions belong to the caller; malformed data returns nullopt.
 // A pixel limit enables PNG/JPEG-only header preflight before codec allocation.
 std::optional<cv::Mat> DecodeEncodedImage(
     std::string_view text, std::optional<size_t> max_pixels = std::nullopt);

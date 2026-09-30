@@ -7,6 +7,8 @@
 #include <magic_enum.hpp>
 #include <map>
 #include <mutex>
+#include <limits>
+#include <type_traits>
 #include <string_view>
 #include <thread>
 
@@ -21,31 +23,6 @@ namespace {
 using Clock = std::chrono::steady_clock;
 void LogFailure(std::string_view detail) noexcept {
   LogFacade::Error("inference", detail);
-}
-std::optional<std::vector<cv::Mat>> PrepareImages(
-    std::span<const std::string> encoded, ServiceError& stage) {
-  stage = {ServiceFailure::kInvalidImage, std::nullopt};
-  std::vector<cv::Mat> images;
-  images.reserve(encoded.size());
-  for (size_t i = 0; i < encoded.size(); ++i) {
-    stage.image_index = i;
-    auto image = DecodeEncodedImage(encoded[i]);
-    if (!image) return std::nullopt;
-    images.emplace_back(std::move(*image));
-  }
-  return images;
-}
-std::optional<std::span<const cv::Mat>> PrepareImages(
-    std::span<const cv::Mat> images, ServiceError& stage) {
-  stage = {ServiceFailure::kInvalidImage, std::nullopt};
-  for (size_t i = 0; i < images.size(); ++i) {
-    stage.image_index = i;
-    const auto& image = images[i];
-    if (image.empty() || image.dims != 2 || image.rows <= 0 ||
-        image.cols <= 0 || image.type() != CV_8UC3)
-      return std::nullopt;
-  }
-  return images;
 }
 int64_t UnixMilliseconds() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -90,6 +67,77 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
   std::condition_variable sweep_cv_;
   bool sweep_stopping_ = false;
   std::thread sweep_thread_;
+  // Independent of model leases: held through preflight and physical pipeline
+  // completion, and refunded only after request-owned image buffers are gone.
+  std::mutex image_budget_mutex_;
+  ImageBudgetStatistics image_budget_;
+  class ImageCredit {
+    Impl& owner_;
+    bool admitted_ = false;
+    size_t bytes_ = 0;
+
+   public:
+    explicit ImageCredit(Impl& owner) noexcept : owner_(owner) {}
+    ImageCredit(const ImageCredit&) = delete;
+    ImageCredit& operator=(const ImageCredit&) = delete;
+    ~ImageCredit() {
+      if (!admitted_) return;
+      std::lock_guard lock{owner_.image_budget_mutex_};
+      owner_.image_budget_.in_use_bytes -= bytes_;
+      --owner_.image_budget_.active_requests;
+    }
+    bool TryRequestSlot() {
+      std::lock_guard lock{owner_.image_budget_mutex_};
+      if (owner_.image_budget_.active_requests >= owner_.options.pipeline.max_batches) {
+        ++owner_.image_budget_.rejected_requests;
+        return false;
+      }
+      ++owner_.image_budget_.active_requests;
+      admitted_ = true;
+      return true;
+    }
+    bool TryReserve(size_t bytes) {
+      std::lock_guard lock{owner_.image_budget_mutex_};
+      if (bytes > owner_.options.max_inflight_decoded_bytes -
+                      owner_.image_budget_.in_use_bytes) {
+        ++owner_.image_budget_.rejected_requests;
+        return false;
+      }
+      bytes_ = bytes;
+      owner_.image_budget_.in_use_bytes += bytes;
+      owner_.image_budget_.peak_bytes = std::max(
+          owner_.image_budget_.peak_bytes, owner_.image_budget_.in_use_bytes);
+      return true;
+    }
+    void RejectLimit() {
+      std::lock_guard lock{owner_.image_budget_mutex_};
+      ++owner_.image_budget_.rejected_requests;
+    }
+    void BeginDecode() {
+      std::lock_guard lock{owner_.image_budget_mutex_};
+      ++owner_.image_budget_.decode_calls;
+    }
+  };
+  static std::optional<ServiceError> CheckControl(const PipelineControl& control) {
+    if (control.stop.stop_requested())
+      return ServiceError{ServiceFailure::kCancelled, {}};
+    if (Clock::now() >= control.deadline)
+      return ServiceError{ServiceFailure::kTimedOut, {}};
+    return std::nullopt;
+  }
+  bool AddImageBytes(size_t pixels, size_t& bytes, ImageCredit& credit,
+                     ServiceError& stage) {
+    if (pixels > options.max_image_pixels ||
+        pixels > std::numeric_limits<size_t>::max() / 3 ||
+        pixels * 3 > options.max_batch_decoded_bytes - bytes) {
+      stage.kind = ServiceFailure::kImageLimit;
+      credit.RejectLimit();
+      return false;
+    }
+    bytes += pixels * 3;
+    return true;
+  }
+
   class ModelLease final : public InferenceCompletion {
     std::shared_ptr<Impl> owner_;
     ModelEntry* entry_;
@@ -187,10 +235,71 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
       if (!*loaded)
         return std::unexpected(ServiceError{ServiceFailure::kUnknownModel, {}});
       auto lease = std::move(*loaded);
-      auto images = PrepareImages(input, stage);
-      if (!images) return std::unexpected(stage);
+      if (input.empty()) {
+        stage = {ServiceFailure::kInference, {}};
+        auto batch = RunRegisteredTask(lease->get(), *pipeline_,
+                                      std::span<const cv::Mat>{}, pipeline_control);
+        if (!batch) return std::unexpected(std::move(batch.error()));
+        return InferenceResponse{std::move(*batch), std::move(lease)};
+      }
+      if (auto error = CheckControl(pipeline_control)) return std::unexpected(*error);
+      ImageCredit credit{*this};
+      if (!credit.TryRequestSlot())
+        return std::unexpected(ServiceError{ServiceFailure::kBusy, {}});
+      // Declaration order is intentional: partial preflight/decode buffers are
+      // destroyed before the credit refunds bytes and the request slot.
+      std::vector<PreparedImage> prepared;
+      std::vector<cv::Mat> decoded;
+      std::span<const cv::Mat> images;
+      size_t bytes = 0;
+      stage = {ServiceFailure::kInvalidImage, {}};
+      if constexpr (std::is_same_v<Image, std::string>) {
+        prepared.reserve(input.size());
+        for (size_t i = 0; i < input.size(); ++i) {
+          if (auto error = CheckControl(pipeline_control)) return std::unexpected(*error);
+          stage.image_index = i;
+          auto image = PrepareEncodedImage(input[i]);
+          if (!image) return std::unexpected(stage);
+          if (!AddImageBytes(image->pixels, bytes, credit, stage))
+            return std::unexpected(stage);
+          prepared.emplace_back(std::move(*image));
+        }
+      } else {
+        for (size_t i = 0; i < input.size(); ++i) {
+          if (auto error = CheckControl(pipeline_control)) return std::unexpected(*error);
+          stage.image_index = i;
+          const auto& image = input[i];
+          if (image.empty() || image.dims != 2 || image.rows <= 0 ||
+              image.cols <= 0 || image.type() != CV_8UC3)
+            return std::unexpected(stage);
+          const size_t rows = static_cast<size_t>(image.rows);
+          const size_t cols = static_cast<size_t>(image.cols);
+          if (cols > std::numeric_limits<size_t>::max() / rows)
+            return std::unexpected(stage);
+          if (!AddImageBytes(rows * cols, bytes, credit, stage))
+            return std::unexpected(stage);
+        }
+        images = input;
+      }
+      if (auto error = CheckControl(pipeline_control)) return std::unexpected(*error);
+      if (!credit.TryReserve(bytes))
+        return std::unexpected(ServiceError{ServiceFailure::kBusy, {}});
+      if constexpr (std::is_same_v<Image, std::string>) {
+        decoded.reserve(prepared.size());
+        for (size_t i = 0; i < prepared.size(); ++i) {
+          if (auto error = CheckControl(pipeline_control)) return std::unexpected(*error);
+          stage.image_index = i;
+          credit.BeginDecode();
+          auto image = DecodeImageBytes(prepared[i].bytes);
+          if (!image || image->dims != 2 || image->type() != CV_8UC3 ||
+              image->total() != prepared[i].pixels)
+            return std::unexpected(stage);
+          decoded.emplace_back(std::move(*image));
+        }
+        images = decoded;
+      }
       stage = {ServiceFailure::kInference, {}};
-      auto batch = RunRegisteredTask(lease->get(), *pipeline_, *images,
+      auto batch = RunRegisteredTask(lease->get(), *pipeline_, images,
                                      pipeline_control);
       if (!batch) return std::unexpected(std::move(batch.error()));
       stage.kind = ServiceFailure::kInternal;
@@ -263,7 +372,11 @@ VSResult<std::shared_ptr<InferenceService>> InferenceService::Create(
       options.pipeline.capacity == 0 || options.pipeline.capacity > 64 ||
       options.pipeline.max_batches == 0 || options.pipeline.max_batches > 64 ||
       options.pipeline.max_batch_images == 0 ||
-      options.pipeline.max_batch_images > 4096)
+      options.pipeline.max_batch_images > 4096 ||
+      options.max_image_pixels == 0 ||
+      options.max_image_pixels > std::numeric_limits<size_t>::max() / 3 ||
+      options.max_batch_decoded_bytes < 3 ||
+      options.max_inflight_decoded_bytes < 3)
     return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
                       "Invalid inference service options");
   try {
@@ -347,12 +460,13 @@ ServiceResult<ServiceStatistics> InferenceService::Stats(
   if (!limit || limit > 200)
     return std::unexpected(ServiceError{ServiceFailure::kInvalidRequest, {}});
   try {
-    std::lock_guard lock{impl_->cache_mutex_};
+    std::scoped_lock lock{impl_->cache_mutex_, impl_->image_budget_mutex_};
     ServiceStatistics result{{},
                              impl_->options.idle_timeout.count(),
                              impl_->models_cache_.size(),
                              limit,
-                             offset};
+                             offset,
+                             impl_->image_budget_};
     size_t index = 0;
     for (const auto& [key, entry] : impl_->models_cache_) {
       if (index++ < offset || result.models.size() >= limit) continue;

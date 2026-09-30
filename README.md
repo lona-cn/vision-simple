@@ -79,7 +79,7 @@ docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 
 成功字段保持不变：YOLO 返回 `class_names`/`results`，OCR 返回 `results`。`model` 必须为非空字符串，`images` 必须为字符串数组；有效模型接受空数组。HTTP 200 保证结果数量与输入数量相等、顺序一致；某张图没有目标时，该项为空数组。
 
-任一图片失败即整批失败，不返回部分结果。处理顺序为请求校验、模型查找/加载、全部图片解码、有界流水线推理、序列化；返回首先失败的阶段及该阶段最小图片索引。
+任一图片失败即整批失败，不返回部分结果。顺序为请求校验、模型查找/加载、取消/超时/关闭检查、请求 credit 接纳、按索引 header 预检、整批字节预留、全部图片解码、流水线推理、序列化；模型/配置失败仍优先于图像接纳错误。
 
 ```json
 {"error":{"code":"invalid_image","message":"Image cannot be decoded","image_index":1}}
@@ -88,7 +88,7 @@ docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 | HTTP | `error.code` | `image_index` |
 | --- | --- | --- |
 | 400 | `invalid_request`、`unknown_model` | `null` |
-| 400 | `invalid_image` | 从 0 开始的图片索引 |
+| 400 | `invalid_image`、`image_limit_exceeded` | 从 0 开始的图片索引 |
 | 500 | `model_load_failed`、`model_config_failed`、`internal_error` | `null` |
 | 500 | `inference_failed` | 从 0 开始的图片索引 |
 | 503 | `service_overloaded`、`service_unavailable`、`request_cancelled` | `null` |
@@ -99,7 +99,7 @@ docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 ### 模型生命周期与并发
 
 - `POST /v0/infer/unload` 接受 `{"kind":"yolo","model":"hd2-fp32"}`；`kind` 支持 `yolo`、`ocr`、`seg`、`pose`、`obb`。空闲模型卸载返回 `200 {"kind":"yolo","model":"hd2-fp32","unloaded":true}`；活动模型返回 `409 model_busy`；未加载返回 `404 model_not_loaded`。后续推理自动重新加载。卸载和 stats 覆盖五种任务，只有旧 `/v0/infer/models` 目录限于 `yolo`/`ocr`。
-- `GET /v0/infer/stats?limit=100&offset=0` 返回 `models`、`total`、`limit`、`offset` 和 `idle_timeout_ms`；limit 范围 1–200。模型按 `(kind,name)` 排序，字段为 `kind`、`name`、`active_requests`、`requests`、`failures`、`total_duration_ms`、`last_used`（Unix 毫秒）。计数属于当前已加载实例，重新加载后重置；加载前的请求错误不计入实例统计，耗时含等待工作区的时间。
+- `GET /v0/infer/stats?limit=100&offset=0` 返回 `models`、`total`、`limit`、`offset`、`idle_timeout_ms` 和服务级 `image_budget`（见下文）；limit 范围 1–200。模型按 `(kind,name)` 排序，字段为 `kind`、`name`、`active_requests`、`requests`、`failures`、`total_duration_ms`、`last_used`（Unix 毫秒）。模型计数属于当前已加载实例，重新加载后重置；加载前的请求错误不计入实例统计，耗时含等待工作区的时间。
 - `config/server.yaml` 的字符串 options：`infer_idle_timeout_ms: "300000"`，`infer_sweep_interval_ms: "1000"`。空闲时间从最后一次请求结束计算，使用单调时钟；timeout 为 `"0"` 关闭自动卸载，扫描间隔必须为正整数。
 - 活动租约涵盖解码、等待推理、后处理及响应序列化/发送调用；手动和定时卸载均不删除活动实例。同步 C++ `Run` 每模型串行；HTTP 流水线使用独立任务工作区，同一会话的 ORT 执行受锁保护。
 - 卸载释放 session 和模型工作区，但共享 ORT arena / provider 可能保留内存，不保证 RSS 或显存立即下降。YOLO 结果的 `class_name` 仍引用模型元数据，C++ 调用者须让模型活得比结果视图更久。
@@ -111,7 +111,15 @@ HTTP v0 在全部图片解码成功后，使用前处理、ORT、后处理三个
 
 服务 options 支持 `infer_pipeline_capacity: "4"`（驻留阶段任务数，1–64）、`infer_pipeline_max_batches: "4"`（已接纳批次数，1–64）、`infer_max_batch_images: "128"`（每批图片上限，1–4096）、`infer_timeout_ms: "60000"`（默认推理截止时间，1–300000 毫秒）。这些限制不等价于图像像素/字节数上限。
 
-请求可附加整数 `timeout_ms`（1–300000）覆盖默认截止时间。计时从 handler 开始，包含模型加载和解码；截止时间控制推理阶段，不对序列化、网络传输或原生调用作硬实时保证。超时返回 `504 request_timeout`，容量耗尽返回 `503 service_overloaded` 和 `Retry-After: 1`；控制错误的 `image_index` 为 null。解码仍在调度前完成，保留 `invalid_image` 优先级。
+解码输入预算 options（正整数字符串）为 `infer_max_image_pixels: "16777216"`、`infer_max_batch_decoded_bytes: "67108864"`、`infer_max_inflight_decoded_bytes: "268435456"`，覆盖共享 v0/v1/OpenAI/MCP 推理服务，**不覆盖独立 tracking 服务**。预检严格解码 base64 一次，只读 header、不调用 `imdecode`；本构建支持 PNG、JPEG、BMP、P1–P7、PF/Pf、Radiance HDR、Sun Raster，WebP 需启用相应 codec；TIFF/JP2/EXR/AVIF 未启用。宽高须为正且不超过 `INT_MAX`，像素及字节乘加均检查溢出。实际采用 OpenCV 默认彩色解码并遵循 EXIF 方向；宽高交换不改变像素额度，并复核像素总数及 `CV_8UC3`。
+上述列表是 header 预检范围，不保证任意 payload 都能推理；实际 codec 解码失败或输出不是 `CV_8UC3` 时仍返回 `invalid_image`。例如当前 OpenCV 4.10 的灰度 PFM（`Pf`）即使使用彩色标志仍输出 `CV_8UC1`，因此推理拒绝该图，不额外归一化。
+
+字节估算仅为 BGR 输入的 `width * height * 3`，不是 RSS 上限，不含压缩正文、codec 临时内存、模型 arena、工作区及响应 mask。单图超限或第一个累计批次超限返回 `400 image_limit_exceeded` 和该图索引，整批尚未开始任何解码；base64/header 无效按顺序返回首个 `400 invalid_image`。请求 credit 从预检覆盖至物理推理结束，上限是 `infer_pipeline_max_batches`，不是驻留任务 capacity。credit 满时先返回 `503 service_overloaded`，不做 base64/codec 工作；全局字节满时在预检之后、解码之前返回同一错误。
+
+stats 新增服务级 `image_budget`：`in_use_bytes`、`peak_bytes`、`active_requests`、`decode_calls`（只计真实 `imdecode` 开始）、`rejected_requests`（预算接纳拒绝），模型卸载不会重置。先等待任务 drain 并析构输入，才返还额度；完成响应仅持模型租约，不持输入像素或图像额度。异常、超时、取消、shutdown 均不能提前返还物理占用；普通 HTTP 断连不打断 ORT，MCP 取消/断连是合作式且同样等待原生工作结束。
+有效模型的空批次保留原有空结果和控制检查语义，不消耗图像 credit、字节或 decode_calls；其他请求已占满预算也不改变此行为。
+
+请求可附加整数 `timeout_ms`（1–300000）覆盖默认截止时间。计时从 handler 开始，包含模型加载和解码；截止时间控制推理阶段，不对序列化、网络传输或原生调用作硬实时保证。超时返回 `504 request_timeout`，容量耗尽返回 `503 service_overloaded` 和 `Retry-After: 1`；控制错误的 `image_index` 为 null。取消优先于超时，再优先于关闭；有 credit 时顺序图像校验优先于全局字节接纳，无 credit 时 overload 优先于 invalid_image。
 
 C++ 调用者可使用 `InferPipeline::Create`，再调用 `Run(model, images, confidence, PipelineControl{stop_token, deadline})`；`Close()` 拒绝新任务并取消未完成批次，销毁前必须等待所有调用者退出。取消优先于超时，超时优先于关闭及普通推理错误。取消仅阻止后续阶段，`Run` 等待已经执行的原生阶段及任务析构完成后才返回，避免活动模型被释放。输入像素及模型须在整个调用期间保持有效，外部不得修改像素。普通 v0/v1 HTTP 断连不自动取消正在运行的任务；MCP 会话断连会发出合作式取消。
 
@@ -560,6 +568,7 @@ HTTP 回归使用 Python 3 标准库，独立创建临时配置、端口和进�
 ```powershell
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_image_budget.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_yolo_tasks_http.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_tracking_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_model_registry.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
@@ -571,12 +580,15 @@ Linux 或自定义构建目录先查询实际可执行文件：
 server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
 python3 scripts/test_http_regression.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
+python3 scripts/test_image_budget.py --server "$server" --project-root .
 python3 scripts/test_yolo_tasks_http.py --server "$server" --project-root .
 python3 scripts/test_tracking_regression.py --server "$server" --project-root .
 python3 scripts/test_model_registry.py --server "$server" --project-root .
 ```
 
 `test_yolo`/`test_ocr` 仍为交互演示，不作为上述 headless 验收。故障 fixture 已入库；仅重新生成时需要开发工具 `onnx` 和 `scripts/generate_reliability_fixtures.py`，不是服务运行依赖。
+
+Windows CPU 已实际通过图像预算回归：跨 v0/v1/OpenAI/MCP 小预算解码前拒绝、精确批次/全局边界、并发 overload/恢复、真实 ORT 异常及取消/超时/断连/shutdown 的物理 drain 后退款；既有协议回归也通过。另以 16px/48B 小预算连续拒绝 100 次声明 2³¹ 像素的 PNG header，最终 `decode_calls=0`、`in_use_bytes=peak_bytes=0`、`rejected_requests=100`；Windows RSS 从首次请求后的 51933184 字节至第 100 次后的 54845440 字节，进程峰值保持 71593984 字节。该受控场景只证明解码前拒绝未启动 codec，不证明精确 RSS 上限、所有格式 payload 可用或任意输入不会 OOM。
 
 ### 构建docker镜像
 所有`Dockerfile`位于目录：`docker/`

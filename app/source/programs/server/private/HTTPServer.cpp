@@ -491,6 +491,8 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) try {
   PipelineOptions pipeline_options;
   uint64_t timeout_ms = 0;
   size_t ocr_rec_batch_size = 1;
+  size_t max_image_pixels = 0, max_batch_decoded_bytes = 0,
+         max_inflight_decoded_bytes = 0;
   if (!ParseInteger(
           options.OptionOrPut(HTTPSERVER_OPT_KEY_PIPELINE_CAPACITY,
                               HTTPSERVER_OPT_DEFVAL_PIPELINE_CAPACITY),
@@ -515,6 +517,24 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) try {
         "pipeline limits must be integers and infer_timeout_ms "
         "must be 1 to 300000; ocr_rec_batch_size must be 1 to 64");
   }
+  if (!ParseInteger(
+          options.OptionOrPut(HTTPSERVER_OPT_KEY_MAX_IMAGE_PIXELS,
+                              HTTPSERVER_OPT_DEFVAL_MAX_IMAGE_PIXELS),
+          max_image_pixels) ||
+      !ParseInteger(
+          options.OptionOrPut(HTTPSERVER_OPT_KEY_MAX_BATCH_DECODED_BYTES,
+                              HTTPSERVER_OPT_DEFVAL_MAX_BATCH_DECODED_BYTES),
+          max_batch_decoded_bytes) ||
+      !ParseInteger(
+          options.OptionOrPut(HTTPSERVER_OPT_KEY_MAX_INFLIGHT_DECODED_BYTES,
+                              HTTPSERVER_OPT_DEFVAL_MAX_INFLIGHT_DECODED_BYTES),
+          max_inflight_decoded_bytes) ||
+      max_image_pixels == 0 || max_batch_decoded_bytes == 0 ||
+      max_inflight_decoded_bytes == 0) {
+    return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
+                      "decoded image budgets must be positive integers "
+                      "within size_t range");
+  }
   auto infer_fw_str =
       options.OptionOrPut(HTTPSERVER_OPT_KEY_INFER_FRAMEWORK,
                           HTTPSERVER_OPT_DEFVAL_INFER_FRAMEWORK);
@@ -536,7 +556,10 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) try {
       .sweep_interval = std::chrono::milliseconds(sweep_ms),
       .pipeline = pipeline_options,
       .request_timeout = std::chrono::milliseconds(timeout_ms),
-      .ocr_rec_batch_size = ocr_rec_batch_size});
+      .ocr_rec_batch_size = ocr_rec_batch_size,
+      .max_image_pixels = max_image_pixels,
+      .max_batch_decoded_bytes = max_batch_decoded_bytes,
+      .max_inflight_decoded_bytes = max_inflight_decoded_bytes});
   if (!service) return std::unexpected(std::move(service.error()));
   Logger::Instance()->get().Info(
       LOG_DOMAIN_NAME, std::format("Execution Provider:{}", infer_ep_str));

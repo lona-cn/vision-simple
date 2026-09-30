@@ -22,6 +22,9 @@ inline ServiceErrorDescription DescribeError(ServiceFailure kind) noexcept {
       return {400, "unknown_model", "Model is not configured"};
     case ServiceFailure::kInvalidImage:
       return {400, "invalid_image", "Image cannot be decoded"};
+    case ServiceFailure::kImageLimit:
+      return {400, "image_limit_exceeded",
+              "Image or batch exceeds the decoded image budget"};
     case ServiceFailure::kModelLoad:
       return {500, "model_load_failed", "Model cannot be loaded"};
     case ServiceFailure::kModelConfig:

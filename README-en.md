@@ -77,7 +77,7 @@ See [OpenAPI](doc/openapi/server.yaml) for the full API. The server has **no aut
 
 Successful fields are unchanged: YOLO returns `class_names`/`results`; OCR returns `results`. `model` must be a nonempty string and `images` an array of strings. An existing model accepts an empty array. HTTP 200 guarantees one result per input image in the original order; no detections is a successful empty item.
 
-Any image failure fails the entire batch, without partial results. Processing order is request validation, model lookup/loading, decoding all images, inference, then serialization. The first failing stage reports its lowest failing image index.
+Any image failure fails the entire batch, without partial results. Processing order is request validation, model lookup/loading, cancellation/deadline/closed checks, request-credit admission, ordered header preflight, whole-batch byte reservation, decoding all images, inference, then serialization. Model/configuration failures retain priority over image admission errors.
 
 ```json
 {"error":{"code":"invalid_image","message":"Image cannot be decoded","image_index":1}}
@@ -86,7 +86,7 @@ Any image failure fails the entire batch, without partial results. Processing or
 | HTTP | `error.code` | `image_index` |
 | --- | --- | --- |
 | 400 | `invalid_request`, `unknown_model` | `null` |
-| 400 | `invalid_image` | Zero-based image index |
+| 400 | `invalid_image`, `image_limit_exceeded` | Zero-based image index |
 | 500 | `model_load_failed`, `model_config_failed`, `internal_error` | `null` |
 | 500 | `inference_failed` | Zero-based image index |
 | 503 | `service_overloaded`, `service_unavailable`, `request_cancelled` | `null` |
@@ -97,7 +97,7 @@ Clients relying on HTTP 200 with textual errors must migrate to HTTP status and 
 ### Model lifecycle and concurrency
 
 - `POST /v0/infer/unload` accepts `{"kind":"yolo","model":"hd2-fp32"}`; `kind` supports `yolo`, `ocr`, `seg`, `pose` and `obb`. An idle model returns `200 {"kind":"yolo","model":"hd2-fp32","unloaded":true}`; active models return `409 model_busy`; absent models return `404 model_not_loaded`. The next inference reloads transparently. Unload and stats cover all five tasks; only the legacy `/v0/infer/models` catalog is restricted to `yolo`/`ocr`.
-- `GET /v0/infer/stats?limit=100&offset=0` returns `models`, `total`, `limit`, `offset`, and `idle_timeout_ms`; limit is 1–200. Entries sort by `(kind,name)` and contain `kind`, `name`, `active_requests`, `requests`, `failures`, `total_duration_ms`, and `last_used` (Unix milliseconds). Counters belong to the loaded instance and reset on reload. Errors before acquisition are excluded; duration includes waiting for the model workspace.
+- `GET /v0/infer/stats?limit=100&offset=0` returns `models`, `total`, `limit`, `offset`, `idle_timeout_ms`, and service-wide `image_budget` (described below); limit is 1–200. Entries sort by `(kind,name)` and contain `kind`, `name`, `active_requests`, `requests`, `failures`, `total_duration_ms`, and `last_used` (Unix milliseconds). Model counters belong to the loaded instance and reset on reload. Errors before acquisition are excluded; duration includes waiting for the model workspace.
 - String options in `config/server.yaml`: `infer_idle_timeout_ms: "300000"` and `infer_sweep_interval_ms: "1000"`. Idle time starts at request completion and uses a monotonic clock. Timeout `"0"` disables eviction; sweep interval must be positive.
 - Active leases cover decoding, queued inference, postprocessing, and response serialization/send calls. Neither manual nor timer eviction removes active instances. Synchronous C++ `Run` calls serialize per model; HTTP pipeline tasks own workspaces and gate ORT execution per session.
 - Unloading releases sessions and model workspaces, but shared ORT arenas/providers may retain allocations: RSS/VRAM need not fall immediately. YOLO `class_name` results still reference model metadata; C++ callers must keep the model alive longer than these views.
@@ -109,7 +109,15 @@ After every image has decoded successfully, HTTP v0 uses separate preprocessing,
 
 Server options: `infer_pipeline_capacity: "4"` (resident frame tasks, 1–64), `infer_pipeline_max_batches: "4"` (admitted batches, 1–64), `infer_max_batch_images: "128"` (images per batch, 1–4096), and `infer_timeout_ms: "60000"` (default inference deadline, 1–300000 ms). These are not decoded pixel/byte limits.
 
-An optional integer request field `timeout_ms` (1–300000) overrides the deadline. Time starts on handler entry and includes loading/decoding; it controls inference stages, not serialization/network delivery or hard preemption of native calls. Expiry returns `504 request_timeout`; exhausted admission returns `503 service_overloaded` with `Retry-After: 1`. Control errors have null `image_index`. Decode validation still precedes scheduling, preserving `invalid_image` precedence.
+Decoded-input options (positive integer strings): `infer_max_image_pixels: "16777216"`, `infer_max_batch_decoded_bytes: "67108864"`, and `infer_max_inflight_decoded_bytes: "268435456"`. They apply to the shared v0/v1/OpenAI/MCP inference service, not the independent tracking service. Preflight strictly decodes base64 once and reads image headers without `imdecode`: PNG, JPEG, BMP, P1–P7, PF/Pf, Radiance HDR and Sun Raster are supported by this build; WebP requires codec-enabled builds. TIFF/JP2/EXR/AVIF are not enabled. Dimensions must be positive and at most `INT_MAX`, with checked pixel/byte arithmetic. Default OpenCV color decoding honors EXIF orientation; swapping width and height preserves the pixel charge. Decoded images are checked against header pixel counts and `CV_8UC3`.
+This format list describes header-preflight coverage, not guaranteed acceptance of every codec payload. Decode failure or non-`CV_8UC3` output still returns `invalid_image`. In particular, OpenCV 4.10 decodes grayscale PFM (`Pf`) as `CV_8UC1` even with the color flag, so inference rejects it rather than adding format-specific normalization.
+
+The estimate is `width * height * 3` for BGR input, not a bound on RSS, compressed request bytes, codec scratch space, model arenas, workspaces or response masks. The single-image limit or first cumulative batch overflow returns `400 image_limit_exceeded` with that input index, before any image decode; invalid base64/header returns `400 invalid_image` at the first invalid input. Request credit spans preflight through physical inference completion and is capped by `infer_pipeline_max_batches`, not resident-task capacity. Exhausted credit rejects before base64/codec work; exhausted global bytes reject after preflight but before decoding, both with `503 service_overloaded`.
+
+Stats include service-wide `image_budget`: `in_use_bytes`, `peak_bytes`, `active_requests`, `decode_calls` (real `imdecode` starts only), and `rejected_requests` (budget admission refusals). These counters do not reset on model unload. Inputs and drained tasks are destroyed before quota refunds; completed responses hold model leases, not input pixels or image quota. Errors, timeout, cancellation and shutdown refund only after physical work drains. Native HTTP disconnect does not interrupt ORT or refund early; MCP cancellation/disconnect is cooperative and likewise waits for native work.
+Valid-model empty batches keep the existing empty-result semantics and control checks: they consume no image credit, bytes or decode calls, even when other requests saturate the budget.
+
+An optional integer request field `timeout_ms` (1–300000) overrides the deadline. Time starts on handler entry and includes loading/decoding; it controls inference stages, not serialization/network delivery or hard preemption of native calls. Expiry returns `504 request_timeout`; exhausted admission returns `503 service_overloaded` with `Retry-After: 1`. Control errors have null `image_index`. Cancellation takes precedence over timeout, then close. With request credit available, ordered image validation precedes global-byte admission; with no credit, overload takes precedence over invalid images.
 
 C++ callers create `InferPipeline`, then call `Run(model, images, confidence, PipelineControl{stop_token, deadline})`. `Close()` rejects new work and cancels unfinished batches; join callers before destruction. Cancellation takes precedence over timeout, then close, then ordinary inference failures. `Run` drains executing native stages and task destruction before returning, so cancellation never releases a model still in use. Models and input pixels must remain alive throughout the call; external aliases must not modify pixels. Ordinary v0/v1 HTTP disconnect does not cancel work; an MCP session disconnect does request cooperative cancellation.
 
@@ -556,6 +564,7 @@ The Python 3 standard-library HTTP driver creates isolated configuration, ports 
 ```powershell
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_image_budget.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_yolo_tasks_http.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_tracking_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_model_registry.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
@@ -567,12 +576,15 @@ For Linux or a custom build directory, discover the actual target:
 server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
 python3 scripts/test_http_regression.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
+python3 scripts/test_image_budget.py --server "$server" --project-root .
 python3 scripts/test_yolo_tasks_http.py --server "$server" --project-root .
 python3 scripts/test_tracking_regression.py --server "$server" --project-root .
 python3 scripts/test_model_registry.py --server "$server" --project-root .
 ```
 
 `test_yolo`/`test_ocr` remain interactive demos, not headless acceptance tests. Tiny failure models are checked in; only regeneration requires the development package `onnx` and `scripts/generate_reliability_fixtures.py`, not a server runtime dependency.
+
+The real Windows CPU image-budget regression passed cross-v0/v1/OpenAI/MCP predecode refusal under small limits, exact batch/global boundaries, concurrent overload/recovery, real ORT exceptions and quota refunds after physical drain on cancellation, timeout, disconnect and shutdown. Existing protocol regressions also passed. A separate 16-pixel/48-byte smoke rejected 100 PNG headers declaring 2³¹ pixels: final `decode_calls=0`, `in_use_bytes=peak_bytes=0`, `rejected_requests=100`. Windows RSS was 51933184 bytes after the first request and 54845440 after the hundredth, with process peak unchanged at 71593984 bytes. This controlled refusal proves the codec was not started, not an exact RSS cap, acceptance of every format payload, or freedom from OOM for arbitrary input.
 
 ### Docker Image
 All `Dockerfiles` are located in the `docker/` directory.

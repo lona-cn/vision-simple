@@ -1,7 +1,23 @@
 openapi: 3.0.1
 info:
   title: vision-simple
-  description: ''
+  description: >-
+    共享 v0/v1/OpenAI/MCP 推理服务的解码预算：infer_max_image_pixels 默认16777216，
+    infer_max_batch_decoded_bytes 默认67108864，infer_max_inflight_decoded_bytes 默认268435456，
+    均为正整数字符串 options，不覆盖独立 tracking 服务。模型/配置错误优先；随后检查取消、
+    超时、关闭，再按 infer_pipeline_max_batches（默认4，非驻留 capacity）取得请求 credit；
+    credit 满立即503且不解码 base64。严格 base64 只解码一次，按索引只读 header 预检，
+    首个无效图400 invalid_image，单图/首次累计批次超限400 image_limit_exceeded；
+    全批次预留全局字节，满则503 service_overloaded，以上均不调用 imdecode。
+    Header预检覆盖本构建 PNG/JPEG/BMP/P1-P7/PF-Pf/Radiance HDR/SunRAS，WebP需启用codec；
+    TIFF/JP2/EXR/AVIF未启用。正宽高不超过INT_MAX，乘加检查溢出；
+    默认彩色解码遵循EXIF并复核像素数和CV_8UC3，方向交换不改像素额度。
+    Header通过不保证payload可推理：codec失败或非CV_8UC3仍为invalid_image；
+    OpenCV4.10灰度Pf即使用彩色标志仍输出CV_8UC1，因此拒绝且不额外归一化。
+    额度估算是BGR3像素字节，不是RSS，不含压缩正文、codec临时内存和模型/工作区。
+    credit覆盖预检至物理Run结束；任务drain、输入析构后返还额度，不挂响应或模型租约。
+    普通HTTP断连不能打断ORT或提前返还；MCP取消/断连及timeout/shutdown同样须等待原生工作。
+    有效模型空批次保留原有空结果及控制检查，不占image credit/字节/decode_calls，预算满时也如此。
   version: 0.4.6
 tags: []
 paths:
@@ -10,8 +26,8 @@ paths:
       summary: YOLO推理
       deprecated: false
       description: >-
-        整批成功或整批失败。按请求校验、模型查找/加载、全部图片解码、有界流水线推理、
-        序列化的顺序处理，仅返回首先失败的阶段及该阶段最小图片索引。
+        整批成功或整批失败。按请求校验、模型查找/加载、控制检查、请求credit、header预检、
+        全局字节预留、全部图片解码、有界流水线推理、序列化的顺序处理。
         HTTP 200 的 results 长度与 images 相同且顺序一致；无目标返回该图的空数组。
         有效模型允许 images 为空数组。错误响应不含部分结果。
       tags: []
@@ -93,7 +109,7 @@ paths:
                             - 478
           headers: {}
         '400':
-          description: invalid_request、unknown_model 或带图片索引的 invalid_image。
+          description: invalid_request、unknown_model 或带图片索引的 invalid_image/image_limit_exceeded。
           content:
             application/json:
               schema:
@@ -158,8 +174,8 @@ paths:
       summary: OCR推理
       deprecated: false
       description: >-
-        整批成功或整批失败。按请求校验、模型查找/加载、全部图片解码、逐图推理、
-        序列化的顺序处理，仅返回首先失败的阶段及该阶段最小图片索引。
+        整批成功或整批失败。按请求校验、模型查找/加载、控制检查、请求credit、header预检、
+        全局字节预留、全部图片解码、有界流水线推理、序列化的顺序处理。
         HTTP 200 的 results 长度与 images 相同且顺序一致；每张图片对应的结果数组可为空。
         有效模型允许 images 为空数组。错误响应不含部分结果。
       tags: []
@@ -213,7 +229,7 @@ paths:
                             - 25
           headers: {}
         '400':
-          description: invalid_request、unknown_model 或带图片索引的 invalid_image。
+          description: invalid_request、unknown_model 或带图片索引的 invalid_image/image_limit_exceeded。
           content:
             application/json:
               schema:
@@ -320,7 +336,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [models, total, limit, offset, idle_timeout_ms]
+                required: [models, total, limit, offset, idle_timeout_ms, image_budget]
                 properties:
                   total:
                     type: integer
@@ -332,6 +348,16 @@ paths:
                   idle_timeout_ms:
                     type: integer
                     description: 空闲自动卸载阈值；0 表示禁用
+                  image_budget:
+                    type: object
+                    description: 服务级BGR输入预算计数，不随模型卸载重置；退款等待物理执行和输入析构
+                    required: [in_use_bytes, peak_bytes, active_requests, decode_calls, rejected_requests]
+                    properties:
+                      in_use_bytes: {type: integer, format: int64, minimum: 0, description: 当前预留BGR输入字节}
+                      peak_bytes: {type: integer, format: int64, minimum: 0, description: 服务启动以来预留字节峰值}
+                      active_requests: {type: integer, minimum: 0, description: 持有请求credit的物理活动请求数}
+                      decode_calls: {type: integer, format: int64, minimum: 0, description: 真实imdecode调用开始次数}
+                      rejected_requests: {type: integer, format: int64, minimum: 0, description: 单图/批次/全局/credit预算拒绝请求数}
                   models:
                     type: array
                     maxItems: 200
@@ -405,7 +431,7 @@ paths:
                   - {$ref: '#/components/schemas/InferPoseResponse'}
                   - {$ref: '#/components/schemas/InferOBBResponse'}
         '400': &native_error
-          description: invalid_request 或 invalid_image；按 code 分支
+          description: invalid_request、invalid_image 或 image_limit_exceeded；按 code 分支
           content:
             application/json:
               schema: {$ref: '#/components/schemas/InferError'}
@@ -1451,6 +1477,7 @@ components:
                 - invalid_request
                 - unknown_model
                 - invalid_image
+                - image_limit_exceeded
                 - model_load_failed
                 - model_config_failed
                 - inference_failed
@@ -1472,7 +1499,7 @@ components:
               minimum: 0
               nullable: true
               description: >-
-                invalid_image 和 inference_failed 为原始 images 的零起始索引，
+                invalid_image、image_limit_exceeded 和 inference_failed 为原始 images 的零起始索引，
                 同阶段多个失败时取最小索引。其他错误固定为 null。
       example:
         error:
