@@ -626,6 +626,27 @@ xmake build server
 
 Run these commands from the repository root. If you just launched the server as above, open another terminal at the repository root. Configure a CPU build first and ensure Git LFS model resources have been downloaded.
 
+**CI coverage layers:** execution gates and cross-build artifact checks are distinct. These definitions do not claim that a particular hosted run passed.
+
+- Five native `build_tests` rows (Linux GCC Release, Clang/libc++ Release, GCC ASan+UBSan, Windows MSVC CPU and Windows MSVC DirectML) explicitly build and run **14 C++ executables**. Deterministic regressions cover common/conversion/vision helpers, YOLO postprocessing, OCR decoding, configuration, tracking, subtitle timelines and image codecs. A separate CPU fixture-backed step runs inference inputs, pipelines, YOLO tasks, OCR batches and shared-service image budgets using real ONNX sessions, including deliberate failure/invalid models.
+- Only the two CPU `run_http` rows (Linux GCC Release and Windows MSVC CPU Release) also run `test_subtitle_service`, making **15 C++ executables per CPU row**, plus **nine real-server HTTP drivers**: generic HTTP/startup, management security, bounded dispatch, subtitle media, protocol, model registry, tracking with a real detector and image, YOLO tasks and image budgets. Subtitle media requires FFmpeg and a usable font; Windows MP4 decoding uses Media Foundation. Missing prerequisites fail, not skip.
+- ARM64 CPU/RKNPU, ARMv7 and RISC-V64 cross rows retain artifact architecture checks; they do not execute those binaries. The DirectML row does not establish GPU/DirectML inference coverage; these CPU tests do not verify real CUDA, TensorRT or RKNPU hardware inference either.
+- Existing release-policy gates remain separate: **2 artifact tests + 11 Docker release tests**. The Docker workflow remains independent; its native CPU container smoke is not proof for every Dockerfile or hardware execution provider.
+
+Before model-backed runs, fetch Git LFS resources and run the fixture preflight below. Every required fixture must be a regular, nonempty file containing actual bytes, not an LFS pointer. This includes intentionally invalid ONNX metadata and runtime-failure fixtures: negative tests still require their inputs. Missing resources fail rather than become successful omissions.
+
+```sh
+git lfs pull
+python scripts/check_ci_fixtures.py --project-root . --layer native
+python scripts/check_ci_fixtures.py --project-root . --layer http
+```
+
+Both `--project-root` and `--layer` are required. `native` checks model/dictionary fixtures for the native CPU-session tests; `http` checks real-server model, image, reference/configuration and OpenAPI assets. These byte-level checks do not replace runtime inference or FFmpeg/font/media prerequisites. Tracking commands below deliberately pass both `--yolo-model` and `--yolo-image`; omitting them does not exercise the detector-to-tracker integration.
+
+The subtitle driver accepts `--ffmpeg` and `--font` overrides. Its FFmpeg must support drawtext, MJPEG, libx264, AAC, msmpeg4v3 and ASF/Matroska muxers; default fonts are Windows Arial or Linux DejaVuSans. The workflow retains the existing FFmpeg/font setup and Windows Media Foundation prerequisite rather than skipping unavailable media paths.
+
+The current bounded-dispatch driver uses separate consumer witnesses: four real native OCR batches exercise decoded-image occupancy and control-plane responsiveness; four real paused subtitle uploads independently hold the data workers while native queue admission, pre-parse overload rejection and expiry without decoding are checked. It does not require native image-budget saturation and a full transport queue to coincide. The historical measurements below remain evidence for their original run, not a timing promise for this CI driver.
+
 The following dispatch timings are historical issue #52 evidence, collected before management authentication. The Linux runtime was a separate local CPU image, not a verification of today's six Dockerfiles or issue #53 administrator policy.
 
 **HTTP dispatch verification (Windows x64, CPU, real PP-OCR):** the final complete driver passed in 113.23 s, covering bounded overload/queue deadlines, shared native/MCP image budget, empty-input contract differences, slow/disconnected clients, sequential keepalive, split/combined-write pipelining rejection and active+queued shutdown. Every loaded health sample was bracketed by four active requests reserving exactly 73,744,128 decoded-input bytes; the final 18 samples gave P50 14.4028 ms and P95/P99 15.4099 ms. Before offloading, five of six loaded probes timed out at the two-second consumer deadline. Generic HTTP regression with explicit workload quotas also passed (278.17 s), as did the enhanced paused-upload/cancellation subtitle regression (38.67 s). These are observed samples, not portable latency or RSS guarantees.
@@ -651,6 +672,9 @@ xmake build test_yolo_tasks
 xmake build test_tracker
 xmake build test_config_load
 xmake build test_subtitle_timeline
+xmake build test_image_codec
+xmake build test_image_budget_service
+xmake build test_subtitle_service
 
 xmake run test_common
 xmake run test_cvt
@@ -658,12 +682,15 @@ xmake run test_vision_helper
 xmake run test_yolo_postprocess
 xmake run test_ocr_decode
 xmake run test_ocr_batch --project-root .
-xmake run test_infer_inputs
-xmake run test_pipeline
+xmake run test_infer_inputs --project-root .
+xmake run test_pipeline --project-root .
 xmake run test_yolo_tasks --project-root .
 xmake run test_tracker
 xmake run test_config_load
 xmake run test_subtitle_timeline
+xmake run test_image_codec
+xmake run test_image_budget_service --project-root .
+xmake run test_subtitle_service --project-root .
 ```
 
 The Python 3 standard-library HTTP driver creates isolated configuration, ports and processes; it does not touch an existing port 11451 service. Missing models, dictionaries, images or failure fixtures fail the run rather than count as SKIP.
@@ -674,10 +701,11 @@ The management-security driver uses the standard real CPU model/image fixtures a
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_management_security.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_http_dispatch.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_subtitle_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_image_budget.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_yolo_tasks_http.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
-python scripts/test_tracking_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_tracking_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root . --yolo-model app/assets/test/hd2-yolo11n-fp32.onnx --yolo-image app/assets/test/hd2.png
 python scripts/test_model_registry.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 ```
 
@@ -688,10 +716,11 @@ server="$(xmake lua -q -c "import('core.project.config'); config.load(); import(
 python3 scripts/test_http_regression.py --server "$server" --project-root .
 python3 scripts/test_management_security.py --server "$server" --project-root .
 python3 scripts/test_http_dispatch.py --server "$server" --project-root .
+python3 scripts/test_subtitle_regression.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
 python3 scripts/test_image_budget.py --server "$server" --project-root .
 python3 scripts/test_yolo_tasks_http.py --server "$server" --project-root .
-python3 scripts/test_tracking_regression.py --server "$server" --project-root .
+python3 scripts/test_tracking_regression.py --server "$server" --project-root . --yolo-model app/assets/test/hd2-yolo11n-fp32.onnx --yolo-image app/assets/test/hd2.png
 python3 scripts/test_model_registry.py --server "$server" --project-root .
 ```
 

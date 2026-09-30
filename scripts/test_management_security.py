@@ -12,6 +12,7 @@ import sys
 import select
 import threading
 import time
+import traceback
 
 from test_http_regression import (Server, RegressionFailure, REPEATED_WORKLOAD_OPTIONS,
                                   close_values, error_response, fixture, infer,
@@ -24,8 +25,25 @@ MODEL = {'kind': 'yolo', 'model': 'hd2-fp32'}
 
 
 def denied(server, method, route, status, code, *, headers=None, raw=None):
-    actual, response_headers, body = wire(server, method, route, MODEL if method == 'POST' else None,
-                                          headers=headers, raw=raw)
+    payload = raw if raw is not None else (json.dumps(MODEL).encode() if method == 'POST' else b'')
+    header_only = method == 'POST' and code in {
+        'management_unauthorized', 'management_forbidden', 'management_disabled',
+        'unsupported_media_type', 'payload_too_large'}
+    host = next((value for key, value in (headers or {}).items() if key.lower() == 'host'),
+                f'127.0.0.1:{server.port}')
+    transport_context = (f'{method} {route}: Host={host!r}, length={len(payload)}, '
+                         f'expected={status}/{code}, mode={"headers-only" if header_only else "full-body"}')
+    transport_context = transport_context.replace(server.MANAGEMENT_TOKEN, '[redacted]')
+    try:
+        if header_only:
+            actual, response_headers, body = header_rejection(
+                server, method=method, route=route, length=len(payload), expected=status, code=code,
+                headers={'Host': f'127.0.0.1:{server.port}', **(headers or {})})
+        else:
+            actual, response_headers, body = wire(server, method, route, MODEL if method == 'POST' else None,
+                                                  headers=headers, raw=raw)
+    except (OSError, http.client.HTTPException) as exc:
+        raise RegressionFailure(f'Management transport failed: {transport_context}') from exc
     context = (f'{method} {route}: status={actual}, headers={response_headers}, raw={body[:1000]!r}')
     context = context.replace(server.MANAGEMENT_TOKEN, '[redacted]')
     try:
@@ -81,10 +99,12 @@ def header_rejection(server, *, headers=None, length=2, expected=401, code='mana
         require(first.startswith(f'HTTP/1.1 {expected} '.encode()),
                 f'Header-only request did not reject immediately (or emitted 100): {first!r}')
         response.begin()
-        error_response((response.status, json.loads(response.read())), expected, code, None)
+        body = response.read()
+        error_response((response.status, json.loads(body)), expected, code, None)
         require(response.getheader('Connection', '').lower() == 'close',
                 'Incomplete rejected request did not close deterministically')
         require(sock.recv(1) == b'', 'Rejected incomplete request retained its connection')
+        return response.status, dict(response.getheaders()), body
 
 
 def authorized_continue(server):
@@ -341,6 +361,7 @@ def main():
         wildcard_matrix(executable, root, config)
     except (RegressionFailure, OSError, ValueError, subprocess.SubprocessError, http.client.HTTPException) as exc:
         print(f'FAIL management security regression: {exc}', file=sys.stderr)
+        traceback.print_exc()
         return 1
     print('PASS management security regression')
     return 0

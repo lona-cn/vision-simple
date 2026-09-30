@@ -258,7 +258,11 @@ jobs:
       - name: Build server
         run: xmake build server || xmake build -vD server
 
-      - name: Build unit tests
+      - name: Preflight native CPU fixtures
+        if: matrix.build_tests
+        run: python scripts/check_ci_fixtures.py --project-root "$GITHUB_WORKSPACE" --layer native
+
+      - name: Build native regression targets
         if: matrix.build_tests
         run: |
           xmake build test_vision_helper
@@ -267,8 +271,16 @@ jobs:
           xmake build test_yolo_postprocess
           xmake build test_ocr_decode
           xmake build test_infer_inputs
+          xmake build test_config_load
+          xmake build test_tracker
+          xmake build test_pipeline
+          xmake build test_yolo_tasks
+          xmake build test_ocr_batch
+          xmake build test_subtitle_timeline
+          xmake build test_image_codec
+          xmake build test_image_budget_service
 
-      - name: Run unit tests
+      - name: Run deterministic native regressions
         if: matrix.build_tests
         run: |
           xmake run test_vision_helper
@@ -276,7 +288,23 @@ jobs:
           xmake run test_common
           xmake run test_yolo_postprocess
           xmake run test_ocr_decode
+          xmake run test_config_load
+          xmake run test_tracker
+          xmake run test_subtitle_timeline
+          xmake run test_image_codec
+
+      - name: Run CPU fixture-backed native regressions
+        if: matrix.build_tests
+        run: |
           xmake run test_infer_inputs --project-root "$GITHUB_WORKSPACE"
+          xmake run test_pipeline --project-root "$GITHUB_WORKSPACE"
+          xmake run test_yolo_tasks --project-root "$GITHUB_WORKSPACE"
+          xmake run test_ocr_batch --project-root "$GITHUB_WORKSPACE"
+          xmake run test_image_budget_service --project-root "$GITHUB_WORKSPACE"
+
+      - name: Preflight CPU HTTP fixtures
+        if: matrix.run_http
+        run: python scripts/check_ci_fixtures.py --project-root "$GITHUB_WORKSPACE" --layer http
 
       - name: Build and run subtitle FIFO and expiry regression
         if: matrix.run_http
@@ -290,6 +318,28 @@ jobs:
           server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
           python scripts/test_http_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE"
           python scripts/test_management_security.py --server "$server" --project-root "$GITHUB_WORKSPACE"
+
+      - name: Run real-server protocol and model registry regression
+        if: matrix.run_http
+        run: |
+          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+          python scripts/test_protocol_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE"
+          python scripts/test_model_registry.py --server "$server" --project-root "$GITHUB_WORKSPACE"
+
+      - name: Run real-server detector-to-tracker regression
+        if: matrix.run_http
+        run: |
+          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+          python scripts/test_tracking_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE" \
+            --yolo-model "$GITHUB_WORKSPACE/app/assets/test/hd2-yolo11n-fp32.onnx" \
+            --yolo-image "$GITHUB_WORKSPACE/app/assets/test/hd2.png"
+
+      - name: Run real-server YOLO task and image budget regression
+        if: matrix.run_http
+        run: |
+          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+          python scripts/test_yolo_tasks_http.py --server "$server" --project-root "$GITHUB_WORKSPACE"
+          python scripts/test_image_budget.py --server "$server" --project-root "$GITHUB_WORKSPACE"
 
       - name: Run real-server bounded HTTP dispatch regression
         if: matrix.run_http

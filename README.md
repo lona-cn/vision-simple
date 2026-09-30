@@ -628,6 +628,27 @@ xmake build server
 
 以下命令均从仓库根目录运行；如果刚按上文启动了服务，请另开终端并回到仓库根目录。先使用 CPU 配置构建，确保 Git LFS 模型资源已经下载。
 
+**CI 覆盖分层**：实际执行门控与交叉编译产物检查彼此独立；下列描述是覆盖范围，不代表某次托管运行已经通过。
+
+- 五个原生 `build_tests` 行（Linux GCC Release、Clang/libc++ Release、GCC ASan+UBSan、Windows MSVC CPU 和 Windows MSVC DirectML）显式构建并运行 **14 个 C++ 可执行文件**。确定性回归覆盖 common/conversion/vision helper、YOLO 后处理、OCR 解码、配置、跟踪、字幕时间线与图像 codec；独立的 CPU fixture-backed 步骤使用真实 ONNX session 运行推理输入、pipeline、YOLO 多任务、OCR batch 与共享服务图像预算，包含刻意构造的故障/无效模型。
+- 仅两个 CPU `run_http` 行（Linux GCC Release 与 Windows MSVC CPU Release）额外运行 `test_subtitle_service`，即**每个 CPU 行 15 个 C++ 可执行文件**，并运行 **9 个真实服务 HTTP driver**：通用 HTTP/启动、管理安全、有界调度、字幕媒体、协议、模型注册、真实检测器和图像驱动的跟踪、YOLO 多任务与图像预算。字幕媒体需要 FFmpeg 和可用字体；Windows MP4 解码使用 Media Foundation。缺少前置条件即失败，不跳过。
+- ARM64 CPU/RKNPU、ARMv7 与 RISC-V64 交叉编译行保留产物架构检查，不执行目标二进制。DirectML 行不证明 GPU/DirectML 推理覆盖；这些 CPU 测试也不证明 CUDA、TensorRT 或 RKNPU 真实硬件推理。
+- 既有发布策略门控独立保留：**2 个产物测试 + 11 个 Docker 发布测试**。Docker 工作流保持独立；其原生 CPU 容器 smoke 不代表全部 Dockerfile 或硬件执行提供程序已经验证。
+
+运行模型回归前，先拉取 Git LFS 资源，再执行下方 fixture 预检。每个必需 fixture 都必须是包含实际字节的普通非空文件，不能是 LFS pointer。刻意无效的 ONNX 元数据及运行时故障 fixture 也必须存在，负向测试不能省略输入。缺失资源导致失败，不算成功跳过。
+
+```sh
+git lfs pull
+python scripts/check_ci_fixtures.py --project-root . --layer native
+python scripts/check_ci_fixtures.py --project-root . --layer http
+```
+
+`--project-root` 与 `--layer` 都是必填参数。`native` 检查原生 CPU session 测试所需模型/字典 fixture；`http` 检查真实服务所需模型、图像、参考/配置及 OpenAPI 资源。字节级预检不能替代实际推理或 FFmpeg/字体/媒体前置条件。下方跟踪命令刻意同时传入 `--yolo-model` 与 `--yolo-image`；省略二者不会执行检测器到跟踪器的集成路径。
+
+字幕 driver 可用 `--ffmpeg` 与 `--font` 指定工具和字体。FFmpeg 必须支持 drawtext、MJPEG、libx264、AAC、msmpeg4v3 与 ASF/Matroska muxer；默认字体为 Windows Arial 或 Linux DejaVuSans。工作流保留既有 FFmpeg/字体准备与 Windows Media Foundation 前置条件，不以跳过媒体路径代替验证。
+
+当前有界调度 driver 使用彼此独立的消费者见证：四个真实 native OCR batch 验证解码图像占用及控制面响应；另以四个真实暂停字幕上传占住数据 worker，验证 native 排队准入、解析前 overload 拒绝及过期请求不解码。不要求 native 图像预算饱和与传输队列满在同一瞬间发生。下方历史测量仍只证明当时的运行，不是当前 CI driver 的时延承诺。
+
 下列调度时序为管理鉴权引入前的 issue #52 历史证据；Linux runtime 是独立本地 CPU 镜像，不代表当前六个 Dockerfile 或 issue #53 管理策略已验证。
 
 **HTTP 调度验证（Windows x64、CPU、真实 PP-OCR）**：最终完整 driver 在 113.23 秒通过，覆盖有界 overload/排队 deadline、native/MCP 共享图像预算、空输入契约差异、慢客户端/断连、顺序 keepalive、分次/合并写入 pipeline 请求安全关闭及活动+排队 shutdown。18 次 loaded health 探测前后均观察到四个活动请求及精确 73,744,128 解码输入字节；最终 RTT P50 14.4028 ms、P95/P99 15.4099 ms。移出 IO loop 前六次 load 探测中五次超过消费者两秒期限。显式 workload quota 下的通用 HTTP 回归也通过（278.17 秒），增强的暂停上传/取消字幕回归通过（38.67 秒）。这是实测样本，不是跨机器延迟或 RSS 保证。
@@ -653,6 +674,9 @@ xmake build test_yolo_tasks
 xmake build test_tracker
 xmake build test_config_load
 xmake build test_subtitle_timeline
+xmake build test_image_codec
+xmake build test_image_budget_service
+xmake build test_subtitle_service
 
 xmake run test_common
 xmake run test_cvt
@@ -660,12 +684,15 @@ xmake run test_vision_helper
 xmake run test_yolo_postprocess
 xmake run test_ocr_decode
 xmake run test_ocr_batch --project-root .
-xmake run test_infer_inputs
-xmake run test_pipeline
+xmake run test_infer_inputs --project-root .
+xmake run test_pipeline --project-root .
 xmake run test_yolo_tasks --project-root .
 xmake run test_tracker
 xmake run test_config_load
 xmake run test_subtitle_timeline
+xmake run test_image_codec
+xmake run test_image_budget_service --project-root .
+xmake run test_subtitle_service --project-root .
 ```
 
 HTTP 回归使用 Python 3 标准库，独立创建临时配置、端口和进程，不触碰现有 11451 服务。模型、字典、图片和小型 ONNX 故障 fixture 必须存在；缺失即失败，不记为 SKIP。
@@ -676,10 +703,11 @@ HTTP 回归使用 Python 3 标准库，独立创建临时配置、端口和进�
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_management_security.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_http_dispatch.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_subtitle_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_image_budget.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_yolo_tasks_http.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
-python scripts/test_tracking_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_tracking_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root . --yolo-model app/assets/test/hd2-yolo11n-fp32.onnx --yolo-image app/assets/test/hd2.png
 python scripts/test_model_registry.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 ```
 
@@ -690,10 +718,11 @@ server="$(xmake lua -q -c "import('core.project.config'); config.load(); import(
 python3 scripts/test_http_regression.py --server "$server" --project-root .
 python3 scripts/test_management_security.py --server "$server" --project-root .
 python3 scripts/test_http_dispatch.py --server "$server" --project-root .
+python3 scripts/test_subtitle_regression.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
 python3 scripts/test_image_budget.py --server "$server" --project-root .
 python3 scripts/test_yolo_tasks_http.py --server "$server" --project-root .
-python3 scripts/test_tracking_regression.py --server "$server" --project-root .
+python3 scripts/test_tracking_regression.py --server "$server" --project-root . --yolo-model app/assets/test/hd2-yolo11n-fp32.onnx --yolo-image app/assets/test/hd2.png
 python3 scripts/test_model_registry.py --server "$server" --project-root .
 ```
 

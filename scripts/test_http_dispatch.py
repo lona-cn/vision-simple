@@ -2,6 +2,8 @@
 """Real CPU HTTP scheduling, health and shutdown regression (stdlib, no mocks)."""
 import argparse
 import base64
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import ExitStack, contextmanager
 import http.client
 import json
 import math
@@ -13,6 +15,7 @@ import time
 from test_http_regression import Server, close_values, error_response, fixture, infer, model_yaml, require
 from test_image_budget import budget, drained, options, ppm, wait_budget, mcp_error
 from test_protocol_regression import Session, wire
+from test_subtitle_regression import create, delete, info, request as subtitle_request, wait_state
 
 
 def health(server, count=6, label='health', active=None, charge=None):
@@ -86,16 +89,92 @@ def staged(server, image, count, connections, charge, workers=4):
 
 
 def overload(server):
-    deadline = time.monotonic() + 10
-    while True:
-        status, headers, raw = wire(server, 'POST', '/v1/infer/ocr', raw=b'{not-json')
-        if status == 503:
-            error_response((status, json.loads(raw)), 503, 'service_overloaded', None)
-            require(headers.get('Retry-After') == '1', f'Missing overload retry advice: {headers}')
-            return
-        # Independent IO loops may receive the probe before the queued upload.
-        error_response((status, json.loads(raw)), 400, 'invalid_request', None)
-        require(time.monotonic() < deadline, 'Could not observe full transport admission')
+    status, headers, raw = wire(server, 'POST', '/v1/infer/ocr', raw=b'{not-json')
+    error_response((status, json.loads(raw)), 503, 'service_overloaded', None)
+    require(headers.get('Retry-After') == '1', f'Missing overload retry advice: {headers}')
+
+
+def close_client(connection):
+    sock = connection if isinstance(connection, socket.socket) else connection.sock
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # Already closed by the server or an earlier physical release.
+    connection.close()
+
+
+def receive(connection):
+    response = connection.getresponse()
+    return response.status, dict(response.getheaders()), json.loads(response.read())
+
+
+@contextmanager
+def full_transport(server, image):
+    """Hold real upload workers; rejection acknowledges the sole queued native."""
+    uploads, jobs, candidates = [], [], []
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        before = budget(server)
+        for _ in range(4):
+            identifier = create(server)
+            jobs.append(identifier)
+            sock = socket.create_connection(('127.0.0.1', server.port), timeout=2)
+            uploads.append(sock)
+            sock.sendall((f'PUT /v1/subtitle/jobs/{identifier}/video HTTP/1.1\r\n'
+                          'Host: localhost\r\nContent-Type: application/octet-stream\r\n'
+                          'Content-Length: 1\r\nExpect: 100-continue\r\n\r\n').encode())
+            acknowledgement = b''
+            while not acknowledgement.endswith(b'\r\n\r\n'):
+                chunk = sock.recv(4096)
+                require(chunk and len(acknowledgement) + len(chunk) <= 4096,
+                        f'Incomplete upload acknowledgement: {acknowledgement!r}')
+                acknowledgement += chunk
+            require(acknowledgement == b'HTTP/1.1 100 Continue\r\n\r\n',
+                    f'Upload worker did not accept input: {acknowledgement!r}')
+            require(info(server, identifier)['state'] == 'uploading', 'Upload did not start')
+        # Neither candidate can execute. Exactly one is queued, and the other
+        # rejection acknowledges admission independently of cross-IO ordering.
+        for _ in range(2):
+            candidates.append(begin(server, [image], timeout=1))
+        futures = [executor.submit(receive, connection) for connection in candidates]
+        completed, pending = wait(futures, timeout=10, return_when=FIRST_COMPLETED)
+        require(len(completed) == 1 and len(pending) == 1,
+                'Expected one rejected candidate and one physically queued native request')
+        status, headers, body = completed.pop().result()
+        error_response((status, body), 503, 'service_overloaded', None)
+        require(headers.get('Retry-After') == '1', f'Missing overload retry advice: {headers}')
+        queued = pending.pop()
+        overload(server)
+        health(server, label='full_transport_queue')
+        for route, request in (('/v0/infer/models', server.request),
+                               ('/v1/models', server.request),
+                               ('/v0/infer/stats', server.admin_request)):
+            started = time.monotonic()
+            status, body = request(route, method='GET', timeout=2)
+            require(status == 200, f'Full-queue control route failed: {route}: {status} {body}')
+            print(json.dumps({'scenario': 'full_transport_queue', 'control_route': route,
+                              'rtt_ms': (time.monotonic() - started) * 1000}))
+        for identifier in jobs:
+            require(info(server, identifier)['state'] == 'uploading', 'Held upload ended')
+        require(not queued.done(), 'Queued native ran before physical worker release')
+        require(budget(server) == before, 'Queued/rejected native changed image quota or decode counters')
+        yield uploads, queued, before
+    finally:
+        # shutdown wakes blocked readers before joining: close alone need not
+        # interrupt the file-backed socket used by getresponse().
+        for connection in candidates + uploads:
+            close_client(connection)
+        executor.shutdown(wait=True, cancel_futures=True)
+        if server.process.poll() is None:
+            for identifier in jobs:
+                status, body = subtitle_request(server, 'POST',
+                                                f'/v1/subtitle/jobs/{identifier}/cancel',
+                                                b'{}', 'application/json')
+                require(status == 202, f'Upload cleanup cancellation failed: {status} {body}')
+                wait_state(server, identifier)
+                delete(server, identifier)
+
 
 
 def load_matrix(executable, root, image, pixels, count):
@@ -111,7 +190,7 @@ def load_matrix(executable, root, image, pixels, count):
                 'Real OCR warmup must recognize fixture text')
         connections = []
         try:
-            admitted = staged(server, image, count, connections, charge)
+            staged(server, image, count, connections, charge)
             health(server, count=18, label='four_real_native_requests', active=4, charge=charge * 4)
             for request, route in ((server.request, '/v0/infer/models'),
                                    (server.request, '/v1/models'),
@@ -120,25 +199,21 @@ def load_matrix(executable, root, image, pixels, count):
                 status, body = request(route, method='GET', timeout=2)
                 require(status == 200, f'Control route failed: {route}: {status} {body}')
                 print(json.dumps({'control_route': route, 'rtt_ms': (time.monotonic()-started)*1000}))
-            # The fifth request is accepted into the sole waiting slot. The sixth
-            # malformed request must fail transport admission before business parse.
-            queued = begin(server, [image], timeout=1)
-            connections.append(queued)
-            overload(server)
-            state = budget(server)
-            require(state['active_requests'] == 4 and state['in_use_bytes'] == admitted['in_use_bytes'],
-                    f'Queued request consumed service image admission: {state}')
-            health(server, label='full_transport_queue')
-            finish(queued, 504, 'request_timeout')
             for connection in connections[:4]:
                 finish(connection, count=count)
             after = drained(server, timeout=120)
             require(after['decode_calls'] == 1 + count * 4,
-                    f'Expired queued request decoded input: {after}')
+                    f'Real native batches did not decode exactly once: {after}')
             require(after['peak_bytes'] == charge * 4, f'Four exact concurrent reservations not witnessed: {after}')
         finally:
             for connection in connections:
                 connection.close()
+        # Native quota and transport saturation are separate consumer witnesses.
+        with full_transport(server, image) as (uploads, queued, before):
+            close_client(uploads[0])
+            status, headers, body = queued.result(timeout=10)
+            error_response((status, body), 504, 'request_timeout', None)
+            require(budget(server) == before, 'Expired queued native decoded or consumed image quota')
         error_response(server.request('/v1/infer/yolo', {'model': 'runtime-yolo',
                                                         'images': [ppm(32, 32, 255)]}),
                        500, 'inference_failed', 0)
@@ -305,14 +380,20 @@ def shutdown(executable, root, image, pixels, count):
                 paused.sendall(partial)
             health(server, label='shutdown_paused_uploads')
             staged(server, image, count, connections, charge)
-            connections.append(begin(server, [image]))
-            overload(server)
             # Existing Server owns stdin shutdown, exit=0, deadline, diagnostics,
             # force-cleanup on failure and proof of no surviving owned listener.
     finally:
         for connection in connections:
             connection.close()
-    print('PASS shutdown with four admitted and one queued native request, no owned listener')
+    print('PASS shutdown with four admitted native requests and paused clients, no owned listener')
+    # Keep transport ownership alive across Server.__exit__: shutdown itself,
+    # not client cleanup, must cancel the queued native and drain upload workers.
+    with ExitStack() as clients:
+        with Server(executable, root, model_yaml(root), options=config) as server:
+            server.wait_ready()
+            infer(server, 'ocr', 'ppocr-v4', [image])
+            clients.enter_context(full_transport(server, image))
+    print('PASS shutdown with four held upload workers and one queued native, no owned listener')
 
 
 def main():
