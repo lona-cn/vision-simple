@@ -198,6 +198,56 @@ def chat_payload(kind, model, images, **controls):
         for image in images]}], **controls}
 
 
+def unknown_model_matrix(server, images):
+    tasks = ('yolo', 'ocr', 'seg', 'pose', 'obb')
+    for kind in tasks:
+        for batch in ([], images[:1]):
+            status, body = server.request('/v1/infer/' + kind,
+                                          {'model': 'missing-model', 'images': batch, 'timeout_ms': 60000})
+            require(status == 404 and body['error']['code'] == 'unknown_model'
+                    and body['error']['image_index'] is None,
+                    f'Native v1 {kind} unknown model: {status} {body}')
+        wrong_task_model = 'ppocr-v4' if kind == 'yolo' else 'hd2-fp32'
+        status, body = server.request('/v1/infer/' + kind, {'model': wrong_task_model, 'images': []})
+        require(status == 404 and body['error']['code'] == 'unknown_model',
+                f'Task-mismatched model {kind}: {status} {body}')
+        for invalid in ({'model': 'missing-model', 'images': [], 'timeout_ms': 0},
+                        {'model': 'missing-model', 'images': [1]},
+                        {'model': 'missing-model', 'images': [''] * 129}):
+            status, body = server.request('/v1/infer/' + kind, invalid)
+            require(status == 400 and body['error']['code'] == 'invalid_request',
+                    f'Validation must precede lookup {kind}: {status} {body}')
+        status, _, raw = wire(server, 'POST', '/v1/infer/' + kind,
+                              {'model': 'missing-model', 'images': []},
+                              headers={'Content-Type': 'text/plain'})
+        require(status == 415 and json.loads(raw)['error']['code'] == 'unsupported_media_type',
+                f'Native content type {kind}: {status} {raw!r}')
+    for kind, model in (('yolo', 'hd2-fp32'), ('ocr', 'ppocr-v4')):
+        status, body = server.request('/v1/infer/' + kind,
+                                      {'model': model, 'images': [], 'timeout_ms': 60000})
+        require(status == 200 and body['results'] == [], f'Valid empty batch {kind}: {status} {body}')
+    for kind in ('yolo', 'ocr'):
+        status, body = server.request('/v0/infer/' + kind, {'model': 'missing-model', 'images': []})
+        require(status == 400 and body['error']['code'] == 'unknown_model'
+                and body['error']['image_index'] is None, f'Legacy {kind}: {status} {body}')
+    for kind in tasks:
+        for stream in (False, True):
+            status, body = server.request('/v1/chat/completions',
+                                          chat_payload(kind, 'missing-model', images[:1], stream=stream))
+            require(status == 400 and body['error']['code'] == 'unknown_model'
+                    and body['error']['type'] == 'invalid_request_error',
+                    f'OpenAI {kind} unknown model: {status} {body}')
+    with Session(server) as session:
+        session.initialize()
+        for kind in tasks:
+            response = session.tool('infer_' + kind, {'model': 'missing-model', 'images': images[:1]})
+            require('error' not in response and response['result'].get('isError') is True,
+                    f'MCP {kind} unknown model must be a tool error: {response}')
+            detail = json.loads(response['result']['content'][0]['text'])['error']
+            require(detail['code'] == 'unknown_model' and detail['image_index'] is None, str(detail))
+    print('PASS unknown-model native v1 404, legacy/OpenAI 400 and MCP tool-error contracts')
+
+
 def openai_matrix(server, images):
     split_post_error(server, '/v1/chat/completions', 415, 'text/plain')
     oversized_headers(server, '/v1/chat/completions')
@@ -357,6 +407,7 @@ def main():
     with Server(args.server.resolve(), root, model_yaml(root)) as server:
         try:
             server.wait_ready()
+            unknown_model_matrix(server, images)
             baselines = openai_matrix(server, images)
             mcp_matrix(server, images, baselines)
         except BaseException:

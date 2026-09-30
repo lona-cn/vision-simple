@@ -349,7 +349,8 @@ class HTTPServerImpl : public HTTPServer {
           return response;
         });
   }
-  int HandleInfer(const HttpContextPtr& ctx, InferenceKind kind) {
+  int HandleInfer(const HttpContextPtr& ctx, InferenceKind kind,
+                  bool native_v1) {
     const auto started = std::chrono::steady_clock::now();
     std::optional<InferenceResponse> inference;
     return HandleRequest(ctx, {}, [&](RequestStage& stage) -> PreparedResponse {
@@ -359,7 +360,14 @@ class HTTPServerImpl : public HTTPServer {
       auto result = service_->Run(
           kind, request->model, request->images,
           ServiceControl{.timeout = request->timeout, .started = started});
-      if (!result) return ServiceErrorResponse(result.error());
+      if (!result) {
+        auto response = ServiceErrorResponse(result.error());
+        // Native v1 alone uses the documented not-found status; keep the
+        // shared error envelope and other adapters' mappings unchanged.
+        if (native_v1 && result.error().kind == ServiceFailure::kUnknownModel)
+          response.status = HTTP_STATUS_NOT_FOUND;
+        return response;
+      }
       inference.emplace(std::move(*result));
       stage = {FailureStage::Serialization, {}};
       PreparedResponse response{HTTP_STATUS_OK, SerializeInference(*inference)};
@@ -413,15 +421,15 @@ class HTTPServerImpl : public HTTPServer {
                       "Request body exceeds 64 MiB");
       ctx->request->body.append(data, size);
     } else if (phase == HP_MESSAGE_COMPLETE) {
-      return HandleInfer(ctx, kind);
+      return HandleInfer(ctx, kind, true);
     }
     return HTTP_STATUS_UNFINISHED;
   }
   int HandleInferYOLO(const HttpContextPtr& ctx) {
-    return HandleInfer(ctx, InferenceKind::kYOLO);
+    return HandleInfer(ctx, InferenceKind::kYOLO, false);
   }
   int HandleInferOCR(const HttpContextPtr& ctx) {
-    return HandleInfer(ctx, InferenceKind::kOCR);
+    return HandleInfer(ctx, InferenceKind::kOCR, false);
   }
 };
 }  // namespace vision_simple

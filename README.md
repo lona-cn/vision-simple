@@ -162,7 +162,7 @@ models:
 ```
 
 - YOLO11 导出须具有静态 `[1,3,H,W]` 输入、静态 FP32/FP16 原始输出及类别名称元数据，不得包含导出 NMS/end-to-end 后处理。YOLO26 的两种导出模式见下节。分割需要预测和通道匹配的 mask prototype；姿态使用关键点通道（`kpt_shape` 支持 2 或 3 个分量）；OBB 需要一个角度通道。不支持动态维度、batch>1、任意 YOLO 架构或内嵌 NMS 图。
-- 五个 task 均可调用 `POST /v1/infer/{task}`，正文为 `{"model":"配置原名","images":["原始base64"],"timeout_ms":60000}`。共用按输入顺序、整批失败语义和流水线限制；原生 v1 正文限制为 64 MiB。既有 v0 推理响应不变。
+- 五个 task 均可调用 `POST /v1/infer/{task}`，正文为 `{"model":"配置原名","images":["原始base64"],"timeout_ms":60000}`。共用按输入顺序、整批失败语义和流水线限制；原生 v1 正文限制为 64 MiB。所选任务下未配置的模型返回 HTTP 404 `unknown_model`，`image_index:null`，空批次也如此。旧版 v0 和 OpenAI-like chat 保持 HTTP 400 `unknown_model`；MCP 返回 `isError:true` 工具结果（不是 JSON-RPC 错误）。既有 v0 推理响应不变。
 - 新任务返回 `class_names` 及逐图 `results`，各目标含 `class_id` 和 `confidence`。分割额外返回原图整数 `bbox:[x,y,width,height]` 和 `mask_png_base64`：裁剪至该框的 0/255 二值 PNG，并非全图 mask，放置时以框左上角为原点。C++ `InferYOLOTask` 使用独立 `YOLOTaskFrameResult` variant；分割 `CV_8UC1` mask 自持有像素，不依赖推理工作区。
 - 姿态额外返回同样的框及 `keypoints:[{x,y,confidence}]`，坐标为原图浮点像素，不裁剪至图像范围。OBB 返回四个有序原图 `corners:[[x,y],...]` 和沿角点 0 → 1 的弧度 `angle`；角点可在图外，不转换为轴对齐包围框。
 - OpenAI-like 使用带任务前缀的 ID，例如 `seg:segment`、`pose:pose`、`obb:oriented`；MCP 在旧工具之外生成 `infer_seg`、`infer_pose`、`infer_obb`。结果 JSON 保留各任务的几何信息。

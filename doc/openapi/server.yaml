@@ -376,7 +376,8 @@ paths:
       description: >-
         使用未限定的 model 名称；task 决定任务类型。整批原子成功，results 与 images 等长同序，
         无目标为该图的空数组；空批次允许。响应由 task 决定；空 results 可能匹配多个结构，
-        因此使用 anyOf。v0 的 yolo/ocr 路由及结果不变，不新增 v0 seg/pose/obb 路由。
+        因此使用 anyOf。所选任务下未配置的模型返回 404 unknown_model，空批次也如此。
+        v0 的 yolo/ocr 路由及结果不变（unknown_model 仍为 400），不新增 v0 seg/pose/obb 路由。
         正文上限 64 MiB（包括分块传输），要求 application/json。
         Expect 仅接受 100-continue，其他期望返回 417。
       security: []
@@ -410,7 +411,7 @@ paths:
               schema: {$ref: '#/components/schemas/InferError'}
         '404':
           <<: *native_error
-          description: unknown_model
+          description: unknown_model；所选任务下未配置的模型（包括模型仅配置在其他任务下），image_index 为 null；空批次也返回 404。
         '413':
           <<: *native_error
           description: request_too_large
@@ -632,6 +633,7 @@ paths:
         pose 原图像素关键点、obb 有序四角及首边弧度角；不转换为自然语言。
         stream 在整批成功后发送 role/content/finish_reason 三个 chunk 及 [DONE]；
         不是逐 token/逐图流。错误在 SSE 头提交之前以 JSON 返回。
+        unknown_model 保持 HTTP 400，不使用原生 v1 推理的 404 映射。
         不支持 Responses API、任意生成参数、工具调用或 json_schema 输出。
       security: []
       requestBody:
@@ -686,7 +688,7 @@ paths:
         推理工具由任务注册表生成，输入 Schema 经 tools/list 返回。跟踪会话不通过 MCP 暴露。
         每会话最多8个活动工具请求、全局2个执行worker/16个排队任务。
         工具结果通过 SSE 返回：新版含 structuredContent 及等价 text，旧版为完整 JSON text。
-        执行失败 isError:true，error 包含 code/message/image_index；协议错误使用 JSON-RPC error。
+        执行失败（包括 unknown_model）isError:true，error 包含 code/message/image_index；协议错误使用 JSON-RPC error。
         notification 不产生应答。取消 ID 仅作用于本会话，原生阶段合作式退出。
         待发送消息/写缓冲上限8MiB，超限或持续积压约30秒时关闭会话。
       security: []
