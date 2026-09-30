@@ -5,12 +5,21 @@
 #include <memory>
 #include <opencv2/core.hpp>
 #include <optional>
+#include <span>
 #include <stop_token>
 
 namespace vision_simple {
 // Only service-generated private upload paths may be passed to Open.
 class SubtitleVideoReader {
  public:
+  enum class Container { kInvalid, kAvi, kMp4, kMkv, kAsf };
+  // Bounded signature/size classification, not full demux or codec validation.
+  static Container ProbeContainer(std::span<const uint8_t> prefix,
+                                  uint64_t total_bytes) noexcept;
+  // Compile-time reader availability; codec/startup failures remain asynchronous.
+  static bool SupportsContainer(Container container) noexcept;
+  // Only supported containers have a private upload extension.
+  static const char* ContainerExtension(Container container) noexcept;
   enum class Result { kFrame, kEof, kError, kCancelled };
   struct Frame {
     // Decoder-owned pixels are reused by the next Read; consume before then.

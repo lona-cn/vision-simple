@@ -835,9 +835,12 @@ paths:
       输入放在服务私有临时目录，终止处理、取消、上传中断、删除、过期和停服时尝试清理；
       清理失败不会提前释放文件占用的容量。限制为1800秒、1000000解码帧、每帧16777216像素，
       单次 OCR 文本4096 UTF-8字节、10000条字幕、累计字幕文本2 MiB。
-      Windows 通过 Media Foundation 读取 ftyp 开头的 MP4族或 ASF 容器，依赖已安装的本机编解码器；
-      另有可移植 MJPEG AVI 读取器，仅接受单个 MJPG/mjpg 视频流、零起始时间和有效 rate/scale，
-      支持 AVI/AVIX，要求完整的声明帧数。容器识别不保证编解码器可用，不支持任意编码或 MKV。
+      上传准入与 reader 共用构建能力规则：AVI 在所有平台允许准入，实际由可移植有界 MJPEG reader
+      读取单个 MJPG/mjpg 视频流、零起始时间和有效 rate/scale，支持 AVI/AVIX 并要求完整声明帧数；
+      其他 AVI codec 在两个平台均异步报 unsupported_video，没有原生 AVI 回退。
+      ftyp 开头的 MP4 系列仅在编译了 Media Foundation reader 的 Windows 构建允许准入，
+      codec 取决于已安装的本机编解码器，仍可能异步失败；Linux 在排队前返回415 invalid_video。
+      MKV 和 ASF 在所有平台的上传准入与 reader 均禁用，在排队前返回415 invalid_video。
       原生样本需有效正时长和严格递增时间戳；开始时间向下取整到毫秒、结束时间向上取整，
       AVI 使用零起点固定帧率时间。解码与 OCR 在进程内运行，不是安全沙箱。
       取消是协作式的，不能立即中断正在执行的本机解码/OCR 调用。
@@ -929,9 +932,16 @@ paths:
       description: >-
         仅 created 可上传一次，不支持续传、multipart、Base64 或覆盖。原始字节分块写入私有文件，
         不把整个视频累积在 HTTP 正文内存；允许 chunked，累计上限同 Content-Length。
-        上传结束识别容器；202只表示已接受，快照可能已进入 running/终态，仍须轮询。
-        容器头不合法返回415并使作业 failed；受支持容器的解码错误在异步 error_code 中报告。
-        上传中断使作业 failed 并清理源文件；重新尝试需创建新作业。
+        上传结束用有界首部和实际接收长度识别容器并检查当前构建能力；
+        AVI 外层 RIFF 长度须至少4且不超过正文长度减8，MP4 首个 ftyp box 长度须至少12且不超过正文长度。
+        这不是 codec 检查或完整文件校验：正文长度范围内的伪 AVI 首部（Windows 上也包括伪 MP4）
+        可先获准入再异步失败；202仅表示已接受，快照可能已进入 running/终态，仍须轮询。
+        首部不合法或当前构建不支持的容器在目标文件重命名/排队前返回415 invalid_video，
+        作业 failed，error_code 对不合法/未知首部为 invalid_container，对已识别但禁用的容器为 unsupported_video；
+        decoded_frames/sampled_frames 均为零并清理源文件；
+        uploaded_bytes 记录收到的字节，不表示保留文件；文件系统清理失败仍按上述规则占用容量。
+        准入后解码错误通过异步 error_code 报告。失败作业下载409 subtitle_not_ready，
+        再上传409 subtitle_job_busy；上传中断也使作业 failed 并清理源文件，重新尝试需创建新作业。
       security: []
       requestBody:
         required: true
@@ -1118,7 +1128,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/SubtitleError'}
     SubtitleMedia:
-      description: unsupported_media_type（Content-Type不精确匹配）或 invalid_video（上传容器头无效）
+      description: unsupported_media_type（Content-Type不精确匹配）或 invalid_video（上传容器头无效或当前构建不支持容器；排队前失败并清理源文件）
       content:
         application/json:
           schema: {$ref: '#/components/schemas/SubtitleError'}
@@ -1258,7 +1268,7 @@ components:
           type: string
           nullable: true
           description: >-
-            异步失败的稳定、无路径代码，非failed时为null；failed时可能为null（例如异常报告自身失败）。
+            作业失败的稳定、无路径代码（包括上传准入拒绝和异步处理失败），非failed时为null；failed时可能为null（例如异常报告自身失败）。
             不作为封闭枚举：例如 invalid_container、unsupported_video、upload_interrupted、storage_failed、
             frame_limit、frame_dimensions、invalid_timestamps、duration_limit、ocr_failed、ocr_text_limit、
             subtitle_limit、processing_failed。不是异常文本、文件路径或HTTP错误对象；调用方须容忍新增代码。

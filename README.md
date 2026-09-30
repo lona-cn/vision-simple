@@ -395,7 +395,15 @@ curl -i -X DELETE http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
 - 正常状态为 `created → uploading → queued → running → completed`，失败进入 `failed`。取消返回 202；正在执行原生处理时经历 `cancelling → cancelled`，是合作式取消，不强制中断解码器/ORT 调用。对终态任务取消不会改变结果。状态字段为 `id`、`state`、`uploaded_bytes`、`decoded_frames`、`sampled_frames`、`position_ms`、可空 `duration_ms`、`cue_count` 和可空 `error_code`。时长可能未知，计数/位置并非保证准确的百分比；运行中的 `cue_count` 不含尚未闭合的字幕。`GET /v1/subtitle/jobs?limit=100` 返回任务对象数组及可空 `next_cursor`，下一页原样传入 `cursor`（limit 为 1–100）。
 - 创建 JSON 后以独立 PUT 上传原始字节，不接受 multipart/base64、服务器本地路径或远程 URL。仅 `created` 可开始上传；已消费、中断或失败的上传不能在同一任务重试，应新建任务并重新上传，创建操作不具幂等性。上传成功后仍可能异步失败，必须轮询 `state` 并检查 `error_code`（如 `upload_interrupted`、`unsupported_video`、`invalid_timestamps`、`ocr_failed`、`subtitle_limit`），不依赖错误文案；失败的部分结果不能下载。
 - 单 worker，最多 **8 个任务**（含待上传及保留的终态结果）。上限为每视频 64 MiB、1800 秒、1,000,000 个解码帧、每帧 16,777,216 像素；每次观测最多 4096 行，单行及合并文字最多 4096 字节；最多 10,000 条字幕及累计 2 MiB 字幕文字。JSON 控制正文最多 64 KiB。输入文件存放于服务自建的私有临时目录，在完成/失败/取消/删除时移除，正常关闭时移除目录。created/uploading 无上传活动 60 秒过期，终态结果 300 秒过期；轮询和下载不续期。文件系统清理失败可能继续占用容量，进程崩溃不保证正常清理。
-- HTTP 可用的视频解码依平台而定：所有平台提供有界 MJPEG AVI reader（从零开始的单一 MJPG/mjpg 视频流，含 OpenDML AVI/AVIX），拒绝其他 AVI codec；Windows 另通过 Media Foundation 读取首部为 `ftyp` box 的 MP4 系列文件，codec 取决于系统安装情况。ASF 虽有底层读取支持，但当前上传入口拒绝它；MKV 可通过上传嗅探，却会在解码阶段报 `unsupported_video`。识别容器或返回上传 202 不代表支持解码。不支持任意编码、播放列表、图像序列或 URL 抓取。
+- 容器准入与实际读取共用按构建确定的能力规则：
+
+  | 容器 | Windows 原生构建 | Linux 构建 | 准入后的实际解码 |
+  | --- | --- | --- | --- |
+  | AVI（`RIFF` / `AVI `） | 允许上传 | 允许上传 | 两个平台均使用有界可移植 MJPEG reader：单个 MJPG/mjpg 视频流、零起点、有效 rate/scale 和完整声明帧数，含 OpenDML AVI/AVIX。其他 AVI codec 异步失败，`error_code` 为 `unsupported_video`；没有原生 AVI 回退。 |
+  | MP4 系列（首个 box 为 `ftyp`） | 仅编译了 Media Foundation reader 的构建允许上传 | 排队前 HTTP 415 `invalid_video` | Windows 解码取决于已安装的原生 codec，codec/容器错误仍可能异步出现。 |
+  | MKV / ASF | 排队前 HTTP 415 `invalid_video` | 排队前 HTTP 415 `invalid_video` | 上传准入与 reader 均禁用。 |
+
+- 准入只读取有界首部并对照实际收到的正文长度：AVI 外层 RIFF 长度须 ≥4 且 ≤正文长度−8；MP4 首个 `ftyp` box 长度须 ≥12 且 ≤正文长度。它不是 codec 检查或完整文件校验。长度落在正文范围内的伪 AVI 首部（Windows 上也包括伪 MP4 首部）仍可能通过准入后异步失败；HTTP 202 仅表示接受，不保证解码成功。首部不合法或当前构建禁用的容器在目标文件重命名/排队前返回 HTTP 415 `invalid_video`，任务成为 `failed`；不合法/未知首部的 `error_code` 为 `invalid_container`，已识别但当前构建禁用的容器为 `unsupported_video`，`decoded_frames`/`sampled_frames` 为零，并清理源文件。`uploaded_bytes` 记录收到的字节，不表示保留文件；清理失败仍按上述规则占用容量。失败任务下载返回 409 `subtitle_not_ready`，再次上传返回 409 `subtitle_job_busy`；重试需新建任务。不支持任意编码、播放列表、图像序列或 URL 抓取。
 - MJPEG AVI 时间戳依据流的 rate/scale；Media Foundation 使用实际 sample 时间戳及正的 sample 时长，起点向下、终点向上取整至毫秒。完成后的 `duration_ms` 为实际视频结束时间，不是帧数估算值或较长的音轨/容器时长；原生解码的 duration 可在完成前一直为 null。
 - 错误为 `error.{code,message,image_index}`，`image_index` 为 null：400 `invalid_request`；404 `model_not_found`/`subtitle_job_not_found`；409 `subtitle_job_busy`/`subtitle_not_ready`；413 `payload_too_large`；415 `unsupported_media_type`/`invalid_video`；503 `subtitle_capacity`/`service_unavailable`（`Retry-After: 1`）；500 `subtitle_failed`。创建/取消必须精确使用 `application/json`，上传使用 `application/octet-stream`；无正文操作拒绝正文，不支持的 `Expect` 返回 417。DELETE 仅对 created 或终态返回 204，其他状态需先取消并轮询。
 - API **没有认证或租户隔离**。字幕业务请求对非空浏览器 `Origin` 返回 403，响应使用 `Cache-Control: no-store`；普通 OPTIONS 仍由全局 CORS 中间件处理。任务 ID 不是凭证，须使用可信网络或鉴权代理。
@@ -406,7 +414,11 @@ curl -i -X DELETE http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
 python scripts/test_subtitle_regression.py --server <server可执行文件> --project-root . --ffmpeg <ffmpeg可执行文件> --font <font.ttf>
 ```
 
-需要 `app/assets/test` 中的真实 `ppocr_det.onnx`、`ppocr_rec.onnx`、`ppocr_keys_v1.txt`，以及带 drawtext/MJPEG/libx264/AAC 的 FFmpeg 和可用的 TrueType 字体。FFmpeg 位于 PATH 且系统有默认 Arial/DejaVuSans 字体时，可省略 `--ffmpeg`/`--font`。回归执行真实解码/OCR，检查 HELLO/WORLD 精确区间、单帧 NOISE 抑制、SRT/WebVTT 一致性、上传中断、取消、容量/结果隔离和临时文件清理；Windows 还覆盖带较长音轨的原生可变帧率视频。这不是 codec 质量或性能基准。
+需要 `app/assets/test` 中的真实 `ppocr_det.onnx`、`ppocr_rec.onnx`、`ppocr_keys_v1.txt`，以及带 drawtext/MJPEG/libx264/AAC 的 FFmpeg 和可用的 TrueType 字体。FFmpeg 位于 PATH 且系统有默认 Arial/DejaVuSans 字体时，可省略 `--ffmpeg`/`--font`。FFmpeg 仅生成测试夹具，不是应用解码依赖。回归执行真实解码/OCR，检查 HELLO/WORLD 精确区间、单帧 NOISE 抑制、SRT/WebVTT 一致性、按构建区分的容器准入与失败清理、上传中断、取消、容量/结果隔离和临时文件清理；Windows 还覆盖带较长音轨的原生可变帧率视频。CI 仅在已有原生 Linux x86_64 CPU 和 Windows x64 CPU 的 `run_http` 行调用该脚本，不据此宣称交叉构建架构已运行验证。这不是 codec 质量或性能基准。
+
+Windows Server CI 行按需安装原生 MP4 场景所需的 Media Foundation 功能，安装失败或需要重启时明确失败。Linux 安装 FFmpeg 和 DejaVuSans；Windows 安装 FFmpeg 并使用 Arial。这些是回归前置条件，不表示已验证托管 CI 实际运行或所有 Docker 架构。
+
+Issue #55 的最终真实 server 全量字幕回归在 Windows 原生 CPU（30.59 秒）及 Linux x86_64 CPU（缓存 SDK、GCC 16.2、ORT 1.22；构建与全量回归共 123.61 秒）通过；这不是托管 CI 或六种生产 Docker 构建的验证。首次 Windows 运行曾捕获原因未定的 socket reset（10054）；仅增加诊断后最终通过，没有为此修改生产源码，也不宣称修复该 reset。
 
 ### OCR 解码与 recognition batch
 

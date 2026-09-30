@@ -35,6 +35,58 @@ bool Size(uint32_t w, uint32_t h) {
   return w && h && uint64_t(w) * h <= kPixels;
 }
 }  // namespace
+SubtitleVideoReader::Container SubtitleVideoReader::ProbeContainer(
+    std::span<const uint8_t> prefix, uint64_t total_bytes) noexcept {
+  if (prefix.size() > total_bytes) return Container::kInvalid;
+  if (prefix.size() >= 12) {
+    const auto* h = prefix.data();
+    if (U32(h) == Four('R', 'I', 'F', 'F') &&
+        U32(h + 8) == Four('A', 'V', 'I', ' ')) {
+      const uint64_t riff_size = U32(h + 4);
+      return riff_size >= 4 && riff_size <= total_bytes - 8
+                 ? Container::kAvi
+                 : Container::kInvalid;
+    }
+    if (U32(h + 4) == Four('f', 't', 'y', 'p')) {
+      const uint64_t box_size = uint64_t(h[0]) << 24 | uint64_t(h[1]) << 16 |
+                                uint64_t(h[2]) << 8 | h[3];
+      return box_size >= 12 && box_size <= total_bytes ? Container::kMp4
+                                                       : Container::kInvalid;
+    }
+  }
+  if (prefix.size() >= 4 && U32(prefix.data()) == 0xa3df451a)
+    return Container::kMkv;
+  if (prefix.size() >= 8 && U32(prefix.data()) == 0x75b22630 &&
+      U32(prefix.data() + 4) == 0x11cf668e)
+    return Container::kAsf;
+  return Container::kInvalid;
+}
+bool SubtitleVideoReader::SupportsContainer(Container container) noexcept {
+  switch (container) {
+    case Container::kAvi:
+      return true;
+    case Container::kMp4:
+#ifdef _WIN32
+      return true;
+#else
+      return false;
+#endif
+    default:
+      return false;
+  }
+}
+const char* SubtitleVideoReader::ContainerExtension(
+    Container container) noexcept {
+  if (!SupportsContainer(container)) return nullptr;
+  switch (container) {
+    case Container::kAvi:
+      return ".avi";
+    case Container::kMp4:
+      return ".mp4";
+    default:
+      return nullptr;
+  }
+}
 struct SubtitleVideoReader::Impl {
   std::stop_token cancel;
   const char* failure = "unreadable_video";
@@ -408,24 +460,25 @@ const char* SubtitleVideoReader::Open(const std::filesystem::path& path,
   p.input.open(path, std::ios::binary | std::ios::ate);
   if (!p.input) return p.failure;
   const auto length = p.input.tellg();
-  if (length < 12 || uint64_t(length) > kBytes) return p.failure;
+  if (length < 0 || uint64_t(length) > kBytes) return p.failure;
   p.bytes = static_cast<uint64_t>(length);
   uint8_t signature[12];
-  if (!p.Get(0, signature, 12)) return p.failure;
-  p.avi = U32(signature) == Four('R', 'I', 'F', 'F') &&
-          U32(signature + 8) == Four('A', 'V', 'I', ' ');
+  const auto prefix_size = static_cast<size_t>(p.bytes < sizeof(signature)
+                                                 ? p.bytes
+                                                 : sizeof(signature));
+  if (!p.Get(0, signature, prefix_size)) return p.failure;
+  const auto container = ProbeContainer({signature, prefix_size}, p.bytes);
+  if (container == Container::kInvalid) return p.failure = "invalid_container";
+  if (!SupportsContainer(container)) return p.failure = "unsupported_video";
+  p.avi = container == Container::kAvi;
   if (p.avi) return p.OpenAvi() ? nullptr : p.failure;
-  // Only sniffed binary containers reach the native resolver; never playlists,
+  // Only supported MP4 reaches the native resolver; never playlists,
   // image sequences, arbitrary URL schemes, or decoder-plugin fallbacks.
-  const bool mp4 = U32(signature + 4) == Four('f', 't', 'y', 'p');
-  const bool asf =
-      U32(signature) == 0x75b22630 && U32(signature + 4) == 0x11cf668e;
   p.input.close();
-  if (!mp4 && !asf) return "unsupported_video";
 #ifdef _WIN32
   return p.OpenNative(path) ? nullptr : p.failure;
 #else
-  return "unsupported_video";
+  return p.failure = "unsupported_video";
 #endif
 }
 SubtitleVideoReader::Result SubtitleVideoReader::Read(Frame& frame) {

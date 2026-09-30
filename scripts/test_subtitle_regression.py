@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from urllib.parse import quote
 
 from test_http_regression import RegressionFailure, Server, fixture, infer, require
@@ -61,8 +62,15 @@ def make_media(executable, directory, font):
     # A second observable transcript exposes cross-job buffer/result ownership.
     ffmpeg_run(executable, directory, "-loop", "1", "-framerate", "10", "-i", "WORLD.png",
                "-t", "2", "-an", "-c:v", "mjpeg", "-q:v", "2", "-threads", "1", "world.avi")
+    # Admission is container-based; H264 AVI must not gain a native fallback.
+    ffmpeg_run(executable, directory, "-i", "world.avi", "-an", "-c:v", "libx264",
+               "-preset", "ultrafast", "-pix_fmt", "yuv420p", "h264.avi")
+    ffmpeg_run(executable, directory, "-i", "h264.avi", "-an", "-c:v", "copy", "real.mkv")
+    ffmpeg_run(executable, directory, "-i", "world.avi", "-an", "-c:v", "msmpeg4v3",
+               "-threads", "1", "real.asf")
     return {name: (directory / name).read_bytes() for name in
-            ("semantic.avi", "vfr-audio-tail.mp4", "cancellation.avi", "world.avi")}
+            ("semantic.avi", "vfr-audio-tail.mp4", "cancellation.avi", "world.avi",
+             "h264.avi", "real.mkv", "real.asf")}
 
 
 def request(server, method, route, body=None, media=None, headers=None, timeout=20):
@@ -352,26 +360,55 @@ def oversized_jpeg_avi():
     return chunk(b"RIFF", b"AVI " + headers + frames)
 
 
+def failed_media(server, data, temp_root, label, status, error_code):
+    job = create(server)
+    body = expect(upload(server, job, data), status, label)
+    if status == 415:
+        require(body.get("error", {}).get("code") == "invalid_video",
+                f"{label}: wrong upload diagnostic: {body}")
+    final = wait_state(server, job)
+    require(final["state"] == "failed" and final["error_code"] == error_code,
+            f"{label}: incorrect terminal classification: {final}")
+    require(final["decoded_frames"] == 0 and final["sampled_frames"] == 0,
+            f"{label}: rejected video reached decoding/OCR: {final}")
+    # Physical release must precede deletion of the retained failed job.
+    no_source_files(temp_root, [job])
+    for suffix in ("subtitles.srt", "subtitles.vtt"):
+        expect(request(server, "GET", f"{ROOT}/{job}/{suffix}"), 409, f"{label}: failed result")
+    expect(upload(server, job, data), 409, f"{label}: retry failed job")
+    no_source_files(temp_root, [job])
+    delete(server, job)
+
+
 def invalid_media_matrix(server, media, temp_root):
-    truncated = media[:len(media) // 2]
-    # Also retain a self-consistent outer RIFF length, so header sniffing alone
-    # cannot pass as complete decode validation (the movi chunk is truncated).
+    avi = media["semantic.avi"]
+    truncated = avi[:len(avi) // 2]
+    # Consistent outer extent admits AVI, but its truncated movi fails decoding.
     forged = bytearray(truncated)
     forged[4:8] = (len(forged) - 8).to_bytes(4, "little")
-    for label, data in (("empty", b""), ("invalid", b"not a video"),
-                        ("truncated", truncated), ("truncated body", bytes(forged)),
-                        ("oversized embedded JPEG", oversized_jpeg_avi())):
-        job = create(server)
-        status, body = upload(server, job, data)
-        require(status in (202, 415), f"{label}: unexpected upload response {status} {body}")
-        final = wait_state(server, job)
-        require(final["state"] == "failed", f"{label}: invalid video produced successful subtitles: {final}")
-        if label == "oversized embedded JPEG":
-            require(final["error_code"] == "frame_dimensions" and final["decoded_frames"] == 0,
-                    f"Embedded JPEG dimensions were not rejected before producing a frame: {final}")
-        expect(request(server, "GET", f"{ROOT}/{job}/subtitles.srt"), 409, "failed decode result")
-        no_source_files(temp_root, [job])
-        delete(server, job)
+    fake_avi = b"RIFF" + (8).to_bytes(4, "little") + b"AVI junk"
+    fake_mp4 = (16).to_bytes(4, "big") + b"ftypisom" + bytes(4)
+    asf_magic = bytes.fromhex("3026b2758e66cf11a6d900aa0062ce6c")
+    malformed = (("empty", b""), ("invalid", b"not a video"),
+                 ("truncated outer RIFF", truncated), ("incomplete RIFF header", avi[:11]),
+                 ("RIFF extent too small", b"RIFF" + (3).to_bytes(4, "little") + b"AVI "),
+                 ("RIFF extent outside file", b"RIFF" + (9).to_bytes(4, "little") + b"AVI junk"),
+                 ("ftyp extent too small", (8).to_bytes(4, "big") + fake_mp4[4:]),
+                 ("ftyp extent outside file", (17).to_bytes(4, "big") + fake_mp4[4:]))
+    for label, data in malformed:
+        failed_media(server, data, temp_root, label, 415, "invalid_container")
+    for label, data in (("genuine MKV", media["real.mkv"]), ("genuine ASF", media["real.asf"]),
+                        ("MKV magic spoof", b"\x1a\x45\xdf\xa3" + bytes(28)),
+                        ("ASF magic spoof", asf_magic + bytes(16))):
+        failed_media(server, data, temp_root, label, 415, "unsupported_video")
+    for label, data, error_code in (("truncated internal AVI", bytes(forged), "incomplete_video"),
+                                   ("fake valid outer AVI", fake_avi, "incomplete_video"),
+                                   ("H264 AVI", media["h264.avi"], "unsupported_video"),
+                                   ("oversized embedded JPEG", oversized_jpeg_avi(), "frame_dimensions")):
+        failed_media(server, data, temp_root, label, 202, error_code)
+    failed_media(server, fake_mp4, temp_root, "fake valid outer MP4",
+                 202 if os.name == "nt" else 415,
+                 "unreadable_video" if os.name == "nt" else "unsupported_video")
 
 
 def wait_uploaded(server, job, received):
@@ -606,28 +643,25 @@ def run(args):
             # Reuse the existing public capacity-bound scenario after physical
             # abort/delete: every retained slot must be available again.
             capacity_and_pagination(server)
-            invalid_media_matrix(server, media["semantic.avi"], temp_root)
+            invalid_media_matrix(server, media, temp_root)
             for chunked in (False, True):
                 job = create(server)
                 completed(server, job, media["semantic.avi"], temp_root, chunked=chunked)
                 delete(server, job)
             expect_continue(server, media["world.avi"], temp_root)
             cancellation_and_isolation(server, media, temp_root)
-            job = create(server)
             if os.name == "nt":
+                job = create(server)
                 completed(server, job, media["vfr-audio-tail.mp4"], temp_root, chunked=True,
                           expected=[(1000, 5000, "HELLO"), (5000, 8000, "WORLD")], tolerance=100)
                 final = info(server, job)
                 require(final["duration_ms"] is not None and abs(final["duration_ms"] - 8000) <= 100,
                         f"Audio tail incorrectly defined video duration: {final}")
+                no_source_files(temp_root, [job])
+                delete(server, job)
             else:
-                expect(upload(server, job, media["vfr-audio-tail.mp4"]), 202, "unsupported codec upload")
-                final = wait_state(server, job)
-                require(final["state"] == "failed" and final["error_code"] == "unsupported_video",
-                        f"Linux unsupported H264 must fail explicitly, not fake a transcript: {final}")
-                expect(request(server, "GET", f"{ROOT}/{job}/subtitles.srt"), 409, "unsupported result")
-            no_source_files(temp_root, [job])
-            delete(server, job)
+                failed_media(server, media["vfr-audio-tail.mp4"], temp_root,
+                             "MP4 without compiled decoder", 415, "unsupported_video")
             paused_upload_shutdown(server, media["semantic.avi"], temp_root, stack)
         require(not list(temp_root.iterdir()),
                 "Owned server left its private temporary directory after shutdown")
@@ -637,13 +671,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", type=Path, required=True)
     parser.add_argument("--project-root", type=Path, required=True)
-    parser.add_argument("--ffmpeg", default="ffmpeg", help="FFmpeg executable (requires drawtext, MJPEG, libx264, AAC)")
+    parser.add_argument("--ffmpeg", default="ffmpeg", help="FFmpeg executable (requires drawtext, MJPEG, libx264, AAC, msmpeg4v3, ASF/Matroska muxers)")
     parser.add_argument("--font", type=Path, help="Override Windows Arial / Linux DejaVuSans font")
     args = parser.parse_args()
     try:
         run(args)
     except (RegressionFailure, OSError, ValueError, KeyError, subprocess.SubprocessError,
             http.client.HTTPException) as exc:
+        traceback.print_exc()
         print(f"FAIL subtitle regression: {exc}", file=sys.stderr)
         return 1
     print("PASS real-video subtitle semantics, decoder timing, HTTP ownership, cancellation and cleanup", flush=True)

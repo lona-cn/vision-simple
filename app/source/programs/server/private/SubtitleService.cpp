@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -485,31 +484,22 @@ SubtitleResult<void> SubtitleService::FinishUpload(
       impl_->Fail(job, "storage_failed");
       return std::unexpected(SubtitleFailure::kFailed);
     }
-    char header[16]{};
+    uint8_t header[12];
     std::ifstream input(job.path, std::ios::binary);
-    input.read(header, sizeof(header));
+    input.read(reinterpret_cast<char*>(header), sizeof(header));
     const auto size = input.gcount();
     input.close();
-    const char* extension = nullptr;
-    if (size >= 12 && !std::memcmp(header, "RIFF", 4) &&
-        !std::memcmp(header + 8, "AVI ", 4)) {
-      const auto* h = reinterpret_cast<const unsigned char*>(header);
-      const uint64_t riff_size = uint64_t(h[4]) | uint64_t(h[5]) << 8 |
-                                 uint64_t(h[6]) << 16 | uint64_t(h[7]) << 24;
-      if (riff_size >= 4 && riff_size + 8 <= job.info.uploaded_bytes)
-        extension = ".avi";
-    } else if (size >= 12 && !std::memcmp(header + 4, "ftyp", 4)) {
-      const auto* h = reinterpret_cast<const unsigned char*>(header);
-      const uint64_t box_size = uint64_t(h[0]) << 24 | uint64_t(h[1]) << 16 |
-                                uint64_t(h[2]) << 8 | h[3];
-      if (box_size >= 12 && box_size <= job.info.uploaded_bytes)
-        extension = ".mp4";
-    } else if (size >= 4 && !std::memcmp(header, "\x1a\x45\xdf\xa3", 4))
-      extension = ".mkv";
-    if (!extension) {
+    const auto container = SubtitleVideoReader::ProbeContainer(
+        {header, static_cast<size_t>(size)}, job.info.uploaded_bytes);
+    if (container == SubtitleVideoReader::Container::kInvalid) {
       impl_->Fail(job, "invalid_container");
       return std::unexpected(SubtitleFailure::kInvalidVideo);
     }
+    if (!SubtitleVideoReader::SupportsContainer(container)) {
+      impl_->Fail(job, "unsupported_video");
+      return std::unexpected(SubtitleFailure::kInvalidVideo);
+    }
+    const char* extension = SubtitleVideoReader::ContainerExtension(container);
     const auto target = impl_->root / (job.info.id + extension);
     std::error_code error;
     std::filesystem::rename(job.path, target, error);

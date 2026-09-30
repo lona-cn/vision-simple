@@ -53,7 +53,7 @@ jobs:
             cache_key: linux-x86_64-gcc14-release
             package_key: linux-x86_64-gcc14-release-cpu
             policy: build.ccache:y
-            apt_packages: g++-14 libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
+            apt_packages: g++-14 libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel ffmpeg fonts-dejavu-core
             configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 -m release --with_cuda=n --with_tensorrt=n --with_rknpu=n
             build_tests: true
             run_http: true
@@ -236,7 +236,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y ${{ matrix.apt_packages }}
+      - name: Ensure Windows native subtitle decoder prerequisite
+        if: matrix.run_http && runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $feature = Get-WindowsFeature -Name Server-Media-Foundation
+          if (-not $feature.Installed) {
+            $result = Install-WindowsFeature -Name Server-Media-Foundation
+            if (-not $result.Success -or $result.RestartNeeded -eq 'Yes') {
+              throw 'Native MP4 subtitle regression requires Media Foundation installed without a pending restart.'
+            }
+          }
 
+      - name: Install Windows subtitle fixture generator
+        if: matrix.run_http && runner.os == 'Windows'
+        run: choco install ffmpeg --version=6.1.1 --yes --no-progress
       - name: Configure
         run: xmake f ${{ matrix.configure }} --policies=${{ matrix.policy }} -y
 
@@ -275,7 +290,11 @@ jobs:
         run: |
           server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
           python scripts/test_http_dispatch.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-
+      - name: Run real-server subtitle regression
+        if: matrix.run_http
+        run: |
+          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+          python scripts/test_subtitle_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE"
       - name: Verify cross-built server architecture
         if: matrix.verify_pattern != ''
         run: |
