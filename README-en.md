@@ -374,7 +374,7 @@ Tracks created on the session's first frame are immediately confirmed; tracks cr
 
 ### Asynchronous video subtitles
 
-This extracts **visible text with OCR**, not speech. Configure an OCR model and its real detection/recognition weights and dictionary first. The following POSIX-shell commands use `curl` (`curl.exe` on Windows); replace `JOB_ID` with the `id` returned by create:
+This extracts **visible text with OCR**, not speech. Configure an OCR model and its real detection/recognition weights and dictionary first. The following Linux shell commands use `curl` and GNU `mktemp`/`mv`; replace `JOB_ID` with the `id` returned by create. A Windows PowerShell download example follows.
 
 ```sh
 # 201 + Location; options are top-level fields, not an "options" object
@@ -382,20 +382,53 @@ curl -sS -X POST http://127.0.0.1:11451/v1/subtitle/jobs -H 'Content-Type: appli
 # 202 means accepted for processing, not successful decoding
 curl -sS -X PUT http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID/video -H 'Content-Type: application/octet-stream' --data-binary @clip.avi
 curl -sS http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
-# Download only after state == "completed"
-curl -fS http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID/subtitles.srt -o clip.srt
-curl -fS http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID/subtitles.vtt -o clip.vtt
-# Alternatively cancel unfinished work; poll until terminal before deletion
-curl -sS -X POST http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID/cancel -H 'Content-Type: application/json' -d '{}'
-curl -i -X DELETE http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
+# Run only after GET reports state == "completed"; empty SRT is valid.
+job_url=http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
+result=./clip.srt
+# Same-directory temporary file: successful transfer + write + atomic rename before DELETE.
+if tmp=$(mktemp "${result}.download.XXXXXX"); then
+  if curl --fail --silent --show-error "$job_url/subtitles.srt" --output "$tmp" &&
+     test -f "$tmp" && mv -fT -- "$tmp" "$result"; then
+    curl --fail --silent --show-error -X DELETE "$job_url"
+  else
+    rm -f -- "$tmp"
+    printf '%s\n' 'Download/save failed: original result and server job retained.' >&2
+  fi
+fi
+# For WebVTT use subtitles.vtt and ./clip.vtt instead; do not delete until all wanted files are saved.
+```
+
+Windows PowerShell (Python 3 installed): use `curl.exe`, not the PowerShell `curl` alias. After polling until completed, use this download-and-save block; empty SRT is valid. For WebVTT change both the endpoint and destination extension. Save all wanted formats before deleting the job.
+
+```powershell
+$jobUrl = 'http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID'
+$result = [IO.Path]::GetFullPath('clip.srt')
+$tmp = Join-Path ([IO.Path]::GetDirectoryName($result)) ([IO.Path]::GetRandomFileName())
+try {
+    curl.exe --fail --silent --show-error "$jobUrl/subtitles.srt" --output "$tmp"
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmp -PathType Leaf)) {
+        throw 'Download/write failed; server job retained.'
+    }
+    python -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' "$tmp" "$result"
+    if ($LASTEXITCODE -ne 0) { throw 'Atomic replacement failed; server job retained.' }
+    curl.exe --fail --silent --show-error -X DELETE "$jobUrl"
+    if ($LASTEXITCODE -ne 0) { throw 'Local result saved; DELETE failed.' }
+} finally {
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp }
+}
 ```
 
 - Create accepts only `model`, `sample_interval_ms` (integer 100–5000, default 200), `roi`, `min_confidence` ([0,1], default 0.5), `stable_samples` and `gap_samples` (integers 2–10, both default 2). `model` is the configured raw OCR name, 1–256 bytes. ROI is normalized `[x,y,width,height]`, with positive dimensions entirely inside the frame; default `[0,0.5,1,0.5]` is the bottom half. Full-frame example: `{"model":"ppocr-v4","roi":[0,0,1,1]}`. Unknown fields are rejected.
 - Sampling selects the first decoded frame at or after the next interval, using actual presentation timestamps in milliseconds, not `sample_index × interval`. OCR lines below `min_confidence` are removed (the model's own recognition filter still applies), arranged top-to-bottom/left-to-right and whitespace-normalized. There is no fuzzy text matching. Identical normalized text needs `stable_samples` consecutive observations; its cue starts at the first of those observations. A confirmed replacement ends the previous cue at that same timestamp. Transient alternatives are suppressed; fewer than `gap_samples` empty observations can bridge an unchanged cue, while a confirmed empty gap ends it at the first empty timestamp. At EOF, an outstanding gap closes there; otherwise the last cue ends at the decoded stream end. Intervals are nonoverlapping and positive; precision depends on sampling and OCR accuracy.
 - Downloads contain validated UTF-8 SRT or WebVTT, with normalized control/blank lines and escaped `&`, `<`, `>` to prevent recognized text from becoming markup or cue syntax. Empty successful extraction is valid: empty SRT or a WebVTT header, not fabricated captions.
-- Normal states are `created → uploading → queued → running → completed`; failures become `failed`. Cancellation returns 202 and moves active native processing through `cancelling → cancelled`; it is cooperative, not a hard interruption of a decoder/ORT call. Cancelling an already terminal job leaves its result unchanged. Status returns `id`, `state`, `uploaded_bytes`, `decoded_frames`, `sampled_frames`, `position_ms`, nullable `duration_ms`, `cue_count`, and nullable `error_code`. Duration may be unknown; counts/position are progress, not a guaranteed percentage, and `cue_count` while running excludes the open cue. `GET /v1/subtitle/jobs?limit=100` lists job objects and nullable `next_cursor`; pass it unchanged as `cursor` (limit 1–100).
+- Normal states are `created → uploading → queued → running → completed`; failures become `failed`. Cancellation returns 202 and moves active native processing through `cancelling → cancelled`; it is cooperative, not a hard interruption of a decoder/ORT call. Cancelling an already terminal job leaves its result unchanged. Status returns `id`, `state`, `uploaded_bytes`, `decoded_frames`, `sampled_frames`, `position_ms`, nullable `duration_ms`, `cue_count`, nullable `error_code`, and nullable `expires_at`. Duration may be unknown; counts/position are progress, not a guaranteed percentage, and `cue_count` while running excludes the open cue. `GET /v1/subtitle/jobs?limit=100` lists job objects and nullable `next_cursor`; pass it unchanged as `cursor` (limit 1–100).
 - Upload is raw bytes in a separate PUT, not multipart/base64, a server-local path or a remote URL. Only `created` jobs accept upload; a consumed/interrupted/failed upload cannot restart on the same job. Retry by creating a new job and reuploading; create is not idempotent. A successful upload can still fail asynchronously, so poll `state` and inspect `error_code` (for example `upload_interrupted`, `unsupported_video`, `invalid_timestamps`, `ocr_failed`, `subtitle_limit`), not error-message wording. Partial failed results cannot be downloaded.
-- One worker serves at most **8 jobs**, including pending uploads and retained terminal results. Limits: 64 MiB/video, 1800 seconds, 1,000,000 decoded frames, 16,777,216 pixels/frame, 4096 OCR lines/observation, 4096 bytes/line and combined observation, 10,000 cues and 2 MiB accumulated cue text. JSON control bodies are limited to 64 KiB. Input files live in a private server-owned temporary directory and are removed on completion/failure/cancellation/deletion; orderly shutdown removes the directory. Created/uploading jobs expire after 60 seconds without upload activity; terminal results expire after 300 seconds. Polling/downloading does not renew retention; filesystem cleanup failures can retain capacity, and a process crash is not an orderly cleanup guarantee.
+- One worker serves at most **8 jobs**, including pending uploads and retained terminal results. Limits: 64 MiB/video, 1800 seconds, 1,000,000 decoded frames, 16,777,216 pixels/frame, 4096 OCR lines/observation, 4096 bytes/line and combined observation, 10,000 cues and 2 MiB accumulated cue text. JSON control bodies are limited to 64 KiB. Input files live in a private server-owned temporary directory; completion/failure/cancellation/deletion and orderly shutdown attempt cleanup. A process crash is not an orderly cleanup guarantee.
+- Processing is FIFO by **successful upload completion and transition to queued**, not create time or random job ID. It guarantees dispatch order, not start/completion deadlines. List pagination remains lexical by job ID, independently of FIFO.
+- Every job object includes nullable `expires_at`: UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`. Created/uploading jobs become eligible for expiry **60 seconds after the last accepted activity** (creation, successful upload start, or successfully written nonempty chunk); empty chunks do not renew it. Completed/failed/cancelled results become eligible **300 seconds after actual terminal acknowledgement**, not the cancellation request. Queued/running/cancelling have `expires_at: null` and do not expire. GET, List, Download and idempotent terminal Cancel never renew retention.
+- Expiry is cleanup eligibility, not exact-time removal: independent housekeeping checks every real second; create, GET, List, upload start and Download also sweep. Append, Finish, Cancel and Delete do not add a sweep, so an overdue but unswept operation may win the lock first. A row releases capacity only after input-file unlink succeeds; cleanup failures can keep it visible and consuming capacity beyond `expires_at`.
+- Enforcement uses only the monotonic clock. The UTC metadata projection captures wall and monotonic time together at the activity/terminal transition and is not rebased on reads. A wall-clock jump can make the published date an estimate without changing retention. The private service clock is a typed source callback for native regression tests, not a per-job field, HTTP option or YAML knob.
+- A Download accepted under the service lock retains shared ownership and may finish after concurrent expiry/deletion; new requests may already return 404. Save each wanted download successfully to a same-directory temporary file and atomically replace the destination before DELETE, as above. A failed download/write/replacement leaves the original local result and server job intact (subject to normal expiry).
 - Container admission and actual decoding use the same build-specific capability policy:
 
   | Container | Windows native build | Linux build | Actual decoding after admission |

@@ -135,13 +135,16 @@ struct SubtitleService::Impl {
   struct Job {
     SubtitleJobInfo info;
     SubtitleOptions options;
-    Clock::time_point touched = Clock::now();
+    Clock::time_point touched{};
+    uint64_t enqueue_ordinal = 0;
     std::filesystem::path path;
     std::ofstream upload;
     std::stop_source cancel;
     std::vector<SubtitleCue> cues;
   };
   std::shared_ptr<InferenceService> inference;
+  SubtitleServiceClock clock;
+  uint64_t enqueue_ordinal = 0;
   std::filesystem::path root;
   std::mutex mutex, stop_mutex;
   std::condition_variable wake;
@@ -156,6 +159,26 @@ struct SubtitleService::Impl {
       std::filesystem::remove_all(root, error);
     }
   }
+  SubtitleServiceClock::SteadyTime SteadyNow() const noexcept {
+    return clock.steady_now ? clock.steady_now(clock.context) : Clock::now();
+  }
+  SubtitleServiceClock::UtcTime UtcNow() const noexcept {
+    return clock.utc_now
+               ? clock.utc_now(clock.context)
+               : std::chrono::time_point_cast<std::chrono::milliseconds>(
+                     std::chrono::system_clock::now());
+  }
+  void Touch(Job& job) noexcept {
+    const bool idle = job.info.state == SubtitleJobState::kCreated ||
+                      job.info.state == SubtitleJobState::kUploading;
+    if (!idle && !Terminal(job.info.state)) {
+      job.info.expires_at.reset();
+      return;
+    }
+    const auto retention = std::chrono::seconds(idle ? 60 : 300);
+    job.touched = SteadyNow();
+    job.info.expires_at = UtcNow() + retention;
+  }
   void RemoveInput(Job& job) {
     if (job.upload.is_open()) job.upload.close();
     if (!job.path.empty()) {
@@ -168,10 +191,10 @@ struct SubtitleService::Impl {
     RemoveInput(job);
     job.info.state = SubtitleJobState::kFailed;
     job.info.error_code = code;
-    job.touched = Clock::now();
+    Touch(job);
   }
   void Sweep() {
-    const auto now = Clock::now();
+    const auto now = SteadyNow();
     for (auto it = jobs.begin(); it != jobs.end();) {
       auto& job = *it->second;
       const bool idle = job.info.state == SubtitleJobState::kCreated ||
@@ -285,12 +308,16 @@ struct SubtitleService::Impl {
           std::unique_lock lock(mutex);
           Sweep();
           if (closed) return;
-          for (auto& [id, candidate] : jobs)
-            if (candidate->info.state == SubtitleJobState::kQueued) {
-              job = candidate;
-              job->info.state = SubtitleJobState::kRunning;
-              break;
-            }
+          auto queued = jobs.end();
+          for (auto it = jobs.begin(); it != jobs.end(); ++it)
+            if (it->second->info.state == SubtitleJobState::kQueued &&
+                (queued == jobs.end() || it->second->enqueue_ordinal <
+                                            queued->second->enqueue_ordinal))
+              queued = it;
+          if (queued != jobs.end()) {
+            job = queued->second;
+            job->info.state = SubtitleJobState::kRunning;
+          }
           if (!job) {
             wake.wait_for(lock, std::chrono::seconds(1));
             continue;
@@ -307,21 +334,22 @@ struct SubtitleService::Impl {
         RemoveInput(*job);
         if (job->cancel.stop_requested()) {
           job->info.state = SubtitleJobState::kCancelled;
+          Touch(*job);
         } else if (error || !job->path.empty()) {
           Fail(*job, error ? error : "storage_failed");
         } else {
           job->cues = std::move(cues);
           job->info.cue_count = job->cues.size();
           job->info.state = SubtitleJobState::kCompleted;
+          Touch(*job);
         }
-        job->touched = Clock::now();
       } catch (...) {
         // Keep the worker alive even if allocation for an error report fails.
         if (job) {
           std::lock_guard lock(mutex);
           RemoveInput(*job);
           job->info.state = SubtitleJobState::kFailed;
-          job->touched = Clock::now();
+          Touch(*job);
         }
       }
     }
@@ -332,11 +360,13 @@ SubtitleService::SubtitleService(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 SubtitleService::~SubtitleService() { Stop(); }
 SubtitleResult<std::shared_ptr<SubtitleService>> SubtitleService::Create(
-    std::shared_ptr<InferenceService> inference) noexcept {
+    std::shared_ptr<InferenceService> inference,
+    SubtitleServiceClock clock) noexcept {
   try {
     if (!inference) return std::unexpected(SubtitleFailure::kInvalid);
     auto impl = std::make_unique<Impl>();
     impl->inference = std::move(inference);
+    impl->clock = clock;
     const auto path = std::filesystem::temp_directory_path() /
                       ("vision-subtitles-" + Token());
     if (!PrivateDirectory(path))
@@ -374,6 +404,7 @@ SubtitleResult<SubtitleJobInfo> SubtitleService::Add(
     impl_->Sweep();
     if (impl_->jobs.size() >= 8)
       return std::unexpected(SubtitleFailure::kCapacity);
+    impl_->Touch(*job);
     auto info = job->info;
     if (!impl_->jobs.emplace(info.id, std::move(job)).second)
       return std::unexpected(SubtitleFailure::kFailed);
@@ -431,7 +462,7 @@ SubtitleResult<void> SubtitleService::BeginUpload(
       return std::unexpected(SubtitleFailure::kFailed);
     }
     job.info.state = SubtitleJobState::kUploading;
-    job.touched = Clock::now();
+    impl_->Touch(job);
     return {};
   } catch (...) {
     AbortUpload(id);
@@ -461,7 +492,7 @@ SubtitleResult<void> SubtitleService::AppendUpload(
       return std::unexpected(SubtitleFailure::kFailed);
     }
     job.info.uploaded_bytes += bytes.size();
-    if (!bytes.empty()) job.touched = Clock::now();
+    if (!bytes.empty()) impl_->Touch(job);
     return {};
   } catch (...) {
     AbortUpload(id);
@@ -509,7 +540,8 @@ SubtitleResult<void> SubtitleService::FinishUpload(
     }
     job.path = target;
     job.info.state = SubtitleJobState::kQueued;
-    job.touched = Clock::now();
+    job.enqueue_ordinal = ++impl_->enqueue_ordinal;
+    impl_->Touch(job);
     impl_->wake.notify_one();
     return {};
   } catch (...) {
@@ -543,7 +575,7 @@ SubtitleResult<void> SubtitleService::Cancel(const std::string& id) noexcept {
       impl_->RemoveInput(job);
       job.info.state = SubtitleJobState::kCancelled;
     }
-    job.touched = Clock::now();
+    impl_->Touch(job);
     impl_->wake.notify_one();
     return {};
   } catch (...) {
@@ -604,7 +636,7 @@ void SubtitleService::Stop() noexcept {
           impl_->RemoveInput(*job);
           job->info.state = SubtitleJobState::kCancelled;
         }
-        job->touched = Clock::now();
+        impl_->Touch(*job);
       }
     }
     impl_->wake.notify_all();

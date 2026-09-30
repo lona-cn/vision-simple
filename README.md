@@ -373,7 +373,7 @@ with urlopen(request, timeout=120) as response:
 
 ### 异步视频字幕
 
-此功能通过 OCR 提取**画面内文字**，不是语音转写。先配置 OCR 模型及真实检测/识别权重和字典。以下为 POSIX shell 的 `curl` 示例（Windows 使用 `curl.exe`）；将 `JOB_ID` 替换为创建响应中的 `id`：
+此功能通过 OCR 提取**画面内文字**，不是语音转写。先配置 OCR 模型及真实检测/识别权重和字典。以下 Linux shell 示例使用 `curl` 和 GNU `mktemp`/`mv`；将 `JOB_ID` 替换为创建响应中的 `id`。随后提供 Windows PowerShell 下载示例。
 
 ```sh
 # 201 + Location；选项是顶层字段，不套 "options"
@@ -381,20 +381,53 @@ curl -sS -X POST http://127.0.0.1:11451/v1/subtitle/jobs -H 'Content-Type: appli
 # 202 仅表示已接收处理，不保证视频解码成功
 curl -sS -X PUT http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID/video -H 'Content-Type: application/octet-stream' --data-binary @clip.avi
 curl -sS http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
-# 仅在 state == "completed" 后下载
-curl -fS http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID/subtitles.srt -o clip.srt
-curl -fS http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID/subtitles.vtt -o clip.vtt
-# 或取消未完成的任务；轮询至终态后再删除
-curl -sS -X POST http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID/cancel -H 'Content-Type: application/json' -d '{}'
-curl -i -X DELETE http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
+# Run only after GET reports state == "completed"; empty SRT is valid.
+job_url=http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID
+result=./clip.srt
+# Same-directory temporary file: successful transfer + write + atomic rename before DELETE.
+if tmp=$(mktemp "${result}.download.XXXXXX"); then
+  if curl --fail --silent --show-error "$job_url/subtitles.srt" --output "$tmp" &&
+     test -f "$tmp" && mv -fT -- "$tmp" "$result"; then
+    curl --fail --silent --show-error -X DELETE "$job_url"
+  else
+    rm -f -- "$tmp"
+    printf '%s\n' 'Download/save failed: original result and server job retained.' >&2
+  fi
+fi
+# For WebVTT use subtitles.vtt and ./clip.vtt instead; do not delete until all wanted files are saved.
+```
+
+Windows PowerShell（已安装 Python 3）：使用 `curl.exe`，不要使用 PowerShell 的 `curl` 别名。轮询至 completed 后运行以下下载/保存代码；空 SRT 也是合法结果。WebVTT 需同时修改端点与目标扩展名；保存全部需要的格式后再删除任务。
+
+```powershell
+$jobUrl = 'http://127.0.0.1:11451/v1/subtitle/jobs/JOB_ID'
+$result = [IO.Path]::GetFullPath('clip.srt')
+$tmp = Join-Path ([IO.Path]::GetDirectoryName($result)) ([IO.Path]::GetRandomFileName())
+try {
+    curl.exe --fail --silent --show-error "$jobUrl/subtitles.srt" --output "$tmp"
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmp -PathType Leaf)) {
+        throw 'Download/write failed; server job retained.'
+    }
+    python -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' "$tmp" "$result"
+    if ($LASTEXITCODE -ne 0) { throw 'Atomic replacement failed; server job retained.' }
+    curl.exe --fail --silent --show-error -X DELETE "$jobUrl"
+    if ($LASTEXITCODE -ne 0) { throw 'Local result saved; DELETE failed.' }
+} finally {
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp }
+}
 ```
 
 - 创建仅接受 `model`、`sample_interval_ms`（整数 100–5000，默认 200）、`roi`、`min_confidence`（[0,1]，默认 0.5）、`stable_samples` 和 `gap_samples`（整数 2–10，均默认 2）。`model` 为配置中的 OCR 原名，1–256 字节。ROI 使用归一化 `[x,y,width,height]`，宽高为正且完整位于画面内；默认 `[0,0.5,1,0.5]` 为下半屏。全画面示例：`{"model":"ppocr-v4","roi":[0,0,1,1]}`。未知字段会被拒绝。
 - 采样选择达到下一个间隔的首个解码帧，使用实际显示时间戳（毫秒），不是 `采样序号 × 间隔`。过滤低于 `min_confidence` 的 OCR 行（模型自身识别阈值仍生效），按从上到下、同行从左到右排列并规范化空白；不做模糊文本匹配。相同规范化文字连续出现 `stable_samples` 次才确认，字幕起点回溯到这组观测的第一次；确认新文字时，旧字幕在同一时刻结束。短暂替代文字被抑制；少于 `gap_samples` 次空观测可合并未改变的字幕，达到该阈值则在第一次空观测处结束。EOF 时若存在未确认的空白间隔则在其起点结束，否则末条字幕结束于解码流末尾。区间不重叠且时长为正，精度取决于采样与 OCR。
 - 下载为经 UTF-8 校验的 SRT/WebVTT，规范化控制字符/空行并转义 `&`、`<`、`>`，防止识别文字变成标记或字幕结构。成功但没有字幕时，SRT 为空、WebVTT 仅含头部，不伪造字幕。
-- 正常状态为 `created → uploading → queued → running → completed`，失败进入 `failed`。取消返回 202；正在执行原生处理时经历 `cancelling → cancelled`，是合作式取消，不强制中断解码器/ORT 调用。对终态任务取消不会改变结果。状态字段为 `id`、`state`、`uploaded_bytes`、`decoded_frames`、`sampled_frames`、`position_ms`、可空 `duration_ms`、`cue_count` 和可空 `error_code`。时长可能未知，计数/位置并非保证准确的百分比；运行中的 `cue_count` 不含尚未闭合的字幕。`GET /v1/subtitle/jobs?limit=100` 返回任务对象数组及可空 `next_cursor`，下一页原样传入 `cursor`（limit 为 1–100）。
+- 正常状态为 `created → uploading → queued → running → completed`，失败进入 `failed`。取消返回 202；正在执行原生处理时经历 `cancelling → cancelled`，是合作式取消，不强制中断解码器/ORT 调用。对终态任务取消不会改变结果。状态字段为 `id`、`state`、`uploaded_bytes`、`decoded_frames`、`sampled_frames`、`position_ms`、可空 `duration_ms`、`cue_count`、可空 `error_code` 和可空 `expires_at`。时长可能未知，计数/位置并非保证准确的百分比；运行中的 `cue_count` 不含尚未闭合的字幕。`GET /v1/subtitle/jobs?limit=100` 返回任务对象数组及可空 `next_cursor`，下一页原样传入 `cursor`（limit 为 1–100）。
 - 创建 JSON 后以独立 PUT 上传原始字节，不接受 multipart/base64、服务器本地路径或远程 URL。仅 `created` 可开始上传；已消费、中断或失败的上传不能在同一任务重试，应新建任务并重新上传，创建操作不具幂等性。上传成功后仍可能异步失败，必须轮询 `state` 并检查 `error_code`（如 `upload_interrupted`、`unsupported_video`、`invalid_timestamps`、`ocr_failed`、`subtitle_limit`），不依赖错误文案；失败的部分结果不能下载。
-- 单 worker，最多 **8 个任务**（含待上传及保留的终态结果）。上限为每视频 64 MiB、1800 秒、1,000,000 个解码帧、每帧 16,777,216 像素；每次观测最多 4096 行，单行及合并文字最多 4096 字节；最多 10,000 条字幕及累计 2 MiB 字幕文字。JSON 控制正文最多 64 KiB。输入文件存放于服务自建的私有临时目录，在完成/失败/取消/删除时移除，正常关闭时移除目录。created/uploading 无上传活动 60 秒过期，终态结果 300 秒过期；轮询和下载不续期。文件系统清理失败可能继续占用容量，进程崩溃不保证正常清理。
+- 单 worker，最多 **8 个任务**（含待上传及保留的终态结果）。上限为每视频 64 MiB、1800 秒、1,000,000 个解码帧、每帧 16,777,216 像素；每次观测最多 4096 行，单行及合并文字最多 4096 字节；最多 10,000 条字幕及累计 2 MiB 字幕文字。JSON 控制正文最多 64 KiB。输入文件位于服务自建私有临时目录；完成/失败/取消/删除与正常关闭尝试清理，进程崩溃不保证正常清理。
+- FIFO 处理顺序按**成功结束上传并转为 queued 的顺序**，不是创建时间或随机任务 ID。它保证调度顺序，不保证开始/完成的时间期限。列表仍按 ID 字典序分页，与 FIFO 无关。
+- 每个任务对象均含可空 `expires_at`，UTC 格式为 `YYYY-MM-DDTHH:MM:SS.mmmZ`。created/uploading 在**最后一次接受的活动后 60 秒**取得过期资格：活动为创建、成功开始上传、成功写入非空分块；空分块不续期。completed/failed/cancelled 在**实际终态确认后 300 秒**取得过期资格，不从取消请求时计算。queued/running/cancelling 的 `expires_at: null`，不自动过期。GET、List、Download 与对终态幂等 Cancel 均不续期。
+- 过期时间仅为清理资格，不保证准时删除。独立 housekeeping 每个真实秒检查；创建、GET、List、开始上传及 Download 也检查。Append、Finish、Cancel、Delete 不额外 sweep，逾期但未清理的操作仍可能先取得锁而成功。仅输入文件 unlink 成功后释放作业行及容量；清理失败可能使任务在 `expires_at` 之后仍可见、继续占用容量。
+- 过期执行仅使用单调时钟；UTC 元数据在活动/终态转换时同时捕获墙钟与单调时钟，读取不重新投影。墙钟跳变可使已发布日期仅为估计，不改变保留时间。私有服务时钟为原生回归的 typed source callback，不是逐任务字段、HTTP 选项或 YAML 开关。
+- 在服务锁内接受的 Download 持有共享所有权，即使并发过期清理/删除仍可完成；新请求可能已返回 404。按上例将所有需要的下载成功写入同目录临时文件，再原子替换目标，最后 DELETE。下载/写入/替换失败时保留原本地结果和服务任务（任务仍受正常过期规则约束）。
 - 容器准入与实际读取共用按构建确定的能力规则：
 
   | 容器 | Windows 原生构建 | Linux 构建 | 准入后的实际解码 |

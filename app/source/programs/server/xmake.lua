@@ -31,3 +31,13 @@ target("test_image_budget_service")
     add_deps("runtime", "infer")
     add_packages("turbobase64")
 target_end()
+target("test_subtitle_service")
+    add_includedirs("private")
+    add_files("private/SubtitleService.cpp", "private/SubtitleVideoReader.cpp", "private/SubtitleTimeline.cpp")
+    add_files("private/InferenceService.cpp", "private/TaskRegistry.cpp", "private/ImageCodec.cpp")
+    add_deps("runtime", "infer")
+    add_packages("turbobase64", "opencv")
+    if is_plat("windows") then
+        add_syslinks("mfplat", "mfreadwrite", "mfuuid", "ole32")
+    end
+target_end()

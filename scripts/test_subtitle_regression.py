@@ -91,7 +91,23 @@ def request(server, method, route, body=None, media=None, headers=None, timeout=
 
 def expect(response, status, label):
     require(response[0] == status, f"{label}: expected HTTP {status}, got {response}")
+    body = response[1]
+    if isinstance(body, dict):
+        rows = body.get("jobs", [body] if "state" in body and "id" in body else [])
+        for row in rows:
+            expiry_metadata(row)
     return response[1]
+
+
+def expiry_metadata(row):
+    require("expires_at" in row, f"Job omitted expiry metadata: {row}")
+    expiry = row["expires_at"]
+    if row["state"] in {"queued", "running", "cancelling"}:
+        require(expiry is None, f"Active work must not advertise expiry: {row}")
+    else:
+        require(isinstance(expiry, str) and re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", expiry),
+            f"Expiry is not UTC with millisecond precision: {row}")
 
 
 def create(server, options=None):
@@ -182,6 +198,11 @@ def incremental_upload(server, identifier, data, temp_root, *, chunked):
         require(info(server, identifier)["state"] == "uploading", "Duplicate upload aborted the owner")
         expect(request(server, "GET", f"{ROOT}/{identifier}/subtitles.srt"), 409, "result during upload")
         expect(request(server, "DELETE", f"{ROOT}/{identifier}"), 409, "delete during upload")
+        require(info(server, identifier)["expires_at"] == current["expires_at"],
+                "Read-only GET/download or rejected duplicate renewed uploading expiry")
+        listed = expect(request(server, "GET", ROOT), 200, "uploading expiry list")["jobs"]
+        require(next(row for row in listed if row["id"] == identifier)["expires_at"] == current["expires_at"],
+                "List renewed uploading expiry")
         for offset in range(first, len(data), 16384):
             send_piece(connection, data[offset:offset + 16384], chunked)
         if chunked:
@@ -375,7 +396,11 @@ def failed_media(server, data, temp_root, label, status, error_code):
     no_source_files(temp_root, [job])
     for suffix in ("subtitles.srt", "subtitles.vtt"):
         expect(request(server, "GET", f"{ROOT}/{job}/{suffix}"), 409, f"{label}: failed result")
-    expect(upload(server, job, data), 409, f"{label}: retry failed job")
+    # A failed row must reject admission before 100 Continue: advertise the
+    # original fixture length, but send no body after the final 409 response.
+    header_only(server, "PUT", f"{ROOT}/{job}/video",
+                {"Content-Type": "application/octet-stream", "Content-Length": str(len(data)),
+                 "Expect": "100-continue"}, 409)
     no_source_files(temp_root, [job])
     delete(server, job)
 
@@ -558,6 +583,99 @@ def cancellation_and_isolation(server, media, temp_root):
     delete(server, second)
 
 
+def fifo_and_expiry(server, media, temp_root):
+    blocker = create(server)
+    expect(upload(server, blocker, media["cancellation.avi"]), 202, "FIFO blocker upload")
+    wait_state(server, blocker, {"running"}, timeout=30)
+    jobs = [create(server) for _ in range(6)]
+    enqueue_order = sorted(jobs, reverse=True)
+    # A descending creation permutation is valid too: oppose both creation
+    # and lexical priority deterministically, without regenerating identifiers.
+    if enqueue_order == jobs:
+        enqueue_order[0], enqueue_order[1] = enqueue_order[1], enqueue_order[0]
+    reserve = create(server)
+    created_expiry = info(server, reserve)["expires_at"]
+
+    def snapshot():
+        rows = expect(request(server, "GET", ROOT + "?limit=8"), 200, "FIFO snapshot")["jobs"]
+        require([row["id"] for row in rows] == sorted(row["id"] for row in rows),
+                f"FIFO scheduling changed lexical listing: {rows}")
+        by_id = {row["id"]: row for row in rows}
+        require(set(by_id) == set(jobs + [blocker] + ([reserve] if reserve else [])),
+                f"FIFO snapshot lost retained rows: {rows}")
+        if reserve:
+            require(by_id[reserve]["state"] == "created" and
+                    by_id[reserve]["expires_at"] == created_expiry,
+                    f"Listing renewed idle expiry or scheduled an ineligible job: {by_id[reserve]}")
+        return by_id
+
+    # Only successful upload completion makes work eligible. Deliberately finish
+    # in descending random-ID order (with the permutation adjustment above),
+    # opposing the map's ascending iteration and actual creation order.
+    enqueued = []
+    for job in enqueue_order:
+        require(info(server, job)["state"] == "created", "Unfinished upload became eligible")
+        expect(upload(server, job, media["semantic.avi"]), 202, "FIFO queued upload")
+        enqueued.append(job)
+        rows = snapshot()
+        require(rows[blocker]["state"] == "running", f"Real OCR blocker ended before queue setup: {rows}")
+        for identifier in jobs:
+            expected = "queued" if identifier in enqueued else "created"
+            require(rows[identifier]["state"] == expected,
+                    f"Worker ran before blocker release or upload completion: {rows}")
+            require(info(server, identifier)["state"] == expected,
+                    f"GET disagreed with held FIFO queue: {identifier}")
+    cancelled = enqueue_order[2]
+    cancel(server, cancelled)
+    cancelled_expiry = info(server, cancelled)["expires_at"]
+    require(snapshot()[blocker]["state"] == "running", "Queued cancellation disturbed FIFO blocker")
+    # Terminal rows retain their slots, just as created/queued/running rows do.
+    expect(request(server, "POST", ROOT, json.dumps(OPTIONS).encode(), "application/json"),
+           503, "FIFO terminal-inclusive ninth retained job")
+    expect(request(server, "GET", f"{ROOT}/{reserve}/subtitles.srt"), 409, "idle download")
+    require(info(server, reserve)["expires_at"] == created_expiry, "GET/download renewed idle expiry")
+    # The idle row has proved capacity and read stability; do not require it
+    # to outlive its real 60-second lease while queued OCR work completes.
+    delete(server, reserve)
+    reserve = None
+    cancel(server, blocker)
+    blocker_expiry = info(server, blocker)["expires_at"]
+    pending = [job for job in enqueue_order if job != cancelled]
+    observed_running, completed_expiries = set(), {}
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        rows = snapshot()
+        active = [job for job in pending if rows[job]["state"] == "running"]
+        require(len(active) <= 1, f"Single OCR worker ran overlapping jobs: {rows}")
+        for index, job in enumerate(pending):
+            state = rows[job]["state"]
+            require(state in {"queued", "running", "completed"}, f"FIFO semantic job failed: {rows[job]}")
+            if state != "queued":
+                require(all(rows[earlier]["state"] == "completed" for earlier in pending[:index]),
+                        f"Worker violated FinishUpload FIFO order {pending}: {rows}")
+            if state == "running":
+                observed_running.add(job)
+            if state == "completed":
+                require(job in observed_running, f"Did not observe FIFO job start: {job}; {rows}")
+                expiry = completed_expiries.setdefault(job, rows[job]["expires_at"])
+                require(rows[job]["expires_at"] == expiry, "Terminal listing renewed expiry")
+        require(rows[cancelled]["expires_at"] == cancelled_expiry and
+                rows[blocker]["expires_at"] == blocker_expiry, "Terminal cancellation/list renewed expiry")
+        if len(completed_expiries) == len(pending):
+            break
+        time.sleep(0.03)
+    require(len(completed_expiries) == len(pending), f"FIFO completion deadline exceeded: {snapshot()}")
+    for job in pending:
+        transcript(server, job, [(1000, 5000, "HELLO"), (5000, 7000, "WORLD")])
+        expect(request(server, "POST", f"{ROOT}/{job}/cancel", b"{}", "application/json"),
+               202, "terminal cancel is idempotent")
+        require(info(server, job)["expires_at"] == completed_expiries[job],
+                "Terminal GET/download/cancel renewed expiry")
+    no_source_files(temp_root, jobs + [blocker])
+    for job in jobs + [blocker]:
+        delete(server, job)
+
+
 def capacity_and_pagination(server):
     jobs = [create(server) for _ in range(8)]
     expect(request(server, "POST", ROOT, json.dumps(OPTIONS).encode(), "application/json"),
@@ -650,6 +768,7 @@ def run(args):
                 delete(server, job)
             expect_continue(server, media["world.avi"], temp_root)
             cancellation_and_isolation(server, media, temp_root)
+            fifo_and_expiry(server, media, temp_root)
             if os.name == "nt":
                 job = create(server)
                 completed(server, job, media["vfr-audio-tail.mp4"], temp_root, chunked=True,

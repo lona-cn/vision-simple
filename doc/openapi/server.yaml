@@ -831,9 +831,16 @@ paths:
       PUT 必须精确为 application/octet-stream（不接受 charset 参数），否则415。
       创建/取消 JSON 正文最多65536字节；视频流最多67108864字节；声明长度及实际接收字节均受限，超限413。
       早期拒绝可能关闭连接。最多8个作业（含等待上传和保留的终态结果），一个处理工作线程；
-      created/uploading 闲置60秒后清理，上传非空分块刷新闲置时间；终态保留300秒，查询/下载不续期。
+      成功结束上传并转为 queued 的顺序决定 FIFO 处理顺序，不是创建时间或随机 ID；不保证开始/完成时间。
+      created/uploading 的过期资格为创建、成功开始上传或最后成功写入非空分块后60秒；空分块不续期。
+      cancelled/completed/failed 在实际终态确认后保留300秒；queued/running/cancelling 不过期。
+      GET、列表、下载及对终态重复取消均不续期。expires_at 始终返回，可空，UTC 毫秒格式；
+      它是取得过期清理资格的时间，不是准时删除保证。独立清理每1秒检查，创建、GET、列表、开始上传和下载也检查。
+      追加分块、结束上传、取消、删除不额外检查过期；逾期但尚未清理的操作仍可能先取得锁并成功。
+      实际过期仅由单调时钟判定；UTC 时间在刷新时由同时取得的墙钟/单调时钟投影，读取不重新计算。
+      墙钟跳变后该字段只是估计，不改变保留时间。时钟来源不是 HTTP 或 YAML 配置项。
       输入放在服务私有临时目录，终止处理、取消、上传中断、删除、过期和停服时尝试清理；
-      清理失败不会提前释放文件占用的容量。限制为1800秒、1000000解码帧、每帧16777216像素，
+      输入文件删除失败时保留作业及容量，可能超过 expires_at。限制为1800秒、1000000解码帧、每帧16777216像素，
       单次 OCR 文本4096 UTF-8字节、10000条字幕、累计字幕文本2 MiB。
       上传准入与 reader 共用构建能力规则：AVI 在所有平台允许准入，实际由可移植有界 MJPEG reader
       读取单个 MJPG/mjpg 视频流、零起始时间和有效 rate/scale，支持 AVI/AVIX 并要求完整声明帧数；
@@ -884,7 +891,7 @@ paths:
           schema: {type: integer, minimum: 1, maximum: 100, default: 100}
         - name: cursor
           in: query
-          description: 原样传回 next_cursor；首请求省略，不能传空字符串。按 ID 排序而非创建时间。
+          description: 原样传回 next_cursor；首请求省略，不能传空字符串。按 ID 字典序排序而非创建时间，与成功结束上传的 FIFO 处理顺序无关。
           schema: {type: string, pattern: '^s1\.[0-9a-f]{32}$'}
       responses:
         '200':
@@ -901,7 +908,7 @@ paths:
       - {$ref: '#/components/parameters/SubtitleJobId'}
     get:
       summary: 轮询字幕作业状态
-      description: 无正文；不续期。异步失败仍返回200，检查 state 和 error_code；过期后404。
+      description: 无正文；不续期。异步失败仍返回200，检查 state 和 error_code；过期且清理成功后404，清理失败可保留超过 expires_at。
       security: []
       responses:
         '200': {$ref: '#/components/responses/SubtitleStatus'}
@@ -967,7 +974,7 @@ paths:
       summary: 请求协作式取消
       description: >-
         必须发送空 JSON 对象。created/uploading/queued 可直接 cancelled；
-        running 先变为 cancelling，工作线程退出后 cancelled。终态取消是无操作，保留原状态。
+        running 先变为 cancelling，工作线程退出后 cancelled。终态取消是无操作，保留原状态和 expires_at，不续期。
         202不保证取消已经完成；轮询终态后才能删除。取消不提供部分字幕下载。
       security: []
       requestBody:
@@ -994,6 +1001,7 @@ paths:
       description: >-
         无正文；仅 completed 可下载，其他所有状态（包括 failed/cancelled）409。
         UTF-8、毫秒时间戳、转义文本标记；成功但无字幕时为空文件。不续期，无部分结果。
+        在服务锁内接受下载后，共享所有权可使该响应在并发过期清理/删除之后继续完成；新请求仍可能404。
       security: []
       responses:
         '200':
@@ -1019,6 +1027,7 @@ paths:
       description: >-
         无正文；仅 completed 可下载，其他所有状态（包括 failed/cancelled）409。
         UTF-8、毫秒时间戳、转义文本标记；无字幕时仅包含 WEBVTT 头。不续期，无部分结果。
+        在服务锁内接受下载后，共享所有权可使该响应在并发过期清理/删除之后继续完成；新请求仍可能404。
       security: []
       responses:
         '200':
@@ -1246,13 +1255,24 @@ components:
         gap_samples: {type: integer, minimum: 2, maximum: 10, default: 2}
     SubtitleJob:
       type: object
-      required: [id, state, uploaded_bytes, decoded_frames, sampled_frames, position_ms, duration_ms, cue_count, error_code]
+      required: [id, state, uploaded_bytes, decoded_frames, sampled_frames, position_ms, duration_ms, cue_count, error_code, expires_at]
       properties:
         id: {type: string, pattern: '^[0-9a-f]{32}$'}
         state:
           type: string
           enum: [created, uploading, queued, running, cancelling, cancelled, completed, failed]
           description: 正常流程 created→uploading→queued→running→completed；cancelled/completed/failed 为终态
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'
+          example: '2026-10-01T12:00:00.123Z'
+          description: >-
+            UTC 毫秒过期资格时间，格式 YYYY-MM-DDTHH:MM:SS.mmmZ；queued/running/cancelling 为null。
+            created/uploading 为最后接受的创建/开始上传/成功非空分块后60秒，终态为实际确认后300秒。
+            读取及终态重复取消不续期。单调时钟负责执行；刷新时捕获的墙钟投影不随读取重算，墙钟跳变可使其仅为估计。
+            清理失败可使作业继续占用容量并在该时间后仍可见，不保证准时删除。
         uploaded_bytes: {type: integer, format: int64, minimum: 0, maximum: 67108864, description: 已成功写入的源视频字节数}
         decoded_frames: {type: integer, format: int64, minimum: 0, maximum: 1000000, description: 已处理解码帧计数}
         sampled_frames: {type: integer, format: int64, minimum: 0, maximum: 1000000, description: 已完成 OCR 的采样帧计数，不大于 decoded_frames}

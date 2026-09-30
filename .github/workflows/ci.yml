@@ -278,6 +278,12 @@ jobs:
           xmake run test_ocr_decode
           xmake run test_infer_inputs --project-root "$GITHUB_WORKSPACE"
 
+      - name: Build and run subtitle FIFO and expiry regression
+        if: matrix.run_http
+        run: |
+          xmake build test_subtitle_service
+          xmake run test_subtitle_service --project-root "$GITHUB_WORKSPACE"
+
       - name: Run real-server HTTP and startup regression
         if: matrix.run_http
         run: |

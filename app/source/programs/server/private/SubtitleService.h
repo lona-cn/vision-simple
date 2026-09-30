@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -44,6 +45,16 @@ enum class SubtitleJobState {
   kCompleted,
   kFailed
 };
+// Private service clock seam. Null callbacks use the real clocks; context must
+// outlive the service. Expiry enforcement always uses the steady clock.
+struct SubtitleServiceClock {
+  using SteadyTime = std::chrono::steady_clock::time_point;
+  using UtcTime =
+      std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>;
+  SteadyTime (*steady_now)(void*) noexcept = nullptr;
+  UtcTime (*utc_now)(void*) noexcept = nullptr;
+  void* context = nullptr;
+};
 struct SubtitleJobInfo {
   std::string id;
   SubtitleJobState state = SubtitleJobState::kCreated;
@@ -55,6 +66,8 @@ struct SubtitleJobInfo {
   size_t cue_count = 0;
   // Stable, path-free asynchronous failure code; absent unless failed.
   std::optional<std::string> error_code;
+  // UTC estimate of the steady-clock cleanup eligibility deadline.
+  std::optional<SubtitleServiceClock::UtcTime> expires_at;
 };
 struct SubtitleJobPage {
   std::vector<SubtitleJobInfo> jobs;
@@ -62,14 +75,16 @@ struct SubtitleJobPage {
 };
 
 // Eight jobs including pending uploads and retained terminal results; one
-// worker. Upload <=64 MiB, duration <=1800s, <=1000000 decoded frames,
-// <=16777216 pixels. Created/uploading idle jobs expire after 60s; terminal
-// jobs after 300s. Uploaded bytes never enter an unbounded HTTP body. No URLs
-// or user paths.
+// worker, FIFO by successful FinishUpload. Upload <=64 MiB, duration <=1800s,
+// <=1000000 decoded frames, <=16777216 pixels. Created/uploading idle jobs are
+// eligible for cleanup 60s after create/begin/nonempty append; terminal jobs
+// 300s after acknowledgement. Failed input unlink retains the row and capacity.
+// Uploaded bytes never enter an unbounded HTTP body. No URLs or user paths.
 class SubtitleService {
  public:
   static SubtitleResult<std::shared_ptr<SubtitleService>> Create(
-      std::shared_ptr<InferenceService> inference) noexcept;
+      std::shared_ptr<InferenceService> inference,
+      SubtitleServiceClock clock = {}) noexcept;
   ~SubtitleService();
   SubtitleService(const SubtitleService&) = delete;
   SubtitleService& operator=(const SubtitleService&) = delete;

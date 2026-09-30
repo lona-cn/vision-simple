@@ -6,11 +6,14 @@
 #include <algorithm>
 #include <bit>
 #include <charconv>
+#include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
 #include <limits>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 #include <string_view>
 
 #include "HTTPExpectation.h"
@@ -98,6 +101,25 @@ const char* StateName(SubtitleJobState state) {
   }
   return "failed";
 }
+std::string ExpiryUtc(SubtitleServiceClock::UtcTime value) {
+  using namespace std::chrono;
+  const auto day = floor<days>(value);
+  if (day < sys_days{year{0} / January / 1} ||
+      day >= sys_days{year{10000} / January / 1})
+    throw std::out_of_range("Subtitle expiry outside UTC year range");
+  const year_month_day date{day};
+  const hh_mm_ss<milliseconds> time{value - day};
+  char result[25];
+  const int size = std::snprintf(
+      result, sizeof(result), "%04d-%02u-%02uT%02d:%02d:%02d.%03dZ",
+      static_cast<int>(date.year()), static_cast<unsigned>(date.month()),
+      static_cast<unsigned>(date.day()), static_cast<int>(time.hours().count()),
+      static_cast<int>(time.minutes().count()),
+      static_cast<int>(time.seconds().count()),
+      static_cast<int>(time.subseconds().count()));
+  if (size != 24) throw std::runtime_error("Subtitle UTC formatting failed");
+  return std::string(result, 24);
+}
 Json Info(const SubtitleJobInfo& info) {
   return {
       {"id", info.id},
@@ -109,7 +131,9 @@ Json Info(const SubtitleJobInfo& info) {
       {"duration_ms",
        info.duration_ms ? Json(*info.duration_ms) : Json(nullptr)},
       {"cue_count", info.cue_count},
-      {"error_code", info.error_code ? Json(*info.error_code) : Json(nullptr)}};
+      {"error_code", info.error_code ? Json(*info.error_code) : Json(nullptr)},
+      {"expires_at", info.expires_at ? Json(ExpiryUtc(*info.expires_at))
+                                      : Json(nullptr)}};
 }
 int Send(const HttpContextPtr& ctx, int status, std::string body,
          bool finish = true) {
