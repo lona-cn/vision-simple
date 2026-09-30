@@ -308,11 +308,12 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
       cv::dilate(dilated, dilated, kernel);
     }
     std::vector<std::vector<cv::Point>> contours;
-#if (CV_MAJOR_VERSION >= 4) && (CV_MINOR_VERSION >= 10)
+#if (CV_MAJOR_VERSION > 4) || \
+    ((CV_MAJOR_VERSION == 4) && (CV_MINOR_VERSION >= 10))
     cv::findContoursLinkRuns(dilated, contours);
 #else
-    std::vector<std::vector<cv::Point>> hierarchy;
-    cv::findContours(gray, contours, hierarchy, cv::RETR_TREE,
+    std::vector<cv::Vec4i> hierarchy;
+    cv::findContours(dilated, contours, hierarchy, cv::RETR_CCOMP,
                      cv::CHAIN_APPROX_SIMPLE);
 #endif
     std::vector<cv::Rect> rects;

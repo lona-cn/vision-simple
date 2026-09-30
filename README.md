@@ -415,6 +415,8 @@ cv::Rect box = VisionHelper::ScaleCoords(transform, cv::Vec4f{x1, y1, x2, y2});
 
 ### 构建项目
 
+OpenCV 默认依赖为 4.10.0。OCR 在 4.10 及以上选择 LinkRuns，旧版本分支使用同一膨胀掩码、`Vec4i` hierarchy 和两级轮廓检索，保持默认形态学参数。两个轮廓 API 已在 4.10.0 上用同一矩形夹具验证；这不代表真实 4.9 或未来主版本的构建/运行兼容性已验收。
+
 #### 获取源码与模型资源
 
 安装 Git、Git LFS、[xmake](https://xmake.io) 及对应编译器。MSVC/GCC 配置使用 xmake ≥ 2.9.7；Clang 18 + libc++ 配置使用 xmake ≥ 3.1.1，与 CI 一致。

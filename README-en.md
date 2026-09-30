@@ -272,6 +272,8 @@ Postprocessing keeps this library's contract: YOLO11/YOLO26 raw detection filter
 
 #### Verified compatibility and limitations
 
+The default OpenCV dependency is 4.10.0. OCR selects LinkRuns from 4.10 onward; the older branch uses the same dilated mask, `Vec4i` hierarchy and two-level contour retrieval, without changing morphology defaults. Both contour APIs were exercised against the same rectangle fixture on 4.10.0; this does not certify an actual 4.9 build or future-major runtime compatibility.
+
 **Verified environment:** Windows x64 Release, C++ ORT 1.20.0 / DirectML 1.15.4, with Python ORT 1.24.3 as the reference runtime.
 
 | EP | Raw FP32 | NMS-free FP32 | Raw FP16 | NMS-free FP16 |
