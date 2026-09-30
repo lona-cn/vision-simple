@@ -3,6 +3,7 @@
 #include <bit>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <thread>
 
 #include "Infer.h"
@@ -167,6 +168,44 @@ int CheckRuntimeRecovery(InferContext& context, const fs::path& assets) {
   return 0;
 }
 
+int CheckDeviceIds(InferContext& cpu, const fs::path& assets) {
+  const auto path = (assets / "hd2-yolo11n-fp32.onnx").string();
+  const auto int_max = static_cast<size_t>((std::numeric_limits<int>::max)());
+  std::vector<size_t> invalid{int_max + size_t{1},
+                            (std::numeric_limits<size_t>::max)()};
+  if constexpr (sizeof(size_t) > sizeof(int))
+    invalid.push_back(static_cast<size_t>(uint64_t{4294967296}));
+  for (const auto ep : {InferEP::kDML, InferEP::kCUDA, InferEP::kTensorRT}) {
+    auto context = InferContext::Create(InferFramework::kONNXRUNTIME, ep);
+    TEST_ASSERT(context, "create provider context without requiring a GPU");
+    for (const auto device : invalid) {
+      const auto model =
+          InferYOLO::Create(**context, path, YOLOVersion::kV11, device);
+      TEST_ASSERT(!model && model.error().code ==
+                                VisionSimpleErrorCode::kParameterError,
+                  "unrepresentable provider device ID is a parameter error");
+    }
+    // These IDs fit the API type, but need not identify an available device.
+    for (const auto device : {size_t{0}, int_max}) {
+      const auto model =
+          InferYOLO::Create(**context, path, YOLOVersion::kV11, device);
+      TEST_ASSERT(model || model.error().code ==
+                               VisionSimpleErrorCode::kRuntimeError,
+                  "representable IDs reach provider initialization");
+    }
+  }
+  auto ignored = InferYOLO::Create(cpu, path, YOLOVersion::kV11,
+                                  (std::numeric_limits<size_t>::max)());
+  auto zero = InferYOLO::Create(cpu, path, YOLOVersion::kV11, 0);
+  TEST_ASSERT(ignored && zero, "CPU ignores even the maximum device ID");
+  const cv::Mat image(96, 192, CV_8UC3, cv::Scalar::all(0));
+  const auto expected = (*zero)->Run(image, .5f);
+  const auto actual = (*ignored)->Run(image, .5f);
+  TEST_ASSERT(expected && actual && Same(*expected, *actual),
+              "CPU inference is unchanged by the ignored device ID");
+  return 0;
+}
+
 int CheckYOLO26(InferContext& context, const fs::path& assets) {
   const auto path = [&](const std::string& name) {
     return (assets / "reliability" / ("yolo26_detect_" + name + ".onnx")).string();
@@ -231,6 +270,8 @@ int main(int argc, char** argv) {
   auto context =
       InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCPU);
   TEST_ASSERT(context, "create actual CPU context");
+  TEST_ASSERT(CheckDeviceIds(**context, assets) == 0,
+              "provider device representation and CPU ignored-device contract");
   TEST_ASSERT(
       !InferContext::Create(static_cast<InferFramework>(255), InferEP::kCPU),
       "unknown framework fails without terminating");

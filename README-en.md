@@ -489,6 +489,10 @@ Public RKNPU support matrix (Linux ARM/ARM64):
 
 `test_infer_inputs` covers RKNPU factory rejection/admission according to the build macro. It neither creates an RKNPU model session nor runs NPU inference; its retained CPU model inference does not verify RKNPU hardware. Successful context creation does not guarantee successful session initialization or real-device inference.
 
+For ONNX Runtime model creation with DML, CUDA or TensorRT, the public `size_t device_id` must be in `0..INT_MAX` (inclusive). Larger values return `kParameterError` before provider initialization or narrowing, even if that provider was not compiled in. Passing the range check does not prove that the device exists: `0` and `INT_MAX` are representable, but provider support, runtime/drivers and actual device availability are checked separately and can return `kRuntimeError`. CPU continues to ignore the device ID, including `SIZE_MAX`; RKNPU retains its separate device-0-only rule.
+
+`test_infer_inputs` checks these representation boundaries using model creation and compares CPU inference with device `0` and `SIZE_MAX`. Its representable GPU-ID cases allow provider initialization failure and do not claim GPU hardware is present or verified.
+
 Build options and runtime configuration must agree: after enabling a provider, select `kDML`, `kCUDA`, `kTensorRT` or `kRKNPU` in the string option `infer_ep` in `config/server.yaml`, and choose a device with `infer_device`. Runtime defaults to `kCPU`. The Windows DML build option defaults to enabled, but that does not select DML at runtime.
 
 ```powershell

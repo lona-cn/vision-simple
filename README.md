@@ -493,6 +493,10 @@ RKNPU 公开支持矩阵（Linux ARM/ARM64）：
 
 `test_infer_inputs` 按编译宏覆盖 RKNPU 工厂拒绝/准入，不创建 RKNPU 模型会话、不执行 NPU 推理；其中保留的 CPU 模型推理不构成 RKNPU 硬件验证。上下文创建成功不保证会话初始化或真实设备推理成功。
 
+ONNX Runtime 的 DML、CUDA、TensorRT 模型创建要求公开的 `size_t device_id` 位于 `0..INT_MAX`（含边界）。超出范围时，在 provider 初始化及窄化转换之前返回 `kParameterError`，即使该 provider 未编译也如此。通过表示范围检查不代表设备存在：`0`、`INT_MAX` 均可表示，但 provider 编译支持、运行库／驱动及真实设备可用性仍单独检查，可能返回 `kRuntimeError`。CPU 继续忽略设备 ID，包括 `SIZE_MAX`；RKNPU 保留独立的仅支持设备 0 规则。
+
+`test_infer_inputs` 通过模型创建覆盖这些表示范围边界，并比较设备 `0` 与 `SIZE_MAX` 的 CPU 推理结果。可表示 GPU ID 的用例允许 provider 初始化失败，不声明 GPU 硬件存在或已验证。
+
 编译选项与运行配置必须匹配：启用构建选项后，还要在 `config/server.yaml` 的字符串 `options.infer_ep` 中选择 `kDML`、`kCUDA`、`kTensorRT` 或 `kRKNPU`，`infer_device` 选择设备。默认运行配置为 `kCPU`；Windows 的 DML 构建选项默认开启，不等于运行时自动选择 DML。
 
 ```powershell

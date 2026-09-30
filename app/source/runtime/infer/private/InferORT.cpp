@@ -1,5 +1,6 @@
 ﻿#include "InferORT.h"
 
+#include <climits>
 #include "LogFacade.h"
 
 #ifdef VISION_SIMPLE_WITH_DML
@@ -61,6 +62,14 @@ vision_simple::InferContextORT::CreateResult
 vision_simple::InferContextORT::CreateSession(std::span<uint8_t> data,
                                               size_t device_id) const {
   try {
+    if ((ep_ == InferEP::kDML || ep_ == InferEP::kCUDA ||
+         ep_ == InferEP::kTensorRT) &&
+        device_id > static_cast<size_t>(INT_MAX)) {
+      return std::unexpected{VisionSimpleError{
+          VisionSimpleErrorCode::kParameterError,
+          std::format("device_id:{} exceeds ONNXRuntime provider range [0, {}]",
+                      device_id, INT_MAX)}};
+    }
     Ort::SessionOptions session_options;
     session_options.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -98,11 +107,10 @@ vision_simple::InferContextORT::CreateSession(std::span<uint8_t> data,
 #ifndef VISION_SIMPLE_WITH_CUDA
       return UNSUPPORTED_EP(ep_);
 #else
-      OrtCUDAProviderOptions cuda_options{};
-      cuda_options.device_id = static_cast<int>(device_id);
+      const auto provider_device_id = static_cast<int>(device_id);
       try {
         Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(
-            session_options, device_id));
+            session_options, provider_device_id));
       } catch (const std::exception& e) {
         return std::unexpected{VisionSimpleError{
             VisionSimpleErrorCode::kRuntimeError,
@@ -116,15 +124,12 @@ vision_simple::InferContextORT::CreateSession(std::span<uint8_t> data,
 #ifndef VISION_SIMPLE_WITH_CUDA
 #error "TensorRT need CUDA Execution Provider!"
 #endif
-      // TODO fixit
-      OrtTensorRTProviderOptions trt_options{};
-      trt_options.device_id = static_cast<int>(device_id);
+      const auto provider_device_id = static_cast<int>(device_id);
       try {
-        // session_options.AppendExecutionProvider_TensorRT(trt_options);
         Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_Tensorrt(
-            session_options, device_id));
+            session_options, provider_device_id));
         Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(
-            session_options, device_id));
+            session_options, provider_device_id));
       } catch (const std::exception& e) {
         return std::unexpected{VisionSimpleError{
             VisionSimpleErrorCode::kRuntimeError,
