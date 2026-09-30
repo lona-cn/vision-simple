@@ -73,7 +73,7 @@ docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 
 在另一终端执行 `curl http://127.0.0.1:11451/v0/infer/models`（Windows 可用 `curl.exe`）检查模型目录。目录成功只证明配置可发现，不证明权重加载或推理成功；完整请求示例见[发起推理](#发起推理)，默认检测模型改用 `hd2-fp32` 即可。
 
-完整接口见 [OpenAPI](doc/openapi/server.yaml)。服务**没有认证或租户隔离**；不要直接暴露到公网。源码默认监听 `0.0.0.0`，容器示例仅发布回环端口；原生运行请将 `host` 改为 `"127.0.0.1"` 或使用鉴权代理。
+完整接口见 [OpenAPI](doc/openapi/server.yaml)。推理和用户 job API **没有认证或租户隔离**；不要将后端直接暴露到公网。原生默认监听 `127.0.0.1`；Docker 显式监听容器接口，本例仅发布宿主回环。共享缓存管理默认关闭，须按下方策略显式启用 bearer。
 
 ### HTTP v0 错误与批量语义
 
@@ -103,7 +103,40 @@ docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 - `config/server.yaml` 的字符串 options：`infer_idle_timeout_ms: "300000"`，`infer_sweep_interval_ms: "1000"`。空闲时间从最后一次请求结束计算，使用单调时钟；timeout 为 `"0"` 关闭自动卸载，扫描间隔必须为正整数。
 - 活动租约涵盖解码、等待推理、后处理及响应序列化/发送调用；手动和定时卸载均不删除活动实例。同步 C++ `Run` 每模型串行；HTTP 流水线使用独立任务工作区，同一会话的 ORT 执行受锁保护。
 - 卸载释放 session 和模型工作区，但共享 ORT arena / provider 可能保留内存，不保证 RSS 或显存立即下降。YOLO 结果的 `class_name` 仍引用模型元数据，C++ 调用者须让模型活得比结果视图更久。
-- 生命周期接口沿用无认证/CORS 策略，仅部署在可信网络或受鉴权代理保护的环境。阻塞管理工作使用独立有界 control lane；health 绕过两条 lane。
+- stats/unload 使用下方管理员策略；授权后的阻塞管理使用独立有界 control lane，health 绕过两条 lane。
+
+### 共享缓存管理与部署
+
+只有 `GET /v0/infer/stats` 和 `POST /v0/infer/unload` 是管理员操作。推理、配置目录、health、tracking session、字幕 job、OpenAI-like HTTP 和 MCP 保持既有权限：**没有内建用户认证或租户隔离**。CORS、浏览器 Origin 限制、job/session ID 和 OpenAI SDK `api_key` 都不是认证。后端须保持私有；公开访问需要 TLS 鉴权代理，并分开推理和管理员授权策略。
+
+管理默认关闭：省略或空字符串 `http_management_token_env` 返回 `403 management_disabled`。启用时，在部署配置的 `options` 下设置 `http_management_token_env: "VS_MANAGEMENT_TOKEN"`，启动前通过外部秘密管理向服务进程提供同名环境变量。这只是示例名，**不是默认名**。名称须匹配 `[A-Za-z_][A-Za-z0-9_]*`，最多 128 字节；值须为 1–4096 字节可见 ASCII，不含空白或控制字符。建议使用至少 32 随机字节编码的高熵秘密；不把值写入 YAML、镜像层、命令、URL、cookie 或日志，服务不会自动生成凭证。名称无效或显式配置的变量缺失/空值/不安全会使启动失败，不回退到无认证。秘密仅加载一次；轮换须更新外部值并重启。
+
+请求发送 `Authorization: Bearer <secret>`；header 名和 Bearer scheme 不区分大小写，秘密字节区分大小写。缺失/错误凭证返回 `401 management_unauthorized` 与 `WWW-Authenticate: Bearer realm="vision-simple-management"`；即使回环或代理请求也必须有正确凭证。随后检查 Host：只能是 `localhost`、`127.0.0.1`、`[::1]` 或显式非 wildcard 的监听 host，端口须匹配后端 listener。wildcard bind 不代表任意 authority 可信。缺省 Origin 允许 CLI；提供时须是可信 HTTP(S) 后端 authority，不含路径/query/fragment/userinfo。空、`null`、畸形 Origin 或不可信 Host 返回 `403 management_forbidden`。忽略 Forwarded/X-*，不接受 query/cookie 凭证。
+
+guard 在 headers 完成时执行，先于接收正文、`100 Continue`、队列接纳、JSON 解析及模型/cache 操作；control lane 满时仍先拒绝未授权请求，不泄露加载/忙状态。unload 要求精确 `Content-Type: application/json`、最多 64 KiB，授权后才允许 `Expect: 100-continue`；stats 拒绝正文。未完成的被拒绝上传按 HTTP parser 规则丢弃或关闭。管理路径不使用宽松 CORS，OPTIONS 返回 403；普通推理 CORS 不变。授权后的分页 400、unload 404/409/200、有界 control overload `503 service_overloaded` 与 `Retry-After: 1` 保持不变。管理错误为 `error.{code,message,image_index}`，`image_index` 为 null，不回显凭证。
+原生 JSON/早拒绝/不发送 Continue/无宽松 CORS 契约仅适用于匹配管理 state handler 的请求。畸形 HTTP framing 可在 libhv callback 前失败；畸形 Host authority 也可能改写路由，落到未匹配的通用路径。实测尾随斜杠 Host 的 GET 返回通用 404 HTML、宽松 CORS/keepalive；带 Expect 的 POST 先发通用 100 Continue，正文后才返回最终通用 HTTP 错误。这些库响应不代表管理授权或 Stats/Unload 执行，不发生模型/cache 管理。
+
+原生配置监听 `127.0.0.1:11451`。六个 Dockerfile 在复制 target 配置后仅将已暂存 host 改为 `0.0.0.0`，管理仍默认关闭，镜像不含凭证。仅发布到宿主回环（`-p 127.0.0.1:11451:11451`）或私有网络；映射到不同宿主端口不会改变后端 authority 的 11451 端口。
+
+nginx 推理代理默认精确拒绝两个管理路径（query 不影响 location 匹配）：
+
+```nginx
+location = /v0/infer/stats { return 403; }
+location = /v0/infer/unload { return 403; }
+```
+
+仅在显式管理员授权的 TLS/私有代理路由启用转发，不在通用推理路由启用。先配置外部管理员鉴权，再替换上述 deny location；每个授权 location 均须转发到私有后端并保留调用者 bearer，例如原生回环后端的以下指令：
+
+```nginx
+proxy_pass http://127.0.0.1:11451;
+proxy_set_header Authorization $http_authorization;
+proxy_set_header Host 127.0.0.1:11451;
+proxy_set_header Origin http://127.0.0.1:11451;
+```
+
+这些指令不是完整 TLS/鉴权配置。代理须先授权原始客户端 Origin，再重写；重写本身不是授权。CLI 可保留缺省 Origin。容器代理使用实际私有后端地址，并将 Host/Origin 重写为后端接受的 authority。不能向普通推理流量注入共享管理员 bearer，不能用转发 IP/回环代替认证；代理 access/error 日志也不能记录秘密。MCP 转发仍独立保持原有 Host/Origin 检查，需关闭 SSE 缓冲并允许长连接。
+
+当前新版的故障关闭配置回滚：删除/清空 `http_management_token_env` 并重启，管理关闭、推理仍可用。保留配置名但取消环境变量会使启动失败。**保护引入前的旧 binary 会忽略新 option，重新开放无鉴权管理。** 回滚 binary 前须先保持代理对两个管理 exact path 的硬拒绝及私有后端隔离，再验证外部管理请求仍被拒绝；仅在 YAML 保留新 option 不能保护旧 binary。
 
 ### HTTP 调度与健康检查
 
@@ -421,7 +454,7 @@ v0、原生 v1、OpenAI-like 和 MCP 共用 `InferenceService`，不重复加载
 - YOLO11/YOLO26 raw 检测在浮点模型空间按类别 NMS 后才裁剪/取整；v10 仅支持端到端 `[1,N,6]`，v10/v26 end-to-end 均不重复 NMS。confidence 阈值语义、黑色 Letterbox 填充和 OCR 检测归一化不变。
 - YOLO26 检测使用 `YOLOVersion::kV26`；`InferYOLOTask::Create` 的路径和内存重载现在都要求在 `task` 后显式传入版本。旧分割／姿态／OBB 调用补 `YOLOVersion::kV11`，YOLO26 调用传 `YOLOVersion::kV26`，可选 `device_id` 放在版本之后。
 - PP-OCR CTC 文件路径 Create 使用 Paddle 字典文件约定：文件不含 blank 和末尾空格类别，由加载器补空格；直接传入 map 时，调用者须提供全部非 blank 类别，键为 `class_id - 1`。SAR 使用上述独立字典约定。
-- `HTTPServer::Run/StartAsync` 现在返回 `HTTPServerResult<void>`，调用者必须检查错误。空/超长 host、监听失败会受控失败，不会静默绑定 wildcard。仓库显式 `0.0.0.0` 默认配置未改变。
+- `HTTPServer::Run/StartAsync` 现在返回 `HTTPServerResult<void>`，调用者必须检查错误。空/超长 host、监听失败会受控失败，不会静默绑定 wildcard。原生默认配置现为 `127.0.0.1`；Docker 仅对容器显式覆盖为 wildcard。
 - helper 使用者必须重新编译并迁移到单一几何路径：
 
 ```cpp
@@ -433,7 +466,7 @@ cv::Rect box = VisionHelper::ScaleCoords(transform, cv::Vec4f{x1, y1, x2, y2});
 
 `ScaleCoords` 接收模型空间浮点 xyxy，按实际轴向比例反算，裁剪端点后 round 为整数 xywh。旧几何签名、`DataConverter` 和未实现的 uint8 转换空操作已删除；`Cvt` 支持 FP32/FP16 双向转换。
 
-服务没有内建认证、热加载或任意 ONNX 支持。v1/MCP 正文限制不覆盖旧 v0 路由；旧推理接口也没有通用解码后像素上限。跟踪 PNG/JPEG 和字幕视频帧具有上述像素限制，但这些限制不等于全面的生产安全保证。
+推理和用户 job API 没有内建用户认证；仅上述两个共享缓存管理操作有显式启用的 bearer 策略。不支持热加载或任意 ONNX。共享 v0/v1/OpenAI/MCP 解码输入限制及 tracking/字幕限制不等于全面的生产安全保证。
 
 
 ## 开发与部署
@@ -550,6 +583,8 @@ xmake build server
 
 以下命令均从仓库根目录运行；如果刚按上文启动了服务，请另开终端并回到仓库根目录。先使用 CPU 配置构建，确保 Git LFS 模型资源已经下载。
 
+下列调度时序为管理鉴权引入前的 issue #52 历史证据；Linux runtime 是独立本地 CPU 镜像，不代表当前六个 Dockerfile 或 issue #53 管理策略已验证。
+
 **HTTP 调度验证（Windows x64、CPU、真实 PP-OCR）**：最终完整 driver 在 113.23 秒通过，覆盖有界 overload/排队 deadline、native/MCP 共享图像预算、空输入契约差异、慢客户端/断连、顺序 keepalive、分次/合并写入 pipeline 请求安全关闭及活动+排队 shutdown。18 次 loaded health 探测前后均观察到四个活动请求及精确 73,744,128 解码输入字节；最终 RTT P50 14.4028 ms、P95/P99 15.4099 ms。移出 IO loop 前六次 load 探测中五次超过消费者两秒期限。显式 workload quota 下的通用 HTTP 回归也通过（278.17 秒），增强的暂停上传/取消字幕回归通过（38.67 秒）。这是实测样本，不是跨机器延迟或 RSS 保证。
 
 本次原生 CPU 运行使用实际选中的 ORT SDK 1.20.0；仅为 smoke 前提将匹配 DLL 放到可执行文件旁，文件版本 `1.20.20241030.2.c4fb724`，来源/目标 SHA256 均为 `09BFD8AE11E8E01FA5CD310B01FDB9384FD18EE61E7FAFF7E2F55D248B8C8E9B`。此次 staging 没有修改打包规则或 API 版本。上述证据不代表 DirectML/CUDA/TensorRT/RKNPU 执行、全部平台、RSS 上限或生产 Docker 在线构建已验证。
@@ -590,8 +625,11 @@ xmake run test_subtitle_timeline
 
 HTTP 回归使用 Python 3 标准库，独立创建临时配置、端口和进程，不触碰现有 11451 服务。模型、字典、图片和小型 ONNX 故障 fixture 必须存在；缺失即失败，不记为 SKIP。
 
+管理安全 driver 使用标准真实 CPU 模型/图像 fixture，在隔离临时配置/进程环境中显式提供仅测试用秘密，不是生产凭证。Windows x64 原生 driver 在 85.93 秒通过；不代表 Docker/代理部署已验证。
+
 ```powershell
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_management_security.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_http_dispatch.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_image_budget.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
@@ -605,6 +643,7 @@ Linux 或自定义构建目录先查询实际可执行文件：
 ```sh
 server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
 python3 scripts/test_http_regression.py --server "$server" --project-root .
+python3 scripts/test_management_security.py --server "$server" --project-root .
 python3 scripts/test_http_dispatch.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
 python3 scripts/test_image_budget.py --server "$server" --project-root .

@@ -390,10 +390,11 @@ def wait_uploaded(server, job, received):
 
 
 def responsive_during_upload(server):
-    for route, expected_status in (("/livez", "alive"), ("/readyz", "ready"),
-                                   ("/v0/infer/models", None), ("/v0/infer/stats", None)):
+    for route, expected_status, headers in (("/livez", "alive", {}), ("/readyz", "ready", {}),
+                                           ("/v0/infer/models", None, {}),
+                                           ("/v0/infer/stats", None, server.admin_headers())):
         started = time.monotonic()
-        result = expect(request(server, "GET", route, timeout=2), 200,
+        result = expect(request(server, "GET", route, timeout=2, headers=headers), 200,
                         f"control/health while upload awaits network: {route}")
         elapsed = time.monotonic() - started
         require(elapsed < 2, f"Paused upload blocked {route} for {elapsed:.3f}s")

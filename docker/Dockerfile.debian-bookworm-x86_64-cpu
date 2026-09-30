@@ -41,7 +41,9 @@ RUN xmake build -vDy -j${NUM_BUILD_THREADS} server
 RUN mkdir /app &&\
     cp -a /src/build/release-linux/linux/x86_64/release/. /app/
 
-RUN sed -i '/^\s*#/d' /app/config/log.properties
+# Container interfaces only; apply after staging config, with management disabled.
+RUN sed -i 's/^host: "127\.0\.0\.1"\(\r\?\)$/host: "0.0.0.0"\1/' /app/config/server.yaml &&\
+    sed -i '/^\s*#/d' /app/config/log.properties
 
 #----##请修改## 二阶段----
 FROM debian:bookworm-slim

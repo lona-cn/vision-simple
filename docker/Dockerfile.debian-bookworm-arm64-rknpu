@@ -43,7 +43,9 @@ RUN mkdir /app &&\
     cd /app && patchelf --replace-needed libonnxruntime.so.1 libonnxruntime.so vision_simple-server &&\
     mkdir /rknpu &&cp -r $(find /root/.xmake/packages -type f -name "librknpu_ddk.so" 2>/dev/null | xargs -I {} dirname {})/* /rknpu
 
-RUN sed -i '/^\s*#/d' /app/config/log.properties
+# Container interfaces only; apply after staging config, with management disabled.
+RUN sed -i 's/^host: "127\.0\.0\.1"\(\r\?\)$/host: "0.0.0.0"\1/' /app/config/server.yaml &&\
+    sed -i '/^\s*#/d' /app/config/log.properties
 #----##请修改## 二阶段----
 FROM --platform=linux/arm64 arm64v8/debian:bookworm-slim
 RUN rm -rf /etc/apt/sources.list.d/debian.sources &&\

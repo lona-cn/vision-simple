@@ -19,7 +19,7 @@ def ppm(width, height, value=0):
 
 
 def budget(server):
-    status, body = server.request('/v0/infer/stats', method='GET', timeout=10)
+    status, body = server.admin_request('/v0/infer/stats', method='GET', timeout=10)
     require(status == 200, f'Stats unavailable: {status} {body}')
     return body['image_budget']
 

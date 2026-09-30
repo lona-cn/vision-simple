@@ -71,7 +71,7 @@ Requires Docker, Git LFS and an x86_64 CPU with AVX/AVX2/F16C. The first build d
 
 In another terminal, run `curl http://127.0.0.1:11451/v0/infer/models` (`curl.exe` on Windows). Successful discovery proves only that configuration is listed, not that weights load or inference succeeds. Use the [inference example](#send-an-inference-request) below with `hd2-fp32` for the default detection model.
 
-See [OpenAPI](doc/openapi/server.yaml) for the full API. The server has **no authentication or tenant isolation**; do not expose it directly to the Internet. Source defaults bind to `0.0.0.0`; this container example publishes only on loopback. For native execution, set `host: "127.0.0.1"` or use an authenticated proxy.
+See [OpenAPI](doc/openapi/server.yaml) for the full API. Inference and user-job APIs have **no authentication or tenant isolation**; do not expose the backend directly to the Internet. Native defaults bind to `127.0.0.1`; Docker explicitly binds container interfaces and this example publishes only host loopback. Shared-cache administration is disabled by default and requires explicit bearer activation below.
 
 ### HTTP v0 errors and batch semantics
 
@@ -101,7 +101,40 @@ Clients relying on HTTP 200 with textual errors must migrate to HTTP status and 
 - String options in `config/server.yaml`: `infer_idle_timeout_ms: "300000"` and `infer_sweep_interval_ms: "1000"`. Idle time starts at request completion and uses a monotonic clock. Timeout `"0"` disables eviction; sweep interval must be positive.
 - Active leases cover decoding, queued inference, postprocessing, and response serialization/send calls. Neither manual nor timer eviction removes active instances. Synchronous C++ `Run` calls serialize per model; HTTP pipeline tasks own workspaces and gate ORT execution per session.
 - Unloading releases sessions and model workspaces, but shared ORT arenas/providers may retain allocations: RSS/VRAM need not fall immediately. YOLO `class_name` results still reference model metadata; C++ callers must keep the model alive longer than these views.
-- Management endpoints retain the existing unauthenticated/CORS deployment model. Use a trusted network or authenticated proxy. Blocking management uses a separate bounded control lane; health bypasses both lanes.
+- Stats/unload require the administrator policy below. Authorized blocking management uses the separate bounded control lane; health bypasses both lanes.
+
+### Shared-cache administration and deployment
+
+Only `GET /v0/infer/stats` and `POST /v0/infer/unload` are administrator operations. Inference, configured catalogs, health, tracking sessions, subtitle jobs, OpenAI-like HTTP and MCP retain their existing permissions: **no built-in user authentication or tenant isolation**. CORS, browser Origin restrictions, job/session IDs and an OpenAI SDK `api_key` are not authentication. Keep the backend private; public access needs a TLS-terminating authenticated proxy with separate inference and administrator policies.
+
+Administration is disabled by default: omitted or empty string option `http_management_token_env` returns `403 management_disabled`. To enable it, add `http_management_token_env: "VS_MANAGEMENT_TOKEN"` under `options` in the deployed server configuration and externally provision that environment variable to the server process before startup. This is an example name, **not a default**. The name must match `[A-Za-z_][A-Za-z0-9_]*` and be at most 128 bytes; its value must be 1–4096 visible ASCII bytes with no whitespace/control characters. Use a high-entropy secret (recommend at least 32 random bytes encoded as visible ASCII). Do not put the value in YAML, image layers, commands, URLs, cookies or logs; the server does not generate a credential. An invalid name or missing/empty/unsafe configured value fails startup, never falls back to unauthenticated access. The secret is loaded once; rotate it by changing the externally supplied value and restarting.
+
+Send `Authorization: Bearer <secret>`; header names and the Bearer scheme are case-insensitive, secret bytes are case-sensitive. Missing/wrong credentials return `401 management_unauthorized` with `WWW-Authenticate: Bearer realm="vision-simple-management"`. A correct credential is required even on loopback or behind a proxy. Next, Host must name `localhost`, `127.0.0.1`, `[::1]` or the explicitly configured nonwildcard bind host, with the backend listener port. A wildcard bind does not trust arbitrary authorities. An absent Origin permits CLI clients; a supplied Origin must be a trusted HTTP(S) backend authority, without a path/query/fragment/userinfo. Empty, `null` or malformed Origin and untrusted Host return `403 management_forbidden`. Forwarded/X-* headers are ignored; neither query strings nor cookies supply credentials.
+
+The guard runs at header completion, before receiving the body, sending `100 Continue`, queue admission, JSON parsing or touching model/cache state. Rejection therefore precedes control-lane saturation and cannot reveal loaded/busy state. Unload requires exactly `Content-Type: application/json`, at most 64 KiB, and accepts only `Expect: 100-continue` after authorization; stats rejects a body. Incomplete rejected uploads are discarded or closed according to the HTTP parser's rejection rules. Management paths bypass permissive CORS and reject OPTIONS with 403; ordinary inference CORS is unchanged. Authorized requests retain pagination 400, unload 404/409/200, and bounded control overload `503 service_overloaded` with `Retry-After: 1`. Management errors use `error.{code,message,image_index}` with null `image_index` and do not echo credentials.
+The native JSON/early-denial/no-Continue/no-permissive-CORS contract applies only when the management state handler is matched. Malformed HTTP framing may fail in libhv before a callback; malformed Host authority can instead rewrite routing to an unmatched generic route. In the observed slash-suffixed Host case, GET returned generic 404 HTML with permissive CORS/keepalive, and POST with Expect emitted generic 100 Continue before a final generic HTTP error after the body. These library responses are not management authorization or Stats/Unload execution; no model/cache administration occurs.
+
+Native configuration binds `127.0.0.1:11451`. All Dockerfiles override only the staged listener host to `0.0.0.0` after copying the target configuration; management stays disabled, with no image credential. Publish only host loopback (`-p 127.0.0.1:11451:11451`) or a private network. A published port different from 11451 does not change the backend authority port.
+
+For an nginx inference proxy, deny both exact administrative paths by default (queries still match these locations):
+
+```nginx
+location = /v0/infer/stats { return 403; }
+location = /v0/infer/unload { return 403; }
+```
+
+Enable forwarding only on an explicitly administrator-authorized TLS/private proxy route, not the general inference route. Replace those deny locations only after configuring external administrator authorization; each authorized location must forward to the private backend and preserve the caller's bearer, for example these directives for a native loopback backend:
+
+```nginx
+proxy_pass http://127.0.0.1:11451;
+proxy_set_header Authorization $http_authorization;
+proxy_set_header Host 127.0.0.1:11451;
+proxy_set_header Origin http://127.0.0.1:11451;
+```
+
+These directives are not a complete TLS/authentication configuration. The proxy must authorize the original client Origin before rewriting it; rewriting it is not authorization. CLI requests may instead preserve an absent Origin. Use the actual private backend address for container proxies while rewriting Host/Origin to an accepted backend authority. Do not inject a shared admin bearer into general inference traffic or rely on forwarded client IP/loopback as authentication. Keep tokens out of proxy access/error logs. MCP forwarding separately retains its existing Host/Origin checks and needs SSE buffering disabled and long connections.
+
+For a fail-closed configuration rollback on this build, remove/empty `http_management_token_env` and restart: administration becomes disabled while inference remains available. Unsetting the variable while retaining its configured name instead fails startup. **Older binaries from before this protection ignore the option and restore unauthenticated administration.** Before a binary rollback, keep hard proxy denies on both exact administrator paths and private-backend isolation, then verify that external administrator requests are still rejected. Leaving the new option in YAML does not protect an old binary.
 
 ### HTTP scheduling and health
 
@@ -422,7 +455,7 @@ Initialization `params` must include `protocolVersion`, an object `capabilities`
 - YOLO11/YOLO26 raw detection runs class-aware NMS in floating-point model space before clipping/rounding. v10 accepts only end-to-end `[1,N,6]` output; v10/v26 end-to-end never repeat NMS. Confidence threshold semantics, black Letterbox padding and OCR detection normalization are unchanged.
 - YOLO26 detection uses `YOLOVersion::kV26`. Both path and memory overloads of `InferYOLOTask::Create` require an explicit version after `task`: use `YOLOVersion::kV11` for existing segmentation/pose/OBB callers and `YOLOVersion::kV26` for YOLO26. The optional `device_id` follows the version.
 - PP-OCR CTC file-based Create follows the Paddle dictionary convention: the file excludes blank and the trailing space class; the loader appends space. Map-based callers supply every nonblank class with key `class_id - 1`. SAR follows its separate dictionary contract above.
-- `HTTPServer::Run/StartAsync` return `HTTPServerResult<void>`; callers must check failures. Empty/overlong hosts and listen failures are rejected without silently binding wildcard. The repository's explicit `0.0.0.0` default is unchanged.
+- `HTTPServer::Run/StartAsync` return `HTTPServerResult<void>`; callers must check failures. Empty/overlong hosts and listen failures are rejected without silently binding wildcard. Native configuration now defaults to `127.0.0.1`; Docker applies an explicit container-only wildcard override.
 - Helper consumers must recompile and migrate to one geometry path:
 
 ```cpp
@@ -434,7 +467,7 @@ cv::Rect box = VisionHelper::ScaleCoords(transform, cv::Vec4f{x1, y1, x2, y2});
 
 `ScaleCoords` accepts floating-point model-space xyxy, reverses actual per-axis scaling, clips endpoints, then rounds endpoints into integer xywh. Old geometry signatures, `DataConverter` and unimplemented uint8 no-op conversions were removed. `Cvt` supports bidirectional FP32/FP16 conversion.
 
-The server has no built-in authentication, hot loading or arbitrary ONNX support. v1/MCP body limits do not cover legacy v0 routes, and legacy inference has no general decoded-pixel limit. Tracking PNG/JPEG and subtitle video frames have the bounds described above, not a blanket production-security guarantee.
+Inference and user-job APIs have no built-in user authentication; only the two shared-cache administration operations have the opt-in bearer policy above. Hot loading and arbitrary ONNX are unsupported. Shared v0/v1/OpenAI/MCP decoded-input limits and tracking/subtitle bounds are not a blanket production-security guarantee.
 
 ## Development and deployment
 
@@ -548,6 +581,8 @@ xmake build server
 
 Run these commands from the repository root. If you just launched the server as above, open another terminal at the repository root. Configure a CPU build first and ensure Git LFS model resources have been downloaded.
 
+The following dispatch timings are historical issue #52 evidence, collected before management authentication. The Linux runtime was a separate local CPU image, not a verification of today's six Dockerfiles or issue #53 administrator policy.
+
 **HTTP dispatch verification (Windows x64, CPU, real PP-OCR):** the final complete driver passed in 113.23 s, covering bounded overload/queue deadlines, shared native/MCP image budget, empty-input contract differences, slow/disconnected clients, sequential keepalive, split/combined-write pipelining rejection and active+queued shutdown. Every loaded health sample was bracketed by four active requests reserving exactly 73,744,128 decoded-input bytes; the final 18 samples gave P50 14.4028 ms and P95/P99 15.4099 ms. Before offloading, five of six loaded probes timed out at the two-second consumer deadline. Generic HTTP regression with explicit workload quotas also passed (278.17 s), as did the enhanced paused-upload/cancellation subtitle regression (38.67 s). These are observed samples, not portable latency or RSS guarantees.
 
 The native CPU run used the actually selected ORT SDK 1.20.0. Its matching DLL was staged beside the executable as a smoke prerequisite: file version `1.20.20241030.2.c4fb724`, source/destination SHA256 `09BFD8AE11E8E01FA5CD310B01FDB9384FD18EE61E7FAFF7E2F55D248B8C8E9B`. No build packaging rule or API version was changed for this staging. This evidence does not certify DirectML/CUDA/TensorRT/RKNPU execution, all platforms, bounded RSS or an online production Docker build.
@@ -588,8 +623,11 @@ xmake run test_subtitle_timeline
 
 The Python 3 standard-library HTTP driver creates isolated configuration, ports and processes; it does not touch an existing port 11451 service. Missing models, dictionaries, images or failure fixtures fail the run rather than count as SKIP.
 
+The management-security driver uses the standard real CPU model/image fixtures and explicitly stages a test-only secret in isolated temporary configuration/process environment, not a production credential. The Windows x64 native driver passed in 85.93 s; this does not verify a Docker/proxy deployment.
+
 ```powershell
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
+python scripts/test_management_security.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_http_dispatch.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_protocol_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
 python scripts/test_image_budget.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
@@ -603,6 +641,7 @@ For Linux or a custom build directory, discover the actual target:
 ```sh
 server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
 python3 scripts/test_http_regression.py --server "$server" --project-root .
+python3 scripts/test_management_security.py --server "$server" --project-root .
 python3 scripts/test_http_dispatch.py --server "$server" --project-root .
 python3 scripts/test_protocol_regression.py --server "$server" --project-root .
 python3 scripts/test_image_budget.py --server "$server" --project-root .

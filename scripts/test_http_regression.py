@@ -81,14 +81,18 @@ def listeners(pid):
 
 
 class Server:
+    MANAGEMENT_ENV = "VISION_SIMPLE_REGRESSION_MANAGEMENT_TOKEN"
+    MANAGEMENT_TOKEN = "RegressionOnly-AdminCredential-53-AbCd0123456789"
+
     def __init__(self, executable, root, model_config, *, host="127.0.0.1", port=None,
-                 framework="kONNXRUNTIME", ep="kCPU", options=None):
+                 framework="kONNXRUNTIME", ep="kCPU", options=None, environment=None):
         self.executable = executable
         self.root = root
         self.model_config = model_config
         self.host, self.port = host, port if port is not None else free_port()
         self.framework, self.ep = framework, ep
         self.options = options or {}
+        self.environment = environment or {}
         self.process = None
         self.temp = None
         self.output = None
@@ -104,15 +108,22 @@ class Server:
                             self.cwd / "config/log.properties")
             # JSON string quoting is also valid YAML; forward slashes avoid Windows escapes.
             options = {"static_path": (self.root / "doc/openapi").as_posix(),
-                       "infer_framework": self.framework, "infer_ep": self.ep, "infer_device": "0"}
+                       "infer_framework": self.framework, "infer_ep": self.ep, "infer_device": "0",
+                       "http_management_token_env": self.MANAGEMENT_ENV}
             options.update(self.options)
             text = f"host: {json.dumps(self.host)}\nport: {self.port}\noptions:\n"
-            text += "".join(f"  {key}: {json.dumps(value)}\n" for key, value in options.items())
+            text += "".join(f"  {key}: {json.dumps(value)}\n" for key, value in options.items() if value is not None)
             (self.cwd / "config/server.yaml").write_text(text, encoding="utf-8")
             if self.model_config is not None:
                 (self.cwd / "config/models.yaml").write_text(self.model_config, encoding="utf-8")
             self.output = (self.cwd / "server-output.log").open("w+b")
             environment = os.environ.copy()
+            environment[self.MANAGEMENT_ENV] = self.MANAGEMENT_TOKEN
+            for key, value in self.environment.items():
+                if value is None:
+                    environment.pop(key, None)
+                else:
+                    environment[key] = value
             # xmake copies shared libraries beside its target. The temporary cwd must not
             # accidentally make Linux's historical './' rpath lose those dependencies.
             library_var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -152,13 +163,19 @@ class Server:
         require(all(ipaddress.ip_address(address).is_loopback for address, _ in rows),
                 f"Server opened a non-loopback/wildcard listener: {rows}")
 
-    def request(self, route, payload=None, *, raw=None, method="POST", timeout=120):
+    def admin_headers(self):
+        return {"Authorization": f"Bearer {self.MANAGEMENT_TOKEN}"}
+
+    def admin_request(self, route, payload=None, *, headers=None, **kwargs):
+        return self.request(route, payload, headers={**self.admin_headers(), **(headers or {})}, **kwargs)
+
+    def request(self, route, payload=None, *, raw=None, method="POST", timeout=120, headers=None):
         require(self.process.poll() is None, "Server exited between requests")
         body = raw if raw is not None else json.dumps(payload).encode("utf-8")
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
-            connection.request(method, route, body=None if method == "GET" else body,
-                               headers={"Content-Type": "application/json"})
+            connection.request(method, route, body=None if method == "GET" and raw is None else body,
+                               headers={"Content-Type": "application/json", **(headers or {})})
             response = connection.getresponse()
             data = response.read()
             require(response.getheader("Content-Type", "").split(";", 1)[0].lower() == "application/json",
@@ -385,7 +402,7 @@ def model_stats(server):
     deadline = time.monotonic() + 30
     while True:
         try:
-            status, body = server.request("/v0/infer/stats", method="GET", timeout=.25)
+            status, body = server.admin_request("/v0/infer/stats", method="GET", timeout=.25)
             break
         except TimeoutError:
             if time.monotonic() >= deadline:
@@ -433,7 +450,7 @@ def lifecycle_matrix(server, images):
                 time.sleep(.01)
             else:
                 raise RegressionFailure(f"{kind}: stats blocked behind inference")
-            error_response(server.request("/v0/infer/unload", {"kind": kind, "model": model}),
+            error_response(server.admin_request("/v0/infer/unload", {"kind": kind, "model": model}),
                            409, "model_busy", None)
             for job, reference in zip(jobs, (expected * 8, list(reversed(expected)) * 8)):
                 require(close_values(job.result()["results"], reference),
@@ -447,10 +464,10 @@ def lifecycle_matrix(server, images):
                 f"{kind}: successful requests not released/accounted")
         require(final["total_duration_ms"] >= after["total_duration_ms"] and
                 final["last_used"] >= after["last_used"], f"{kind}: timing moved backwards")
-        status, body = server.request("/v0/infer/unload", {"kind": kind, "model": model})
+        status, body = server.admin_request("/v0/infer/unload", {"kind": kind, "model": model})
         require(status == 200, f"{kind}: idle unload failed: {status} {body}")
         require((kind, model) not in model_stats(server), f"{kind}: unloaded model still resident")
-        error_response(server.request("/v0/infer/unload", {"kind": kind, "model": model}),
+        error_response(server.admin_request("/v0/infer/unload", {"kind": kind, "model": model}),
                        404, "model_not_loaded", None)
         reloaded = infer(server, kind, model, images)
         require(close_values(reloaded["results"], expected), f"{kind}: reload changed inference")
@@ -458,15 +475,15 @@ def lifecycle_matrix(server, images):
     expected_keys = sorted(model_stats(server))
     page_keys = []
     for offset in range(len(expected_keys)):
-        status, page = server.request(f"/v0/infer/stats?limit=1&offset={offset}", method="GET")
+        status, page = server.admin_request(f"/v0/infer/stats?limit=1&offset={offset}", method="GET")
         require(status == 200 and page["total"] == len(expected_keys), f"Invalid stats page: {page}")
         page_keys.extend((row["kind"], row["name"]) for row in page["models"])
     require(page_keys == expected_keys, "Stats pagination lost, duplicated or reordered models")
-    error_response(server.request("/v0/infer/stats?limit=201", method="GET"),
+    error_response(server.admin_request("/v0/infer/stats?limit=201", method="GET"),
                    400, "invalid_request", None)
-    error_response(server.request("/v0/infer/stats?offset=-1", method="GET"),
+    error_response(server.admin_request("/v0/infer/stats?offset=-1", method="GET"),
                    400, "invalid_request", None)
-    error_response(server.request("/v0/infer/unload", {"kind": "yolo", "model": []}),
+    error_response(server.admin_request("/v0/infer/unload", {"kind": "yolo", "model": []}),
                    400, "invalid_request", None)
 
 

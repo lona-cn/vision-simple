@@ -15,6 +15,8 @@
 #include <string_view>
 
 #include "HTTPExpectation.h"
+#include "HTTPAuthority.h"
+#include "ManagementAccess.h"
 #include "HttpDispatch.h"
 #include "InferenceProtocol.h"
 #include "LogFacade.h"
@@ -161,6 +163,8 @@ bool ParseInteger(std::string_view text, T& value) {
 }  // namespace
 class HTTPServerImpl : public HTTPServer {
   HTTPServerOptions options_;
+  ManagementAccess management_;
+  HTTPAuthority authority_;
   hv::HttpService http_service_;
   hv::HttpServer http_server_;
   std::shared_ptr<InferenceService> service_;
@@ -172,12 +176,15 @@ class HTTPServerImpl : public HTTPServer {
 
  public:
   HTTPServerImpl(HTTPServerOptions&& options,
+                 ManagementAccess management,
                  std::shared_ptr<InferenceService> service,
                  std::unique_ptr<HttpDispatch> dispatch,
                  std::unique_ptr<MCPAdapter> mcp,
                  std::unique_ptr<TrackingAdapter> tracking,
                  std::unique_ptr<SubtitleAdapter> subtitles)
       : options_(std::move(options)),
+        management_(std::move(management)),
+        authority_(options_.host, options_.port),
         service_(std::move(service)),
         dispatch_(std::move(dispatch)),
         mcp_(std::move(mcp)),
@@ -218,12 +225,22 @@ class HTTPServerImpl : public HTTPServer {
     http_service_.GET("/v0/infer/models", [this](const HttpContextPtr& ctx) {
       return this->HandleInferModels(ctx);
     });
-    http_service_.POST("/v0/infer/unload", [this](const HttpContextPtr& ctx) {
-      return HandleUnload(ctx);
+    http_service_.POST("/v0/infer/unload", [this](const HttpContextPtr& ctx,
+        http_parser_state phase, const char* data, size_t size) {
+      return HandleManagement(ctx, false, phase, data, size);
     });
-    http_service_.GET("/v0/infer/stats", [this](const HttpContextPtr& ctx) {
-      return HandleStats(ctx);
+    http_service_.GET("/v0/infer/stats", [this](const HttpContextPtr& ctx,
+        http_parser_state phase, const char* data, size_t size) {
+      return HandleManagement(ctx, true, phase, data, size);
     });
+    for (const char* path : {"/v0/infer/unload", "/v0/infer/stats"})
+      http_service_.Handle("OPTIONS", path, [](const HttpContextPtr& ctx,
+          http_parser_state phase, const char*, size_t) {
+        if (phase == HP_ERROR) return HTTP_STATUS_UNFINISHED;
+        if (ctx->response->status_code >= 400) return int(ctx->response->status_code);
+        return RejectManagement(ctx, HTTP_STATUS_FORBIDDEN, "management_forbidden",
+                                "Management preflight is forbidden");
+      });
     http_service_.Use([](const HttpContextPtr& ctx) {
       Logger::Instance()->get().Info(
           LOG_DOMAIN_NAME,
@@ -239,6 +256,9 @@ class HTTPServerImpl : public HTTPServer {
     http_service_.middleware.back().sync_handler =
         [cors = std::move(cors)](HttpRequest* request, HttpResponse* response) {
           const auto path = std::string_view(request->path);
+          const auto route = path.substr(0, path.find('?'));
+          if (route == "/v0/infer/stats" || route == "/v0/infer/unload")
+            return HTTP_STATUS_NEXT;
           if (path == "/mcp" || path.starts_with("/mcp/") ||
               path.starts_with("/mcp?"))
             return HTTP_STATUS_NEXT;
@@ -339,6 +359,84 @@ class HTTPServerImpl : public HTTPServer {
                            return {HTTP_STATUS_OK, legacy.dump()};
                          });
   }
+  static int RejectManagement(const HttpContextPtr& ctx, http_status status,
+                              const char* code, const char* message) {
+    ctx->setStatus(status);
+    ctx->setContentType(APPLICATION_JSON);
+    if (status == HTTP_STATUS_UNAUTHORIZED)
+      ctx->setHeader("WWW-Authenticate", "Bearer realm=\"vision-simple-management\"");
+    ctx->response->body = nlohmann::json{{"error", {{"code", code},
+        {"message", message}, {"image_index", nullptr}}}}.dump();
+    // send() defers connection close until writes drain; never destroy the
+    // active HttpHandler/parser from this callback stack.
+    ctx->setHeader("Connection", "close");
+    return ctx->send();
+  }
+
+  int HandleManagement(const HttpContextPtr& ctx, bool stats,
+                       http_parser_state phase, const char* data, size_t size) {
+    constexpr size_t kBodyLimit = 64 * 1024;
+    if (phase == HP_ERROR) return HTTP_STATUS_UNFINISHED;
+    if (ctx->response->status_code >= 400) return ctx->response->status_code;
+    if (phase == HP_HEADERS_COMPLETE) {
+      if (!management_.Enabled())
+        return RejectManagement(ctx, HTTP_STATUS_FORBIDDEN, "management_disabled",
+                                "Management is disabled");
+      const auto& headers = ctx->headers();
+      const auto authorization = headers.find("Authorization");
+      if (authorization == headers.end() ||
+          !management_.Authorized(authorization->second))
+        return RejectManagement(ctx, HTTP_STATUS_UNAUTHORIZED, "management_unauthorized",
+                                "Management authorization is required");
+      const auto host = headers.find("Host");
+      const auto origin = headers.find("Origin");
+      if (host == headers.end() || !authority_.Trusted(host->second,
+          origin != headers.end(), origin == headers.end() ? std::string_view{}
+                                                         : std::string_view(origin->second)))
+        return RejectManagement(ctx, HTTP_STATUS_FORBIDDEN, "management_forbidden",
+                                "Management authority is forbidden");
+      const auto expectation = ctx->header("Expect");
+      const auto parsed_expectation = ParseHTTPExpectation(expectation);
+      if (!expectation.empty() && parsed_expectation != HTTPExpectation::kContinue)
+        return RejectManagement(ctx, static_cast<http_status>(417), "expectation_failed",
+                                "Unsupported expectation");
+      const auto declared = ctx->header("Content-Length");
+      uint64_t length = 0;
+      if (!declared.empty() && !ParseInteger(declared, length))
+        return RejectManagement(ctx, HTTP_STATUS_BAD_REQUEST, "invalid_request",
+                                "Invalid request body length");
+      if (stats) {
+        if (length != 0 || headers.contains("Transfer-Encoding"))
+          return RejectManagement(ctx, HTTP_STATUS_BAD_REQUEST, "invalid_request",
+                                  "Statistics requests must not contain a body");
+      } else {
+        auto media = std::string_view{};
+        if (const auto type = headers.find("Content-Type"); type != headers.end())
+          media = type->second;
+        if (!HTTPASCIIEqual(media, "application/json"))
+          return RejectManagement(ctx, HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE,
+                                  "unsupported_media_type", "Use application/json");
+        if (length > kBodyLimit)
+          return RejectManagement(ctx, static_cast<http_status>(413),
+                                  "payload_too_large", "Request body exceeds 64 KiB");
+      }
+      if (parsed_expectation == HTTPExpectation::kContinue)
+        ctx->writer->write("HTTP/1.1 100 Continue\r\n\r\n");
+    } else if (phase == HP_BODY) {
+      if (stats)
+        return RejectManagement(ctx, HTTP_STATUS_BAD_REQUEST, "invalid_request",
+                                "Statistics requests must not contain a body");
+      if (size > kBodyLimit - ctx->request->body.size())
+        return RejectManagement(ctx, static_cast<http_status>(413),
+                                "payload_too_large", "Request body exceeds 64 KiB");
+      ctx->request->body.append(data, size);
+    } else if (phase == HP_MESSAGE_COMPLETE) {
+      return stats ? HandleStats(ctx) : HandleUnload(ctx);
+    }
+    return HTTP_STATUS_UNFINISHED;
+  }
+
+
   int HandleUnload(const HttpContextPtr& ctx) {
     return DispatchRequest(
         *dispatch_, ctx, HttpDispatch::Lane::kControl,
@@ -506,6 +604,10 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) try {
   }
   options.OptionOrPut(HTTPSERVER_OPT_KEY_STATIC_DIR,
                       HTTPSERVER_OPT_DEFVAL_STATIC_DIR);
+  auto management = ManagementAccess::Load(options.OptionOrPut(
+      HTTPSERVER_OPT_KEY_HTTP_MANAGEMENT_TOKEN_ENV, ""));
+  if (!management)
+    return MK_VSERROR(VisionSimpleErrorCode::kParameterError, management.error());
   const auto& device_text = options.OptionOrPut(
       HTTPSERVER_OPT_KEY_INFER_DEVICE, HTTPSERVER_OPT_DEFVAL_INFER_DEVICE);
   const auto& idle_text =
@@ -632,7 +734,7 @@ vision_simple::HTTPServer::Create(HTTPServerOptions&& options) try {
   auto subtitles = SubtitleAdapter::Create(*service);
   if (!subtitles) return std::unexpected(std::move(subtitles.error()));
   return std::make_unique<HTTPServerImpl>(
-      std::move(options), std::move(*service), std::move(*dispatch), std::move(*mcp),
+      std::move(options), std::move(*management), std::move(*service), std::move(*dispatch), std::move(*mcp),
       std::move(*tracking), std::move(*subtitles));
 } catch (const std::exception& error) {
   return MK_VSERROR(

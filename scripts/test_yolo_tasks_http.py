@@ -174,7 +174,7 @@ def main():
                     f'{kind} OpenAI result differs from native structured result')
                 mcp = tool_data(session.tool('infer_' + kind, {'model': 'shared', 'images': images}))
                 require(close_values(mcp, native[kind]), f'{kind} MCP result differs from native result')
-        status, _ = server.request('/v0/infer/unload', {'kind': 'seg', 'model': 'shared'})
+        status, _ = server.admin_request('/v0/infer/unload', {'kind': 'seg', 'model': 'shared'})
         require(status == 200 and ('seg', 'shared') not in model_stats(server) and
                 ('pose', 'shared') in model_stats(server) and ('obb', 'shared') in model_stats(server),
                 'Task-qualified unload affected another same-name model')

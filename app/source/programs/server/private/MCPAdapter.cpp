@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "InferenceProtocol.h"
+#include "HTTPAuthority.h"
 
 namespace vision_simple {
 namespace {
@@ -206,8 +207,7 @@ struct MCPAdapter::State : std::enable_shared_from_this<MCPAdapter::State> {
     bool modern;
   };
   std::shared_ptr<InferenceService> service;
-  std::string host;
-  uint16_t port;
+  HTTPAuthority authority;
   std::mutex mutex;
   std::condition_variable ready;
   std::unordered_map<std::string, std::shared_ptr<Session>> sessions;
@@ -218,63 +218,15 @@ struct MCPAdapter::State : std::enable_shared_from_this<MCPAdapter::State> {
 
   State(std::shared_ptr<InferenceService> value, std::string name,
         uint16_t number)
-      : service(std::move(value)), host(Lower(std::move(name))), port(number) {}
+      : service(std::move(value)), authority(std::move(name), number) {}
 
-  bool Authority(std::string authority, uint16_t default_port) const {
-    authority = Lower(std::move(authority));
-    std::string_view view(authority), name;
-    std::string_view port_text;
-    if (view.starts_with('[')) {
-      auto end = view.find(']');
-      if (end == std::string_view::npos) return false;
-      name = view.substr(1, end - 1);
-      if (end + 1 < view.size()) {
-        if (view[end + 1] != ':') return false;
-        port_text = view.substr(end + 2);
-        if (port_text.empty()) return false;
-      }
-    } else {
-      auto colon = view.find(':');
-      name = view.substr(0, colon);
-      if (colon != std::string_view::npos) {
-        port_text = view.substr(colon + 1);
-        if (port_text.empty()) return false;
-      }
-    }
-    unsigned number = default_port;
-    if (!port_text.empty()) {
-      auto parsed = std::from_chars(
-          port_text.data(), port_text.data() + port_text.size(), number);
-      if (parsed.ec != std::errc{} ||
-          parsed.ptr != port_text.data() + port_text.size())
-        return false;
-    }
-    auto explicit_host = std::string_view(host);
-    if (explicit_host.starts_with('[') && explicit_host.ends_with(']'))
-      explicit_host = explicit_host.substr(1, explicit_host.size() - 2);
-    const bool configured = explicit_host != "0.0.0.0" &&
-                            explicit_host != "::" && explicit_host != "*" &&
-                            !explicit_host.empty();
-    return number == port &&
-           (name == "localhost" || name == "127.0.0.1" || name == "::1" ||
-            (configured && name == explicit_host));
-  }
   bool Trusted(const HttpContextPtr& ctx) const {
-    if (!Authority(ctx->header("Host"), 80)) return false;
-    const auto origin = ctx->header("Origin");
-    if (origin.empty()) return !ctx->headers().contains("Origin");
-    std::string_view rest(origin);
-    uint16_t default_port;
-    if (rest.starts_with("http://")) {
-      rest.remove_prefix(7);
-      default_port = 80;
-    } else if (rest.starts_with("https://")) {
-      rest.remove_prefix(8);
-      default_port = 443;
-    } else
-      return false;
-    if (rest.find_first_of("/?#@\\") != std::string_view::npos) return false;
-    return Authority(std::string(rest), default_port);
+    const auto& headers = ctx->headers();
+    const auto host = headers.find("Host");
+    const auto origin = headers.find("Origin");
+    return host != headers.end() && authority.Trusted(host->second,
+        origin != headers.end(), origin == headers.end() ? std::string_view{}
+                                                       : std::string_view(origin->second));
   }
   static int HttpError(const HttpContextPtr& ctx, int status,
                        std::string_view message) {

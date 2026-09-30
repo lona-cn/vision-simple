@@ -43,11 +43,11 @@ def exercise(executable, root, config, image):
                 'url': 'data:image/png;base64,' + image}}]}]})
         require(status == 200 and close_values(json.loads(completion['choices'][0]['message']['content']), results['ocr']),
                 'OpenAI-like adapter must execute the same registered OCR model')
-        status, body = server.request('/v0/infer/unload', {'kind': 'yolo', 'model': 'shared'})
+        status, body = server.admin_request('/v0/infer/unload', {'kind': 'yolo', 'model': 'shared'})
         require(status == 200, f'YOLO unload failed: {body}')
         require(set(model_stats(server)) == {('ocr', 'shared')},
                 'Unloading YOLO must not remove same-name OCR')
-        error_response(server.request('/v0/infer/unload', {'kind': 'yolo', 'model': 'shared'}),
+        error_response(server.admin_request('/v0/infer/unload', {'kind': 'yolo', 'model': 'shared'}),
                        404, 'model_not_loaded', None)
         require(close_values(infer(server, 'ocr', 'shared', [image]), results['ocr']),
                 'Surviving OCR cache entry changed after unrelated unload')

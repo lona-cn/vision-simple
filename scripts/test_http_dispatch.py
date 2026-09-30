@@ -113,9 +113,11 @@ def load_matrix(executable, root, image, pixels, count):
         try:
             admitted = staged(server, image, count, connections, charge)
             health(server, count=18, label='four_real_native_requests', active=4, charge=charge * 4)
-            for route in ('/v0/infer/models', '/v1/models', '/v0/infer/stats'):
+            for request, route in ((server.request, '/v0/infer/models'),
+                                   (server.request, '/v1/models'),
+                                   (server.admin_request, '/v0/infer/stats')):
                 started = time.monotonic()
-                status, body = server.request(route, method='GET', timeout=2)
+                status, body = request(route, method='GET', timeout=2)
                 require(status == 200, f'Control route failed: {route}: {status} {body}')
                 print(json.dumps({'control_route': route, 'rtt_ms': (time.monotonic()-started)*1000}))
             # The fifth request is accepted into the sole waiting slot. The sixth
@@ -267,7 +269,7 @@ def slow_clients(executable, root, image, pixels, count):
                 except ConnectionResetError:
                     pass  # RST is also safe close, not a reused writer/context.
             drained(server, timeout=120)
-            status, snapshot = server.request('/v0/infer/stats', method='GET')
+            status, snapshot = server.admin_request('/v0/infer/stats', method='GET')
             require(status == 200 and not any(model['name'] == 'runtime-yolo' for model in snapshot['models']),
                     f'Forbidden pipelined request executed (same_feed={same_feed}): {snapshot}')
         infer(server, 'ocr', 'ppocr-v4', [image])

@@ -49,7 +49,9 @@ RUN mkdir /app &&\
     cp -r /src/build/release-linux/linux/arm64/release/* /app &&\
     cd /app && patchelf --replace-needed libonnxruntime.so.1 libonnxruntime.so vision_simple-server
 
-RUN sed -i '/^\s*#/d' /app/config/log.properties
+# Container interfaces only; apply after staging config, with management disabled.
+RUN sed -i 's/^host: "127\.0\.0\.1"\(\r\?\)$/host: "0.0.0.0"\1/' /app/config/server.yaml &&\
+    sed -i '/^\s*#/d' /app/config/log.properties
 
 #----##请修改## 二阶段----
 FROM --platform=linux/arm64 arm64v8/debian:bookworm-slim

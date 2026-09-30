@@ -2,6 +2,14 @@ openapi: 3.0.1
 info:
   title: vision-simple
   description: >-
+    原生默认监听127.0.0.1:11451；Docker在target配置复制后显式覆盖container host为0.0.0.0，默认管理仍关闭。
+    只有GET /v0/infer/stats与POST /v0/infer/unload使用ManagementBearerAuth；推理/catalog/health/tracking/subtitle/OpenAI/MCP权限不变，无内建用户认证或租户隔离。
+    字符串http_management_token_env省略/空值关闭管理(403 management_disabled)，无默认变量名或自动凭证。
+    显式名称须匹配[A-Za-z_][A-Za-z0-9_]*且最多128字节；外部提供的值须为1-4096可见ASCII字节，无空白/control，推荐32+随机字节编码的高熵秘密。
+    名称无效、配置变量缺失/空值/不安全使启动失败，无fallback；秘密仅加载一次，轮换须重启，不放入YAML/image/log/query/cookie。
+    回滚当前配置删除/清空option禁用管理；仅unset配置变量使启动失败。旧binary忽略新option并恢复无鉴权，回滚前须保留exact admin-path proxy deny/私有backend并验证外部拒绝。
+    CORS不是认证；公开部署需TLS鉴权代理和私有后端，推理入口默认拒绝两个管理exactpath（query不影响匹配）。
+    管理专用转发需外部管理员授权，保留Authorization bearer并重写Host/Origin到可信后端authority；先授权原始Origin，回环/代理无免认证。
     HTTP共享同listener与四IOloops，阻塞业务使用独立有界data/control调度。
     字符串options：http_data_workers=4、http_data_queue_capacity=4、
     http_control_workers=1、http_control_queue_capacity=4，workers1-32，queues1-128。
@@ -302,10 +310,19 @@ paths:
         不删除活动请求正在使用的实例（包括等待 Run、解码和序列化）。
         未加载返回 404；活动实例返回 409；下次推理会重新加载。
         逻辑卸载不保证 ORT/provider 立即归还 RSS 或显存。
-        无内建认证，必须由可信网络或代理限制访问。
-      security: []
+        管理默认关闭；显式配置http_management_token_env及外部秘密才能启用。
+        headers完成先验证bearer，再检查可信Host/Origin，早于body/100 Continue/queue/JSON/model/cache。
+        正确token即使loopback/proxy也必须；Host端口须匹配后端，允许loopback或显式非wildcard bind，wildcard不是authority通配。
+        Origin缺省允许CLI；提供时须为可信HTTP(S) authority，无path/query/fragment/userinfo；empty/null/malformed拒绝。
+        忽略Forwarded/X-*，不支持query/cookie凭证。OPTIONS403且不使用宽松CORS；其他推理CORS不变。
+        精确application/json，正文最多64KiB，Expect仅100-continue且授权后才发送；拒绝未完成上传按parser丢弃/关闭。
+        guard先于control满503，不泄露loaded/busy；错误image_index为null且不回显秘密。
+        原生JSON/早拒绝/noContinue/无宽松CORS仅适用于匹配管理state handler；畸形framing可在callback前失败，畸形Host也可改写为未匹配通用route。实测Host尾随斜杠GET通用404 HTML/CORS/keepalive，POST Expect先通用100 Continue、正文后最终通用HTTP错误；非管理授权，无Stats/Unload/model/cache管理执行。
+      security:
+        - ManagementBearerAuth: []
       requestBody:
         required: true
+        x-max-body-bytes: 65536
         content:
           application/json:
             schema:
@@ -335,6 +352,12 @@ paths:
                   unloaded:
                     type: boolean
                     enum: [true]
+        '401': {$ref: '#/components/responses/ManagementUnauthorized'}
+        '403': {$ref: '#/components/responses/ManagementForbidden'}
+        '417': {$ref: '#/components/responses/ManagementExpectation'}
+        '503': {$ref: '#/components/responses/ManagementOverloaded'}
+        '413': {$ref: '#/components/responses/ManagementBodyLimit'}
+        '415': {$ref: '#/components/responses/ManagementMedia'}
         '400':
           description: invalid_request
           content:
@@ -366,7 +389,11 @@ paths:
         按 kind/name 排序的瞬时分页快照。加载/卸载时各页可能变化。
         实例计数在重新加载后重置；加载前的错误不计入实例。
         总耗时为已结束请求的毫秒数，包含等待 Run 的时间。
-      security: []
+        无正文。管理默认关闭；启用、bearer及可信Host/Origin策略与unload相同。
+        headers完成先guard，后control接纳/分页解析/cache；OPTIONS403，不使用宽松CORS。
+        同unload：仅匹配管理state handler有原生guard契约；畸形Host可改写到通用route并保留库HTTP错误/nonJSON/CORS，POST Expect甚至可先通用100 Continue；无Stats/Unload/cache管理执行。
+      security:
+        - ManagementBearerAuth: []
       parameters:
         - name: limit
           in: query
@@ -436,8 +463,12 @@ paths:
                           type: integer
                           format: int64
                           description: 上次请求完成的 Unix 毫秒；未完成过请求时为加载时间
+        '401': {$ref: '#/components/responses/ManagementUnauthorized'}
+        '403': {$ref: '#/components/responses/ManagementForbidden'}
+        '417': {$ref: '#/components/responses/ManagementExpectation'}
+        '503': {$ref: '#/components/responses/ManagementOverloaded'}
         '400':
-          description: invalid_request（分页参数无效）
+          description: invalid_request（分页参数或无正文策略无效）
           content:
             application/json:
               schema:
@@ -1010,6 +1041,42 @@ components:
       description: 创建时返回的32位小写十六进制 ID；未知或过期 ID 返回404
       schema: {type: string, pattern: '^[0-9a-f]{32}$'}
   responses:
+    ManagementUnauthorized:
+      description: management_unauthorized；缺失或错误bearer，先于authority/body/queue/model/cache
+      headers:
+        WWW-Authenticate:
+          schema: {type: string, enum: ['Bearer realm="vision-simple-management"']}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/InferError'}
+    ManagementForbidden:
+      description: management_disabled（未启用）或management_forbidden（凭证正确但Host/Origin不可信）；image_index null，不泄露状态；OPTIONS始终403 management_forbidden
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/InferError'}
+    ManagementBodyLimit:
+      description: payload_too_large；授权unload正文超过64KiB
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/InferError'}
+    ManagementMedia:
+      description: unsupported_media_type；授权unload不是精确application/json
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/InferError'}
+    ManagementExpectation:
+      description: expectation_failed；授权后不支持的Expect返回417
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/InferError'}
+    ManagementOverloaded:
+      description: service_overloaded；授权后有界control满/停止，guard拒绝优先
+      headers:
+        Retry-After:
+          schema: {type: string, enum: ['1']}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/InferError'}
     SubtitleStatus:
       description: 当前作业快照；异步失败通过 state/error_code 报告，不改变轮询 HTTP 状态
       content:
@@ -1543,6 +1610,10 @@ components:
                 - request_too_large
                 - unsupported_media_type
                 - expectation_failed
+                - management_disabled
+                - management_unauthorized
+                - management_forbidden
+                - payload_too_large
             message:
               type: string
               description: 人类可读的通用错误说明，不作为稳定判断依据。
@@ -1661,7 +1732,11 @@ components:
         - bbox
         - confidence
         - line
-  securitySchemes: {}
+  securitySchemes:
+    ManagementBearerAuth:
+      type: http
+      scheme: bearer
+      description: 仅stats/unload；外部显式提供的秘密，Bearer scheme不区分大小写、token字节区分大小写；另需可信后端Host/Origin，无loopback豁免
 servers:
   - url: http://127.0.0.1:11451
     description: 开发环境

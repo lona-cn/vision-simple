@@ -1,4 +1,4 @@
-host: "0.0.0.0"
+host: "127.0.0.1"
 port: 11451
 options:
   static_path: "assets/static"
@@ -6,6 +6,8 @@ options:
   http_data_queue_capacity: "4"
   http_control_workers: "1"
   http_control_queue_capacity: "4"
+  # Empty disables stats/unload. Set only an externally provisioned secret env name.
+  http_management_token_env: ""
   infer_framework: "kONNXRUNTIME"
   infer_ep: "kCPU"
   infer_device: "0"

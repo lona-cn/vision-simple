@@ -268,6 +268,7 @@ jobs:
         run: |
           server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
           python scripts/test_http_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE"
+          python scripts/test_management_security.py --server "$server" --project-root "$GITHUB_WORKSPACE"
 
       - name: Run real-server bounded HTTP dispatch regression
         if: matrix.run_http

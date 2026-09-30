@@ -340,7 +340,7 @@ def mcp_matrix(server, images, baselines):
         session.send('tools/call', {'name': 'infer_ocr', 'arguments': {
             'model': 'ppocr-v4', 'images': [images[1]] * 16}}, 'cancel-me')
         wait_activity(server, True)
-        status, busy = server.request('/v0/infer/unload', {'kind': 'ocr', 'model': 'ppocr-v4'})
+        status, busy = server.admin_request('/v0/infer/unload', {'kind': 'ocr', 'model': 'ppocr-v4'})
         require(status == 409 and busy['error']['code'] == 'model_busy', str(busy))
         session.send('notifications/cancelled', {'requestId': 'cancel-me', 'reason': 'regression'})
         cancelled = session.receive('cancel-me')

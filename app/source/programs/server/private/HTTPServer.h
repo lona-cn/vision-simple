@@ -39,6 +39,7 @@ constexpr std::string_view HTTPSERVER_OPT_KEY_HTTP_DATA_WORKERS{"http_data_worke
 constexpr std::string_view HTTPSERVER_OPT_KEY_HTTP_DATA_QUEUE_CAPACITY{"http_data_queue_capacity"};
 constexpr std::string_view HTTPSERVER_OPT_KEY_HTTP_CONTROL_WORKERS{"http_control_workers"};
 constexpr std::string_view HTTPSERVER_OPT_KEY_HTTP_CONTROL_QUEUE_CAPACITY{"http_control_queue_capacity"};
+constexpr std::string_view HTTPSERVER_OPT_KEY_HTTP_MANAGEMENT_TOKEN_ENV{"http_management_token_env"};
 
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_STATIC_DIR{"assets/static"};
 constexpr std::string_view HTTPSERVER_OPT_DEFVAL_INFER_FRAMEWORK{
