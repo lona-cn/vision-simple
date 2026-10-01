@@ -13,6 +13,7 @@
 #include "DXInfo.hpp"
 #endif
 #include "IOUtil.h"
+#include "OCRDetectionOptions.h"
 #include "VisionSimpleCommon.h"
 #include "config.h"
 
@@ -179,7 +180,8 @@ class VISION_SIMPLE_API InferOCR {
                              std::span<uint8_t> det_data,
                              std::span<uint8_t> rec_data,
                              OCRModelType model_type,
-                             size_t device_id = 0) noexcept;
+                             size_t device_id = 0,
+                             OCRDetectionOptions detection_options = {}) noexcept;
 
   template <typename T>
     requires std::is_arithmetic_v<T>
@@ -187,14 +189,15 @@ class VISION_SIMPLE_API InferOCR {
                              std::map<int, std::string> char_dict,
                              std::span<T> det_data, std::span<T> rec_data,
                              OCRModelType model_type,
-                             size_t device_id = 0) noexcept {
+                             size_t device_id = 0,
+                             OCRDetectionOptions detection_options = {}) noexcept {
     return Create(
         context, std::move(char_dict),
         std::span<uint8_t>{reinterpret_cast<uint8_t*>(det_data.data()),
                            det_data.size_bytes()},
         std::span<uint8_t>{reinterpret_cast<uint8_t*>(rec_data.data()),
                            rec_data.size_bytes()},
-        model_type, device_id);
+        model_type, device_id, detection_options);
   }
 
   static CreateResult Create(InferContext& context,
@@ -202,6 +205,7 @@ class VISION_SIMPLE_API InferOCR {
                              const std::string& det_path,
                              const std::string& rec_path,
                              OCRModelType model_type,
-                             size_t device_id = 0) noexcept;
+                             size_t device_id = 0,
+                             OCRDetectionOptions detection_options = {}) noexcept;
 };
 }  // namespace vision_simple

@@ -1,4 +1,5 @@
 #include "Diagnostics.h"
+#include "DebugArtifacts.h"
 #include "HTTPServer.h"
 #include "InferenceConfiguration.h"
 #include "InferenceProtocol.h"
@@ -17,9 +18,27 @@
 #include <optional>
 #include <string>
 #include <vector>
+#ifndef _WIN32
+#include <csignal>
+#include <utility>
+#endif
 
 namespace vision_simple {
 namespace {
+#ifndef _WIN32
+struct DiagnosticPipeSignal {
+  using Handler = void (*)(int);
+  Handler previous = std::signal(SIGPIPE, SIG_IGN);
+  bool Restore() noexcept {
+    if (previous == SIG_ERR) return false;
+    return std::signal(SIGPIPE, std::exchange(previous, SIG_ERR)) != SIG_ERR;
+  }
+  ~DiagnosticPipeSignal() {
+    if (previous != SIG_ERR && !Restore())
+      std::fputs("Diagnostic output signal cannot be restored.\n", stderr);
+  }
+};
+#endif
 using Json = nlohmann::json;
 constexpr size_t kSelectionMax = 16, kRawMax = 48 * 1024 * 1024,
                  kEncodedMax = 64 * 1024 * 1024;
@@ -29,6 +48,13 @@ constexpr auto kHelp = R"(vision_simple-server
   --diagnose preflight --model task:name [--model task:name ...] [--timeout-ms N]
   --diagnose warmup --model task:name [--model task:name ...] --image path
       [--image path ...] [--timeout-ms N]
+      [--debug-dir NAME [--debug-max-bytes N] [--debug-max-files N]]
+Debug: exactly one OCR warmup selection, 1..16 frames, new private CWD child.
+NAME: 1..64 ASCII alnum/_/- starting alnum; Windows reserved names forbidden.
+Bytes: 1..67108864 (default 67108864); files: 1..64 (default 64).
+Input PNGs may be sensitive. Manifest has boxes/confidence, never recognized text.
+POSIX CWD must be owned by this user and not group/world writable.
+Success retains output for manual cleanup; failures roll back owned output.
 Uses config/server.yaml and config/models.yaml in the current directory.
 Select 1..16 unique registered task:model pairs; no default full-model loading.
 Preflight performs one session load with zero frames, not a smoke test.
@@ -51,6 +77,8 @@ struct Arguments {
   std::vector<Selection> models;
   std::vector<std::string> images;
   std::optional<std::chrono::milliseconds> timeout;
+  std::optional<std::string> debug_dir;
+  std::optional<size_t> debug_max_bytes, debug_max_files;
 };
 bool WriteOutput(std::string_view body) noexcept {
   const bool written = std::fwrite(body.data(), 1, body.size(), stdout) == body.size();
@@ -97,8 +125,21 @@ bool ParseArguments(int argc, char* argv[], Arguments& out) {
       const auto parsed = std::from_chars(value.data(), value.data() + value.size(), ms);
       if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || ms == 0 || ms > 300000) return false;
       out.timeout = std::chrono::milliseconds(ms);
+    } else if (flag == "--debug-dir") {
+      if (out.debug_dir || !DebugArtifacts::ValidName(value)) return false;
+      out.debug_dir = value;
+    } else if (flag == "--debug-max-bytes" || flag == "--debug-max-files") {
+      auto& limit = flag == "--debug-max-bytes" ? out.debug_max_bytes : out.debug_max_files;
+      size_t count = 0;
+      const auto parsed = std::from_chars(value.data(), value.data() + value.size(), count);
+      const size_t max = flag == "--debug-max-bytes" ? 67108864 : 64;
+      if (limit || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || !count || count > max) return false;
+      limit = count;
     } else return false;
   }
+  if (!out.debug_dir && (out.debug_max_bytes || out.debug_max_files)) return false;
+  if (out.debug_dir && (out.mode != "warmup" || out.models.size() != 1 ||
+      out.models.front().task->kind != InferenceKind::kOCR || out.images.empty() || out.images.size() > 16)) return false;
   return !out.mode.empty() && !out.models.empty() &&
       (out.mode == "warmup" ? !out.images.empty() : out.images.empty());
 }
@@ -168,7 +209,7 @@ Json Pass(const char* phase, const MeasuredInferenceResult& measured, size_t bat
     {"cache_hit", measured.timing.cache_hit}, {"batch_size", batch},
     {"result_counts", std::move(counts)}, {"timing", Timing(measured.timing)}};
 }
-int Diagnose(const Arguments& args) {
+int Diagnose(const Arguments& args, std::optional<DebugArtifacts>& artifacts) {
   // Native codecs can log exception details before service error normalization.
   // This explicit local mode exits without starting HTTP; leave server logging unchanged.
   cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_SILENT);
@@ -206,6 +247,12 @@ int Diagnose(const Arguments& args) {
       {"timeout_ms", args.timeout.value_or(options->request_timeout).count()},
       {"passes_per_model", args.mode == "preflight" ? 1 : 2}}}, {"models", Json::array()}};
   bool successful = true;
+  const char* debug_error = nullptr;
+  if (args.debug_dir) {
+    artifacts.emplace();
+    const auto initialized = artifacts->Init(*args.debug_dir, args.debug_max_bytes.value_or(67108864), args.debug_max_files.value_or(64));
+    if (!initialized) debug_error = initialized.error();
+  }
   for (const auto& selection : args.models) {
     const auto& definitions = config->get().model_config().models;
     const auto found = std::ranges::find_if(definitions, [&](const auto& d) {
@@ -241,6 +288,15 @@ int Diagnose(const Arguments& args) {
             entry["passes"].push_back(Pass("warm", warm, images.size()));
             if (!warm.result) successful = false;
             if (warm.result) {
+              if (artifacts && !debug_error) {
+                const auto* payload = std::get_if<InferOCRResponse>(&warm.result->payload);
+                if (!payload) debug_error = "debug_payload";
+                else {
+                  const auto exported = artifacts->Export(images, *payload,
+                      found->ocr_detection.value_or(OCRDetectionOptions{}), options->max_image_pixels);
+                  if (!exported) debug_error = exported.error();
+                }
+              }
               warm.result->Succeed();
               entry["smoke_tested"] = true;
               entry["state"] = "smoke_tested";
@@ -259,22 +315,55 @@ int Diagnose(const Arguments& args) {
     if (entry["state"] != (args.mode == "preflight" ? "loadable" : "smoke_tested") || !entry["unloaded"].get<bool>()) successful = false;
     report["models"].push_back(std::move(entry));
   }
+  if (artifacts) {
+    if (!successful && !debug_error) debug_error = "debug_model";
+    if (debug_error) successful = false;
+    if (!successful) {
+      const auto cleaned = artifacts->Rollback();
+      if (!cleaned) debug_error = cleaned.error();
+    }
+    report["debug"] = {{"files", artifacts->Files()}, {"bytes", artifacts->Bytes()},
+        {"retained", successful}, {"error", debug_error ? Json(debug_error) : Json(nullptr)}};
+  }
   const auto body = report.dump();
-  if (!WriteOutput(body)) return 1;
+  if (!WriteOutput(body)) {
+    if (artifacts && !artifacts->Rollback()) std::fputs("Diagnostic artifact cleanup failed.\n", stderr);
+    return 1;
+  }
   return successful ? 0 : 1;
 }
 }  // namespace
 int RunDiagnosticsCLI(int argc, char* argv[]) noexcept {
-  try {
-    if (argc == 2 && std::string_view(argv[1]) == "--help") {
-      const std::string_view help{kHelp};
-      return WriteOutput(help.substr(0, help.size() - 1)) ? 0 : 1;
-    }
-    Arguments arguments;
-    if (!ParseArguments(argc, argv, arguments)) return Fatal("invalid_arguments", "Diagnostic arguments are invalid", 2);
-    return Diagnose(arguments);
-  } catch (...) {
-    return Fatal("diagnostic_failed", "Diagnostic operation failed");
+  // Explicit diagnostics exit before HTTP startup. Convert a closed stdout reader
+  // into checked EPIPE output failure so owned artifacts can roll back normally.
+#ifndef _WIN32
+  DiagnosticPipeSignal pipe_signal;
+  if (pipe_signal.previous == SIG_ERR) {
+    std::fputs("Diagnostic output signal cannot be configured.\n", stderr);
+    return 1;
   }
+#endif
+  std::optional<DebugArtifacts> artifacts;
+  const int status = [&]() noexcept {
+    try {
+      if (argc == 2 && std::string_view(argv[1]) == "--help") {
+        const std::string_view help{kHelp};
+        return WriteOutput(help.substr(0, help.size() - 1)) ? 0 : 1;
+      }
+      Arguments arguments;
+      if (!ParseArguments(argc, argv, arguments)) return Fatal("invalid_arguments", "Diagnostic arguments are invalid", 2);
+      return Diagnose(arguments, artifacts);
+    } catch (...) {
+      return Fatal("diagnostic_failed", "Diagnostic operation failed");
+    }
+  }();
+#ifndef _WIN32
+  if (!pipe_signal.Restore()) {
+    std::fputs("Diagnostic output signal cannot be restored.\n", stderr);
+    return 1;
+  }
+#endif
+  if (status == 0 && artifacts) artifacts->Retain();
+  return status;
 }
 }  // namespace vision_simple

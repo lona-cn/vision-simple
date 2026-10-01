@@ -97,8 +97,12 @@ InferOCR::CreateResult InferOCR::Create(InferContext& context,
                                         const std::string& det_path,
                                         const std::string& rec_path,
                                         OCRModelType model_type,
-                                        size_t device_id) noexcept {
+                                        size_t device_id,
+                                        OCRDetectionOptions detection_options) noexcept {
   try {
+    if (!detection_options.IsValid())
+      return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
+                        "Invalid OCR detection options");
     const auto* postprocessor = FindOCRPostProcessor(model_type);
     if (!postprocessor)
       return MK_VSERROR(VisionSimpleErrorCode::kUnimplementedError,
@@ -124,7 +128,8 @@ InferOCR::CreateResult InferOCR::Create(InferContext& context,
     if (postprocessor->append_dictionary_space)
       char_dict.emplace(static_cast<int>(char_dict.size()), " ");
     return Create(context, char_dict, det_data_result->span(),
-                  rec_data_rect->span(), model_type, device_id);
+                  rec_data_rect->span(), model_type, device_id,
+                  detection_options);
   } catch (const std::exception& e) {
     return MK_VSERROR(VisionSimpleErrorCode::kModelError,
                       std::format("unable to load OCR model: {}", e.what()));

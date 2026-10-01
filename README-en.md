@@ -188,6 +188,34 @@ Exit 0 means every selected model reached the requested state (`loadable` for pr
 
 **Observed observer cost.** A Linux x86_64 CPU container on WSL2 kernel 6.6.87.2 used GCC 16.2.0 (`O3`, fast-math), ONNX Runtime 1.22.0, ONNXRUNTIME/CPU device 0 and the 384-byte `yolo26_detect_threshold_raw.onnx` kV26 raw-detection fixture (FP32 input `[1,3,64,64]`). The batch was one 32×32 all-black `CV_8UC3` BGR image, with confidence 0.5/NMS IoU 0.3; the service reused its PNG/base64 encoding prepared once. The same live context/model/cache was retained, with the first successful response lease held and idle timeout zero. Setup, loading and four warmup pairs were outside timing. Each API then ran 40 pairs, ordinary first on even pairs and measured first on odd pairs. External steady-clock timing covered only the call, excluding parity checks, `Succeed` and destruction. Medians were the floor of the mean of sorted samples 20 and 21. Ordinary/measured medians were 204.208/180.008 µs for the pipeline (204,208/180,008 ns; difference −24.200 µs), and 176.263/216.701 µs for the service (176,263/216,701 ns; difference +40.438 µs). All 80 pairs preserved exact class/confidence-bit/box parity and service class names; service measured calls reported warm cache hits and complete timing. The negative pipeline difference is scheduler noise, not a speedup claim. These fixture-specific observations are not a general overhead estimate, hardware-placement proof or performance guarantee; three-worker summed stage times still do not equal batch wall time.
 
+### Private OCR warmup image export (explicit opt-in)
+
+Export persists potentially sensitive input pixels: only use explicitly approved images in a trusted current working directory. Without `--debug-dir`, ordinary CLI/HTTP behavior persists no debug images and adds no debug allocations or filesystem probes.
+
+```sh
+./vision_simple-server --diagnose warmup --model ocr:ppocr-v4 --image fixture.jpg --debug-dir ocr-study-001 --debug-max-bytes 67108864 --debug-max-files 64
+```
+
+Windows uses `.\vision_simple-server.exe`. Export requires warmup, **exactly one OCR selection** and 1–16 images; existing batch/input budgets still apply. `--debug-max-bytes` is 1–67108864/default 67108864; `--debug-max-files` is 1–64/default 64. Both require `--debug-dir`; inclusive caps count the manifest, all files and actual encoded disk bytes, and cannot exceed the hard limits.
+
+NAME is a portable ASCII basename of 1–64 characters, starting alphanumeric, remaining characters alphanumeric/underscore/hyphen. Reject dots, separators, absolute/drive paths and case-insensitive Windows reserved CON/PRN/AUX/NUL/COM1–9/LPT1–9 on ALL platforms. The direct CWD child must not exist as file/directory/symlink/junction: no overwrite/reuse or fallback path. POSIX requires CWD owned by current UID without group/world write; child directory mode 0700 / file mode 0600 use pinned no-follow relative exclusive creation. Windows uses a protected current-user-only DACL, pinned relative no-reparse handles and exclusive creation.
+
+The existing successful warm payload supplies boxes; export makes **no second inference/detection**. Reuse encoded input, decode/encode at most one frame at a time, write original PNG then numeric-index box overlay on the SAME Mat. No detector masks or recognition crops are promised. Files `input-NNN.png`, `boxes-NNN.png` start at `000`, plus `manifest.json` (2*frames+1 files). Manifest fields: `schema_version:1`, effective `ocr_detection`, `recognition_confidence:0.125`, and `frames` with `index,width,height,box_count,boxes`; each box has `index,bbox:[x,y,width,height],confidence`. Report/manifest contain no recognized text/path/token/fixture base64; PNGs themselves still contain sensitive approved input pixels.
+
+Stdout adds only `debug:{files,bytes,retained,error}`, error being a normalized code or null, without directory name/native exception. Retain only after desired model state, released leases, successful unload AND checked stdout write/flush. Model/decode/encode/IO/quota/exception/stdout failure exits 1 and rolls back only created known files and owned new root, never unrelated recursive remove_all. Argument misuse exits 2. Every write/close is checked; no partial export is intentionally retained on failure. A failed stdout commit may leave no usable report; trust exit status, not partial output.
+
+After exit 0 and `retained:true`, inspect the export; successful exports need manual cleanup. Confirm it is still your unchanged, exact newly created directory, then for the name above use:
+
+```sh
+rm -r -- './ocr-study-001'
+```
+
+```powershell
+Remove-Item -LiteralPath '.\ocr-study-001' -Recurse
+```
+
+Never substitute a parent directory, wildcard or unrelated existing folder.
+
 ### Bounded inference pipeline
 
 After every image has decoded successfully, HTTP v0 uses separate preprocessing, ORT, and postprocessing workers. OCR cycles through detection and crop-recognition minibatch dependencies. Outcomes aggregate by input index, not completion order: any failure rejects the entire batch and reports its lowest failing index.
@@ -231,6 +259,29 @@ models:
 Legacy `yolo`/`ocr` lists remain readable and may coexist with non-conflicting canonical entries. Duplicate `(task,name)` declarations are rejected; different tasks may share a name. Version/resource validation remains lazy at first model load. Legacy public DTOs retain compatibility projections; execution reads only canonical `models`, with no parallel cache or configuration lookup path.
 
 Registered tasks are `yolo`, `ocr`, `seg`, `pose` and `obb`; unknown tasks are rejected at the service configuration boundary. All tasks share caching, leases, statistics and eviction. ONNXRuntime is the implemented backend; TVM is unsupported, and the task registry is not a dynamic plugin system.
+
+### OCR model-construction options
+
+Optional `ocr_detection` belongs to a canonical `models` OCR entry or legacy `ocr` entry; it survives canonical/legacy projection, import/export, equality and configuration copies. It is not a request control. Add the following sibling of `files` to the canonical OCR example above (or to a legacy OCR entry):
+
+```yaml
+    ocr_detection:
+      kernel_size: 1
+      dilation_iterations: "1"
+      min_box_area: 16
+```
+
+| Field | Inclusive range | Default | Meaning |
+| --- | --- | --- | --- |
+| `kernel_size` | 1–32 | 2 | Square MORPH_RECT dilation kernel |
+| `dilation_iterations` | 0–8 | 3 | Passes; zero uses converted gray mask without dilation |
+| `min_box_area` | 0–1048576 | 64 | STRICT pre-unclip `boundingRect.area() > min_box_area`, not contour area |
+
+Omitted/null options inherit defaults; `ocr_detection: {}` explicitly selects defaults. Missing individual fields default. Bare/quoted fully consumed decimal integers are accepted. Unknown leaf keys, booleans, floats, nested values and out-of-range integers fail. An engaged leaf, even `{}`, on a non-OCR model fails; null means omitted. Outer YAML unknown-key and duplicate-key last-value policy is unchanged (duplicate model declarations still fail).
+
+The lightweight public common header `OCRDetectionOptions.h` defines the aggregate `OCRDetectionOptions{kernel_size,dilation_iterations,min_box_area}` with constexpr validation/equality. Every file, byte-span and arithmetic-span template `InferOCR::Create` overload appends `OCRDetectionOptions detection_options = {}` **after** `device_id = 0`. Factories validate before IO/session creation and snapshot the value into immutable model-owned options/kernel; caller mutation cannot change it. Rebuild/relink SDK consumers; no old-symbol shims or setters.
+
+Defaults stay 2/3/64 with the same anchor/border and three physical dilation passes. Kernel size 1 is mathematical identity and avoids unnecessary allocations/dilation. CV_8UC1 gray conversion adds no threshold/scaling. CTC/SAR, recognition batches/confidence, unclip 1.5, IoU 0.3, contour traversal/version branch, coordinate mapping/filter order, `Run(image,float)`, pipeline/measured calls and control layouts remain unchanged. Constructor values plus CLI overlay were selected instead of a callback-lifetime/debug-runtime port. HTTP/OpenAI/MCP inputs, per-request controls, HTTP model descriptors and OpenAPI are unchanged: no per-request morphology, setter, debug or detector HTTP API.
 
 ### YOLO segmentation, pose and oriented boxes
 
@@ -502,6 +553,35 @@ Issue #55 final full real-server subtitle regressions passed on native Windows C
 - Fixed N follows model metadata (1–64); partial tails receive normalized-zero dummy samples whose outputs are discarded. Fixed H/W resize the entire crop to those dimensions. No arbitrary `T × width_ratio` truncation is inferred: real samples decode all T, with SAR stopping at EOS. Exports requiring aspect-preserving padding or extra masks must match this preprocessing contract first.
 - DBNet detection uses a 1.5 unclip ratio before recognition cropping, expanding the shrunken text region to avoid truncated glyphs (for example, an `E`-only crop instead of `HELLO`). This changes crop geometry and can change recognized text across both synchronous and pipeline OCR.
 - `test_ocr_batch` covers mixed widths, ordering, fixed-N tails, workspace reuse, file-based SAR dictionaries and pipeline isolation. A real ONNX guard fails at N=1, preventing a single-image loop from masquerading as batching. Batching benefits depend on crop sizes, models and providers; measure your actual workload.
+
+### Reproducible synthetic OCR geometry study
+
+Approved `hershey-word-v1` freezes eight 640×384 cases: three ordinary images each with six words (scale 0.85/1/1.15, thickness 2), three dense images each with 24 words (0.48/0.55/0.62, thickness 1), and a separate two-image negative cohort (blank; low-contrast gradient/geometric background). Deterministic OpenCV Hershey SIMPLEX/LINE_8 visible words provide 90 tight rendered-ink word GT boxes, independently of detector predictions; ignore policy:none. No external fonts/images, additional downloads or new licensing claims.
+
+Hold constant the repo's real trained `ppocr_det.onnx`, `ppocr_rec.onnx` and `ppocr_keys_v1.txt`, `kPPOCRv4`, CPU device 0, recognition confidence 0.125, explicit `ocr_rec_batch_size=1`. Compare default 2/3/64 to alternative 1/1/16. From repository root with installed assets and normal CPU build dependencies:
+
+```sh
+xmake build test_ocr_morphology_dataset
+xmake run test_ocr_morphology_dataset --project-root .
+```
+
+The study renders in memory, prints JSON metrics and persists no images. Maximum-cardinality one-to-one bipartite matching at IoU≥0.5 counts matched TP, unmatched GT FN and unmatched predictions FP. **All returned boxes count, including empty recognized text** (separately counted). Recall=TP/GT, precision=TP/(TP+FP), FP/image=FP/images; zero denominators:null. Low-IoU expansion and splits/merges can produce FP/FN, not necessarily hallucinated words. These are synthetic word-ink geometry measurements, NOT production OCR accuracy or character-recognition quality.
+
+Observed Linux CPU results distinguish immutable old #61 baseline (successful, 17.59 s) and new default/alternative study (exit 0, 9 s). Independent comparison found all eight new-default outputs EXACTLY equal to old baseline ordered bbox/fullUTF8 bytes/confidence float bits, with identical corpus pixels/annotations and default cohort counts. New study also exercises caller-option mutation/model isolation and synchronous/staged parity for both options.
+
+| Run / cohort | Images | GT | TP | FN | FP | Recall | Precision | FP/image |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Old #61 baseline 2/3/64 / ordinary | 3 | 18 | 12 | 6 | 6 | 0.666667 | 0.666667 | 2 |
+| Old #61 baseline 2/3/64 / dense | 3 | 72 | 0 | 72 | 72 | 0 | 0 | 24 |
+| Old #61 baseline 2/3/64 / negative | 2 | 0 | 0 | 0 | 1 | null | 0 | 0.5 |
+| New default 2/3/64 / ordinary | 3 | 18 | 12 | 6 | 6 | 0.666667 | 0.666667 | 2 |
+| New default 2/3/64 / dense | 3 | 72 | 0 | 72 | 72 | 0 | 0 | 24 |
+| New default 2/3/64 / negative | 2 | 0 | 0 | 0 | 1 | null | 0 | 0.5 |
+| Alternative 1/1/16 / ordinary | 3 | 18 | 18 | 0 | 0 | 1 | 1 | 0 |
+| Alternative 1/1/16 / dense | 3 | 72 | 52 | 20 | 20 | 0.722222 | 0.722222 | 6.66667 |
+| Alternative 1/1/16 / negative | 2 | 0 | 0 | 0 | 1 | null | 0 | 0.5 |
+
+Empty-text count is zero in every cohort/variant. Alternative is an experiment, not a changed default, required improvement gate or universal recommendation. Durations are observations, not performance thresholds. Mechanics fixtures for morphology boundaries, CTC/SAR, batches and concurrency are not trained-model accuracy evidence; this study does not certify every test/platform.
 
 ### Shared service, OpenAI-like HTTP and MCP SSE
 

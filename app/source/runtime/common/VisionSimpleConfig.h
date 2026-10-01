@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "VisionSimpleError.h"
+#include "OCRDetectionOptions.h"
 #include "config.h"
 
 namespace vision_simple {
@@ -19,11 +20,13 @@ struct YOLOModelInfo {
 struct OCRModelInfo {
   std::string name, version;
   std::string det_path, rec_path, char_dict_path;
+  std::optional<OCRDetectionOptions> ocr_detection;
 };
 
 struct ModelDefinition {
   std::string task, name, version;
   std::map<std::string, std::string> files;
+  std::optional<OCRDetectionOptions> ocr_detection;
 };
 
 struct ModelConfig {

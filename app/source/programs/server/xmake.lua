@@ -6,7 +6,7 @@ local deps = { "runtime", "infer" }
 local syslinks = {}
 local function callback()
     if is_plat("windows") then
-        add_syslinks("mfplat", "mfreadwrite", "mfuuid", "ole32")
+        add_syslinks("mfplat", "mfreadwrite", "mfuuid", "ole32", "advapi32")
     end
     set_basename("vision_simple-server")
     add_extrafiles(path.join(os.projectdir(), "doc", "openapi", "**"))

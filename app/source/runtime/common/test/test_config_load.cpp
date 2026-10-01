@@ -193,6 +193,121 @@ yolo:
               unknown->model_config().ocr.empty(),
           "configuration identity validation must not create a task registry");
 }
+void TestOCRDetectionConfiguration(TemporaryConfig& temporary) {
+  const auto load_leaf = [&](std::string_view leaf) {
+    return temporary.Load(std::string("models:\n  - task: ocr\n    name: tuned\n    ocr_detection: ") +
+                          std::string(leaf) + "\n");
+  };
+  for (const auto leaf : {"{}", "{kernel_size: 2, dilation_iterations: 3, min_box_area: 64}"}) {
+    const auto loaded = load_leaf(leaf);
+    Require(loaded && loaded->model_config().models[0].ocr_detection ==
+                          std::optional{OCRDetectionOptions{}},
+            "empty and explicit default mappings select legacy geometry");
+  }
+  const auto omitted = temporary.Load("models:\n  - task: ocr\n    name: plain\n");
+  const auto null_leaf = load_leaf("null");
+  Require(omitted && null_leaf &&
+              !omitted->model_config().models[0].ocr_detection &&
+              !null_leaf->model_config().models[0].ocr_detection,
+          "omitted and null detection options stay disengaged");
+  for (const auto leaf : {"{kernel_size: 1, dilation_iterations: 0, min_box_area: 0}",
+                          "{kernel_size: 32, dilation_iterations: 8, min_box_area: 1048576}",
+                          "{kernel_size: '1', dilation_iterations: \"1\", min_box_area: '16'}"}) {
+    const auto loaded = load_leaf(leaf);
+    Require(loaded && loaded->model_config().models[0].ocr_detection &&
+                loaded->model_config().models[0].ocr_detection->IsValid(),
+            "inclusive ranges and quoted decimal scalars load");
+  }
+  for (const auto leaf : {"{kernel_size: 0}", "{kernel_size: 33}",
+                          "{dilation_iterations: -1}", "{dilation_iterations: 9}",
+                          "{min_box_area: -1}", "{min_box_area: 1048577}",
+                          "{kernel_size: 999999999999999999999999}",
+                          "{kernel_size: true}", "{kernel_size: 1.0}",
+                          "{kernel_size: '1x'}", "{kernel_size: ''}",
+                          "{kernel_size: '+1'}", "{kernel_size: ' 1'}",
+                          "{kernel_size: 0x10}", "{unknown: 1}",
+                          "{kernel_size: {nested: 1}}", "{kernel_size: [1]}",
+                          "{kernel_size: null}", "[]", "true", "1"}) {
+    const auto invalid = load_leaf(leaf);
+    Require(!invalid && invalid.error().code == VisionSimpleErrorCode::kRuntimeError,
+            "invalid detection mappings must fail at checked load boundary");
+  }
+  for (const auto task : {"yolo", "seg", "pose", "obb", "custom"}) {
+    const auto invalid = temporary.Load(std::string("models:\n  - task: ") + task +
+        "\n    name: guarded\n    ocr_detection: {}\n");
+    Require(!invalid, "engaged detection options require an OCR task");
+  }
+  Require(!temporary.Load("yolo:\n  - name: guarded\n    ocr_detection: {}\n"),
+          "legacy YOLO must not silently drop an engaged detection mapping");
+  Require(temporary.Load("yolo:\n  - name: allowed\n    ocr_detection: null\n").has_value(),
+          "null detection mapping remains omitted on non-OCR tasks");
+  const auto tuned = temporary.Load(R"(ocr:
+  - name: tuned
+    version: kPPOCRv4
+    det_path: det.onnx
+    rec_path: rec.onnx
+    char_dict_path: dictionary.txt
+    ocr_detection: {kernel_size: 1, dilation_iterations: 1, min_box_area: 16}
+)");
+  if (!Require(tuned.has_value(), "legacy OCR customization loads")) return;
+  const OCRDetectionOptions custom{1, 1, 16};
+  const auto& catalog = tuned->model_config();
+  Require(catalog.models[0].ocr_detection == std::optional{custom} &&
+              catalog.ocr[0].ocr_detection == std::optional{custom},
+          "legacy import and projection preserve all detection controls");
+  const Config reconstructed{catalog};
+  Require(reconstructed.model_config().models.size() == 1 &&
+              reconstructed.model_config().models[0].ocr_detection == std::optional{custom} &&
+              reconstructed.model_config().models[0].files == catalog.models[0].files,
+          "reconstruction recognizes customized projections without duplication");
+  auto changed = catalog;
+  changed.ocr[0].ocr_detection = OCRDetectionOptions{3, 2, 100};
+  const Config distinct{std::move(changed)};
+  Require(distinct.model_config().models.size() == 2 &&
+              distinct.model_config().models[0].ocr_detection == std::optional{custom} &&
+              distinct.model_config().models[1].ocr_detection ==
+                  std::optional{OCRDetectionOptions{3, 2, 100}},
+          "different options are not mistaken for an existing projection");
+  Require(omitted && !omitted->model_config().models[0].ocr_detection &&
+              tuned->model_config().models[0].ocr_detection == std::optional{custom},
+          "independent configurations do not share mutable detection state");
+  const auto backend_policy = temporary.Load(R"(unrelated: ignored
+models:
+  - task: ocr
+    name: policy
+    extra: ignored
+    ocr_detection: {kernel_size: 3, kernel_size: 1}
+)");
+  Require(backend_policy && backend_policy->model_config().models[0].ocr_detection ==
+                                std::optional{OCRDetectionOptions{1, 3, 64}},
+          "outer unknown keys and duplicate-last YAML map policy remain unchanged");
+  const auto independent = temporary.Load(R"(models:
+  - task: ocr
+    name: first
+    ocr_detection:
+      kernel_size: 1
+      dilation_iterations: 1
+      min_box_area: 16
+  - task: ocr
+    name: second
+    ocr_detection:
+      kernel_size: 4
+      dilation_iterations: 0
+      min_box_area: 100
+)");
+  if (Require(independent.has_value(), "block mappings support distinct OCR models")) {
+    const Config copied{independent->model_config()};
+    const auto& models = copied.model_config().models;
+    Require(models.size() == 2 &&
+                models[0].ocr_detection == std::optional{custom} &&
+                models[1].ocr_detection == std::optional{OCRDetectionOptions{4, 0, 100}},
+            "canonical options remain isolated by model through reconstruction");
+    Require(copied.model_config().ocr.size() == 2 &&
+                copied.model_config().ocr[0].ocr_detection == models[0].ocr_detection &&
+                copied.model_config().ocr[1].ocr_detection == models[1].ocr_detection,
+            "multiple OCR projections preserve each model's own options");
+  }
+}
 }  // namespace
 
 int main() {
@@ -201,6 +316,7 @@ int main() {
     if (!temporary.valid()) return 1;
     TestEquivalentCatalogs(temporary);
     TestMixedAndInvalidCatalogs(temporary);
+    TestOCRDetectionConfiguration(temporary);
     return failures == 0 ? 0 : 1;
   } catch (const std::exception& error) {
     std::cerr << "configuration test failed: " << error.what() << '\n';

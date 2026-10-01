@@ -6,9 +6,11 @@ import base64
 import json
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 
 
 class RegressionFailure(RuntimeError):
@@ -30,10 +32,13 @@ def ppm(value, width=32, height=32):
 
 def model_yaml(rows):
     text = "models:\n"
-    for task, name, version, files in rows:
+    for row in rows:
+        task, name, version, files = row[:4]
         text += f"  - task: {json.dumps(task)}\n    name: {json.dumps(name)}\n"
         text += f"    version: {json.dumps(version)}\n    files:\n"
         text += "".join(f"      {role}: {json.dumps(path.as_posix())}\n" for role, path in files.items())
+        if len(row) == 5:
+            text += f"    ocr_detection: {row[4]}\n"
     return text
 
 
@@ -195,13 +200,13 @@ def pipeline(record, frames, *, success, ocr=False):
     # Wall, queue and frame sums overlap; there is intentionally no sum identity or speed threshold.
 
 
-def warm_success(row, frames=1, *, ocr=False):
+def warm_success(row, frames=1, *, ocr=False, count=1):
     require(row["configured"] and row["state"] == "smoke_tested" and row["loadable"] is True and
             row["smoke_tested"] and row["unloaded"], "Successful selected model not smoke-tested/unloaded")
     require([entry["phase"] for entry in row["passes"]] == ["cold", "warm"], "Missing actual cold/warm passes")
     for index, entry in enumerate(row["passes"]):
         require(entry["success"] and entry["error"] is None and entry["batch_size"] == frames and
-                entry["result_counts"] == [1] * frames, "Real fixture results were not preserved as counts")
+                entry["result_counts"] == [count] * frames, "Real fixture results were not preserved as counts")
         require(entry["cache_hit"] is bool(index), "Warm model lease did not retain the cold session")
         timing = entry["timing"]
         require(type(timing["wall_ns"]) is int and timing["wall_ns"] >= 0,
@@ -213,7 +218,241 @@ def warm_success(row, frames=1, *, ocr=False):
             stage(timing["model_load"], completed=1)
         stage(timing["input_prepare"], completed=frames, minimum=frames)
         stage(timing["decode"], completed=frames, minimum=frames)
-        pipeline(timing["pipeline"], frames, success=True, ocr=ocr)
+        pipeline(timing["pipeline"], frames, success=True, ocr=ocr and count > 0)
+
+
+def configuration_cases(driver, rows, black):
+    ocr = rows[1]
+    # Scalar/type/range validation is covered by test_config_load; these children
+    # prove accepted encodings retain the actual factory/inference default.
+    for leaf in ("null", "{}", "{kernel_size: 2, dilation_iterations: 3, min_box_area: 64}",
+                 '{kernel_size: "2", dilation_iterations: "3", min_box_area: "64"}'):
+        driver.configure([(*ocr, leaf)])
+        warm_success(driver.diagnose("warmup", ["ocr:shared"], [black])["models"][0], ocr=True)
+    legacy = 'yolo:\n  - name: shared\n    version: kV10\n    path: ' + json.dumps(rows[0][3]["model"].as_posix())
+    (driver.cwd / "config/models.yaml").write_text(legacy + '\n', encoding="utf-8")
+    driver.diagnose("preflight", ["yolo:shared"])
+    (driver.cwd / "config/models.yaml").write_text(legacy + '\n    ocr_detection: {}\n', encoding="utf-8")
+    require(driver.diagnose("preflight", ["yolo:shared"], expected=1)["error"]["code"] ==
+            "configuration_failed", "Legacy YOLO accepted OCR morphology")
+    # Independent named sessions, in both selection orders and repeated fresh children.
+    configured = [("ocr", "ordinary", ocr[2], ocr[3]),
+                  ("ocr", "filtered", ocr[2], ocr[3], "{min_box_area: 1048576}")]
+    driver.configure(configured)
+    before = {entry.name: entry.stat().st_mtime_ns for entry in driver.cwd.iterdir()}
+    for selections in (["ocr:ordinary", "ocr:filtered"], ["ocr:filtered", "ocr:ordinary"]):
+        for _ in range(2):
+            body = driver.diagnose("warmup", selections, [black])
+            require("debug" not in body, "Ordinary diagnostics unexpectedly enabled export")
+            for row in body["models"]:
+                warm_success(row, ocr=True, count=0 if row["model"] == "filtered" else 1)
+    require(before == {entry.name: entry.stat().st_mtime_ns for entry in driver.cwd.iterdir()},
+            "Non-debug diagnostics created or changed working-directory entries")
+    driver.configure(rows)
+
+
+def decode_png(path):
+    data = path.read_bytes()
+    require(data[:8] == b"\x89PNG\r\n\x1a\n", "Export is not a PNG")
+    offset, compressed, header = 8, bytearray(), None
+    while offset < len(data):
+        length = struct.unpack_from(">I", data, offset)[0]
+        kind = data[offset + 4:offset + 8]
+        payload = data[offset + 8:offset + 8 + length]
+        require(len(payload) == length and offset + 12 + length <= len(data), "Truncated PNG chunk")
+        crc = struct.unpack_from(">I", data, offset + 8 + length)[0]
+        require(zlib.crc32(kind + payload) & 0xffffffff == crc, "Corrupt PNG checksum")
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", payload)
+        elif kind == b"IDAT":
+            compressed.extend(payload)
+        offset += length + 12
+        if kind == b"IEND":
+            break
+    require(header is not None, "PNG lacks dimensions")
+    width, height, depth, color, compression, filtering, interlace = header
+    require(depth == 8 and color == 2 and compression == filtering == interlace == 0,
+            "Export must decode as noninterlaced 8-bit RGB")
+    raw, stride = zlib.decompress(compressed), width * 3
+    require(len(raw) == height * (stride + 1), "PNG scanline dimensions disagree")
+    pixels, previous = bytearray(), bytearray(stride)
+    for y in range(height):
+        start = y * (stride + 1)
+        method, line = raw[start], bytearray(raw[start + 1:start + 1 + stride])
+        require(method <= 4, "Invalid PNG filter")
+        for x in range(stride):
+            left, up = (line[x - 3] if x >= 3 else 0), previous[x]
+            corner = previous[x - 3] if x >= 3 else 0
+            predictors = (0, left, up, (left + up) // 2)
+            if method == 4:
+                p = left + up - corner
+                distances = (abs(p - left), abs(p - up), abs(p - corner))
+                predictor = (left, up, corner)[distances.index(min(distances))]
+            else:
+                predictor = predictors[method]
+            line[x] = (line[x] + predictor) & 255
+        pixels.extend(line)
+        previous = line
+    return width, height, pixels
+
+
+def debug_cases(driver, rows, black, white):
+    driver.configure(rows)
+    warm = ["--diagnose", "warmup", "--model", "ocr:shared", "--image", str(black)]
+    before = set(driver.cwd.iterdir())
+    for name in ("", ".", "..", "../escape", "a/b", "a\\b", "/absolute", "C:drive",
+                 "a.b", "-bad", "a" * 65, "CON", "prn", "AuX", "NUL", "COM1", "lpt9"):
+        driver.call([*warm, "--debug-dir", name], 2)
+    for flag, maximum in (("--debug-max-bytes", 67108864), ("--debug-max-files", 64)):
+        driver.call([*warm, flag, "1"], 2)
+        for value in ("0", "-1", "1.5", "true", str(maximum + 1), ""):
+            driver.call([*warm, "--debug-dir", "Rejected", flag, value], 2)
+    for arguments in (["--debug-dir", "Rejected"],
+                      ["--diagnose", "preflight", "--model", "ocr:shared", "--debug-dir", "Rejected"],
+                      ["--diagnose", "warmup", "--model", "yolo:shared", "--image", str(black), "--debug-dir", "Rejected"],
+                      [*warm, "--model", "ocr:missing", "--debug-dir", "Rejected"],
+                      [*warm, *sum((["--image", str(black)] for _ in range(16)), []), "--debug-dir", "Rejected"]):
+        driver.call(arguments, 2)
+    require(set(driver.cwd.iterdir()) == before, "Rejected syntax created export artifacts")
+    owned = driver.cwd / "ProtectedDirectory"
+    owned.mkdir()
+    canary = owned / "user-file"
+    canary.write_bytes(TOKEN.encode())
+    file = driver.cwd / "ProtectedFile"
+    driver.forbidden += ["QuotaRollback", "InferenceRollback", "SixteenFrames", "StdoutRollback", "WriteRollback",
+                         "ProtectedDirectory", "ProtectedFile", "ProtectedLink"]
+    file.write_bytes(TOKEN.encode())
+    for path in (owned, file):
+        driver.call([*warm, "--debug-dir", path.name], 1)
+    require(canary.read_bytes() == file.read_bytes() == TOKEN.encode(), "Existing user files changed")
+    link = driver.cwd / "ProtectedLink"
+    try:
+        link.symlink_to(owned, target_is_directory=True)
+    except OSError:
+        if os.name == "nt":
+            child = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(owned)], capture_output=True)
+            require(child.returncode == 0, "Cannot exercise Windows junction rejection")
+        else:
+            raise
+    driver.call([*warm, "--debug-dir", link.name], 1)
+    require(canary.read_bytes() == TOKEN.encode() and link.is_dir(), "Link target changed on rejection")
+    # A one-file cap necessarily fails after writing the original first PNG.
+    for flag in ("--debug-max-bytes", "--debug-max-files"):
+        body = driver.call([*warm, "--debug-dir", "QuotaRollback", flag, "1"], 1)
+        require(body["debug"]["retained"] is False and body["debug"]["error"] == "debug_quota",
+                "Quota failure was not safely classified")
+        warm_success(body["models"][0], ocr=True)
+        require(not (driver.cwd / "QuotaRollback").exists(), "Quota failure left owned files")
+        verify_debug(driver, warm, "QuotaRollback", 1)
+    body = driver.call(["--diagnose", "warmup", "--model", "ocr:shared", "--image", str(white),
+                        "--debug-dir", "InferenceRollback"], 1)
+    require(body["models"][0]["unloaded"] and not (driver.cwd / "InferenceRollback").exists(),
+            "Inference failure retained export artifacts/session")
+    verify_debug(driver, [*warm, *sum((["--image", str(black)] for _ in range(15)), [])], "SixteenFrames", 16)
+    size = verify_debug(driver, warm, "QuotaRollback", 1)
+    verify_debug(driver, [*warm, "--debug-max-files", "3", "--debug-max-bytes", str(size)], "QuotaRollback", 1)
+    if sys.platform.startswith("linux"):
+        import resource
+        import signal
+
+        def restrict_file_size():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (32, 32))
+
+        child = subprocess.run([str(driver.executable), *warm, "--debug-dir", "WriteRollback"],
+                               cwd=driver.cwd, env=driver.environment, capture_output=True,
+                               timeout=180, preexec_fn=restrict_file_size)
+        require(child.returncode == 1 and not (driver.cwd / "WriteRollback").exists(),
+                "Actual EFBIG write failure did not roll back owned artifacts")
+        captured = child.stdout.decode("utf-8", errors="strict") + child.stderr.decode("utf-8", errors="strict")
+        require(all(value not in captured for value in driver.forbidden), "Write failure leaked private values")
+        report = json.loads(child.stdout)
+        require(report["debug"]["retained"] is False and all(row["unloaded"] for row in report["models"]),
+                "Write failure leaked model lease or claimed retained artifacts")
+        warm_success(report["models"][0], ocr=True)
+        verify_debug(driver, warm, "WriteRollback", 1)
+        # Restore the normal SIGPIPE disposition in the exec'd child: Python
+        # otherwise ignores it and would conceal a native rollback bypass.
+        driver.forbidden.append("ClosedReaderRollback")
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        try:
+            child = subprocess.run([str(driver.executable), *warm, "--debug-dir", "ClosedReaderRollback"],
+                                   cwd=driver.cwd, env=driver.environment, stdout=write_fd,
+                                   stderr=subprocess.PIPE, timeout=180, restore_signals=True)
+        finally:
+            os.close(write_fd)
+        require(child.returncode == 1 and not (driver.cwd / "ClosedReaderRollback").exists(),
+                "Closed stdout consumer bypassed artifact rollback")
+        stderr = child.stderr.decode("utf-8", errors="strict")
+        require(all(value not in stderr for value in driver.forbidden), "Broken-pipe failure leaked private values")
+        verify_debug(driver, warm, "ClosedReaderRollback", 1)
+    full = Path("/dev/full")
+    if sys.platform.startswith("linux") and full.is_char_device():
+        with full.open("wb", buffering=0) as output:
+            child = subprocess.run([str(driver.executable), *warm, "--debug-dir", "StdoutRollback"],
+                                   cwd=driver.cwd, env=driver.environment, stdout=output,
+                                   stderr=subprocess.PIPE, timeout=180)
+        require(child.returncode == 1 and not (driver.cwd / "StdoutRollback").exists(),
+                "Failed stdout commit retained images")
+        stderr = child.stderr.decode("utf-8", errors="strict")
+        require(all(value not in stderr for value in driver.forbidden), "Stdout failure leaked private values")
+
+
+def verify_debug(driver, warm, name, frames):
+    body = driver.call([*warm, "--debug-dir", name], 0)
+    warm_success(body["models"][0], frames, ocr=True)
+    directory = driver.cwd / name
+    if os.name == "nt":
+        environment = driver.environment.copy()
+        environment["VISION_SIMPLE_ACL_TARGET"] = str(directory)
+        command = ('$ErrorActionPreference="Stop"; $a=Get-Acl -LiteralPath $env:VISION_SIMPLE_ACL_TARGET; '
+                   '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; '
+                   'if (!$a.AreAccessRulesProtected -or $a.Access.Count -ne 1) {exit 1}; '
+                   '$r=$a.Access[0]; '
+                   'if ($r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $sid '
+                   '-or $r.AccessControlType -ne "Allow" -or $r.IsInherited) {exit 1}')
+        checked = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                                 env=environment, capture_output=True, timeout=30)
+        require(checked.returncode == 0, "Debug root DACL is not protected/current-user-only")
+    if os.name != "nt":
+        require(directory.stat().st_mode & 0o777 == 0o700, "Debug root is not owner-only")
+    files = list(directory.iterdir())
+    expected = {"manifest.json"} | {f"{prefix}-{index:03}.png" for index in range(frames)
+                                   for prefix in ("input", "boxes")}
+    require({file.name for file in files} == expected, "Export omitted images or created unexpected files")
+    summary = body["debug"]
+    require(summary == {"files": len(files), "bytes": sum(file.stat().st_size for file in files),
+                        "retained": True, "error": None}, "Export summary disagrees with actual disk contents")
+    manifest_text = (directory / "manifest.json").read_text(encoding="utf-8")
+    require(all(private not in manifest_text for private in driver.forbidden), "Manifest leaked private values")
+    manifest = json.loads(manifest_text)
+    require(manifest["ocr_detection"] == {"kernel_size": 2, "dilation_iterations": 3, "min_box_area": 64} and
+            manifest["recognition_confidence"] == 0.125, "Manifest omitted effective parameters")
+    require(len(manifest["frames"]) == frames, "Manifest lost a frame")
+    for index, frame in enumerate(manifest["frames"]):
+        width, height, original = decode_png(directory / f"input-{index:03}.png")
+        ow, oh, overlay = decode_png(directory / f"boxes-{index:03}.png")
+        require((width, height) == (ow, oh) == (32, 32) and
+                (frame["index"], frame["width"], frame["height"], frame["box_count"]) == (index, 32, 32, 1),
+                "Manifest/PNG geometry disagrees with actual fixture")
+        require(original == bytes(32 * 32 * 3), "Export did not preserve original RGB pixels")
+        box, = frame["boxes"]
+        x, y, w, h = box["bbox"]
+        require(box["index"] == 0 and 0 <= box["confidence"] <= 1 and
+                0 <= x < x + w <= width and 0 <= y < y + h <= height, "Invalid exported bounding box")
+        changed = {(p % width, p // width) for p in range(width * height)
+                   if overlay[p * 3:p * 3 + 3] != original[p * 3:p * 3 + 3]}
+        require(any(x - 1 <= px <= x + w + 1 and y - 1 <= py <= y + h + 1 and
+                    (abs(px - x) <= 1 or abs(px - (x + w)) <= 1 or
+                     abs(py - y) <= 1 or abs(py - (y + h)) <= 1) for px, py in changed),
+                "Overlay did not draw the manifest bounding rectangle")
+    # Successful export is explicitly retained; the fixture owner performs manual cleanup.
+    for file in files:
+        file.unlink()
+    directory.rmdir()
+    return summary["bytes"]
+
 
 
 def run(args):
@@ -272,6 +511,8 @@ def run(args):
             driver.forbidden += [base64.b64encode(payload).decode("ascii"), str(image), image.as_posix()]
             driver.canary_kind.update({base64.b64encode(payload).decode("ascii"): "base64",
                                        str(image): "fixture", image.as_posix(): "fixture"})
+        configuration_cases(driver, rows, black)
+        debug_cases(driver, rows, black, white)
         body = driver.diagnose("preflight", ["yolo:unknown", "yolo:missing", "ocr:missing", "yolo:corrupt"], expected=1)
         unknown, missing, missing_ocr, broken = body["models"]
         require(not unknown["configured"] and unknown["state"] == "not_configured" and

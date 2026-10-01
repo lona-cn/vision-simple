@@ -188,6 +188,35 @@ JSON 使用 `schema_version: 1`、`validity: "this_invocation_only"`、`http_rea
 
 **实测 observer 成本。** Linux x86_64 CPU 容器运行于 WSL2 kernel 6.6.87.2，使用 GCC 16.2.0（`O3`、fast-math）、ONNX Runtime 1.22.0、ONNXRUNTIME/CPU device 0，模型为 384 字节的 `yolo26_detect_threshold_raw.onnx` kV26 raw detection 夹具（FP32 输入 `[1,3,64,64]`）。批次为一张 32×32 全黑 `CV_8UC3` BGR 图片，confidence 0.5/NMS IoU 0.3；service 复用一次生成的 PNG/base64。保持同一存活 context/model/cache，持有首次成功响应租约，idle timeout 为零。setup、加载及 4 对 warmup 不计时。之后每个 API 执行 40 对调用，偶数对普通模式先执行，奇数对 measured 先执行；外部 steady-clock 只计调用本身，不含结果对比、`Succeed`、析构。中位数为排序后第 20、21 个样本均值向下取整。普通/measured 中位数：pipeline 为 204.208/180.008 µs（204,208/180,008 ns，差 −24.200 µs），service 为 176.263/216.701 µs（176,263/216,701 ns，差 +40.438 µs）。全部 80 对 class、confidence 位、bbox 及 service class names 精确一致，service measured 调用报告 warm cache hit 和 complete timing。pipeline 负差值是调度噪声，不是加速结论。这些特定夹具观察不是通用开销估计、硬件 placement 证明或性能保证；三个 worker 的阶段时间求和仍不等于 batch wall。
 
+### 私有 OCR 预热图片导出（显式启用）
+
+导出会持久化可能敏感的输入像素：仅对明确批准的图片启用，并从可信当前工作目录运行。不传 `--debug-dir` 时普通 CLI/HTTP 不保存 debug 图片，也不增加 debug 分配或文件系统探测。
+
+```sh
+./vision_simple-server --diagnose warmup --model ocr:ppocr-v4 --image fixture.jpg --debug-dir ocr-study-001 --debug-max-bytes 67108864 --debug-max-files 64
+```
+
+Windows 将可执行文件换成 `.\vision_simple-server.exe`。仅允许 warmup、**恰好一个 OCR 模型**及 1–16 张图片（原有批次/输入预算仍适用）。`--debug-max-bytes` 范围 1–67108864，默认 67108864；`--debug-max-files` 范围 1–64，默认 64；两者均必须与 `--debug-dir` 使用。上限包含 manifest、全部关闭的文件及实际编码字节，含边界，不能提高到硬上限之外。
+
+NAME 必须为 1–64 字符的可移植 ASCII basename，首字符字母/数字，其余仅字母/数字/下划线/连字符。所有平台均拒绝点、路径分隔符、绝对/drive 路径以及不区分大小写的 Windows 保留名 CON/PRN/AUX/NUL/COM1–9/LPT1–9。CWD 的直接子项不得已存在，包括文件、目录、symlink、junction；不覆盖/复用，也不回退到其他位置。POSIX 要求 CWD 归当前 UID 所有且无 group/world 写权限；独占创建目录 mode 0700、文件 0600，并使用固定身份的 no-follow 相对句柄。Windows 使用受保护的仅当前用户 DACL、固定相对 no-reparse 句柄及独占创建。
+
+框来自已有成功 warm 响应，**不再进行第二次推理/检测**。复用编码输入，每次最多处理一帧：先写原始 PNG，再在同一 Mat 上画框和数字索引生成 overlay；不导出 detector mask 或 recognition crop。文件为 `input-000.png`、`boxes-000.png`（三位帧序号）及 `manifest.json`，共 `2 * frames + 1` 个。manifest 包含 `schema_version: 1`、有效 `ocr_detection`、`recognition_confidence: 0.125` 与 `frames`；帧字段为 `index,width,height,box_count,boxes`，框字段为 `index,bbox:[x,y,width,height],confidence`。report/manifest 不含识别文字、路径、token 或夹具 base64；PNG 本身仍包含明确批准的输入像素。
+
+stdout 仅增加 `debug: {files,bytes,retained,error}`（error 为归一化 code 或 null），不回显目录名/原生异常。仅在模型达到目标状态、释放租约、unload 成功并成功写入/flush stdout 后保留文件。模型、decode/encode、IO、quota、异常或 stdout 失败退出 1，仅回滚创建的已知文件及自己拥有的新目录，不对无关目录树调用 remove_all；参数误用退出 2。检查全部写入/关闭，失败不故意保留部分导出。stdout 失败可能没有可用报告，应依据退出码而非部分输出。
+
+退出 0 且 `retained: true` 后可检查结果；使用完后，仅删除**确切新建且仍未被替换的导出目录**。以上名称对应：
+
+```sh
+rm -r -- './ocr-study-001'
+```
+
+```powershell
+Remove-Item -LiteralPath '.\ocr-study-001' -Recurse
+```
+
+不要替换成父目录、通配符或无关已有目录。成功导出不会自动删除。
+
+
 ### 有界推理流水线
 
 HTTP v0 在全部图片解码成功后，使用前处理、ORT、后处理三个独立 worker；OCR 按检测及文本框 recognition minibatch 的依赖关系轮转阶段。图片结果按输入索引聚合；不同图片即使乱序完成，仍只返回最低失败索引，整批不返回部分结果。
@@ -231,6 +260,31 @@ models:
 旧 `yolo`/`ocr` 配置仍可读，也可与不冲突的新条目混用。重复 `(task,name)` 一律拒绝；不同任务允许同名。版本和模型资源检查仍在首次模型加载时执行。旧配置 DTO 保留兼容投影，执行路径只读取 canonical `models`，没有两套缓存或配置查找逻辑。
 
 当前注册 `yolo`、`ocr`、`seg`、`pose`、`obb`，未知 task 在服务配置边界拒绝。各任务共用缓存、租约、统计和回收逻辑。实际推理后端为 ONNXRuntime，不支持 TVM；任务注册表不是动态插件系统。
+
+### OCR 模型构造参数
+
+可选 `ocr_detection` mapping 属于 OCR 模型定义，可用于 canonical `models` 条目或 legacy `ocr` 条目；canonical/legacy 投影、导入导出及配置复制均保留它，**不是请求级控制**。
+
+| 字段 | 含端点范围 | 默认值 | 含义 |
+| --- | --- | --- | --- |
+| `kernel_size` | 1–32 | 2 | 正方形 `MORPH_RECT` 膨胀核 |
+| `dilation_iterations` | 0–8 | 3 | 膨胀次数；零直接使用转换后的灰度 mask，不膨胀 |
+| `min_box_area` | 0–1048576 | 64 | 严格保留 unclip 前 `boundingRect.area() > min_box_area`；不是 contour area |
+
+在上方 canonical OCR 示例中，与 `files` 同级添加以下字段（legacy OCR 条目亦可）：
+
+```yaml
+    ocr_detection:
+      kernel_size: 1
+      dilation_iterations: "1"
+      min_box_area: 16
+```
+
+省略/null 继承默认值；`ocr_detection: {}` 显式选择默认值；省略的单个字段也采用默认值。接受裸写或加引号且完全解析的十进制整数；拒绝未知 leaf key、布尔、浮点、嵌套值及越界整数。非 OCR 模型的非 null mapping（包括 `{}`）被拒绝，null 视为省略。外层 YAML 原有未知字段及重复 key 取最后值策略不变（重复模型声明仍被拒绝）。
+
+C++ 使用轻量公共 common header `OCRDetectionOptions.h`，aggregate `OCRDetectionOptions{kernel_size, dilation_iterations, min_box_area}` 提供 constexpr 校验及相等比较。全部 `InferOCR::Create` 文件、byte-span、arithmetic-span template 重载在 `device_id = 0` **之后**追加 `OCRDetectionOptions detection_options = {}`。factory 在文件 IO/会话创建前校验，模型按值持有构造快照；修改调用者的值不改变模型。SDK 及调用者须重新构建/链接，不保留旧符号 shim，也不提供 setter。
+
+默认仍为 2/3/64，保持旧 anchor/border 和三次物理膨胀调用。kernel size 1 是数学恒等操作，其实现避免无用分配/膨胀，不改变默认路径。灰度转换保持 CV_8UC1，不增加阈值/scaling。CTC/SAR、recognition batch/confidence、unclip ratio 1.5、IoU/筛选顺序、坐标映射、`Run(image, float)`、pipeline/measured 调用及 control 布局不变。采用构造值加 CLI 框叠加，而不是引入 callback 生命周期/debug runtime port。普通 HTTP/OpenAI/MCP JSON 与 OpenAPI 不变：没有请求级形态学参数、setter、debug 或 detector HTTP API。
 
 ### YOLO 分割、姿态与旋转框
 
@@ -501,6 +555,36 @@ Issue #55 的最终真实 server 全量字幕回归在 Windows 原生 CPU（30.5
 - 固定 N 以模型维度为准（1–64），末尾不足时补归一化零样本并丢弃其输出。固定 H/W 按声明尺寸整框 resize；不凭空推断 `T × width_ratio`，所有真实样本解码完整 T（SAR 由 EOS 截止）。需要保持宽高比或额外 mask 的导出模型必须先匹配这一预处理契约。
 - DBNet 检测在 recognition 裁剪前使用 1.5 unclip 比例扩展收缩后的文字区域，避免字形被裁掉（例如应为 `HELLO` 却只裁出 `E`）。同步与流水线 OCR 都使用修正后的几何，框和识别文字可能因此改变。
 - `test_ocr_batch` 覆盖混合宽度、顺序、固定 N 尾部、输入缓存复用、SAR 文件字典及流水线隔离；其中 ONNX guard 会在 N=1 时真实失败，防止“循环单张”伪装 batching。批量大小的收益取决于裁剪尺寸、模型和执行提供者，需以实际负载测量。
+
+### 可复现合成 OCR 几何研究
+
+经批准的 `hershey-word-v1` 冻结八张 640×384 图片：三张 ordinary，每张六个词（scale 0.85/1/1.15、thickness 2）；三张 dense，每张 24 个词（0.48/0.55/0.62、thickness 1）；另有独立 negative cohort 两张（空白及低对比渐变/几何背景）。OpenCV Hershey SIMPLEX/LINE_8 确定性绘制可见文字。全部 90 个 word-region GT 均来自独立渲染的紧致 ink bounds，而不是模型预测；ignore policy 为 none。不使用外部字体/图片、额外下载，也不新增许可声明。
+
+固定仓库真实训练模型 `ppocr_det.onnx`、`ppocr_rec.onnx`、`ppocr_keys_v1.txt`，类型 `kPPOCRv4`、CPU device 0、recognition confidence 0.125、显式 `ocr_rec_batch_size=1`，比较 legacy/default 2/3/64 与 alternative 1/1/16。从仓库根目录运行，先备好模型资产及正常 CPU 构建依赖：
+
+```sh
+xmake build test_ocr_morphology_dataset
+xmake run test_ocr_morphology_dataset --project-root .
+```
+
+研究在内存中渲染图片，仅向 stdout 输出 JSON，不保存图片。使用 IoU ≥ 0.5 的最大基数一对一二分匹配：匹配为 TP、未匹配 GT 为 FN、未匹配预测为 FP。**所有返回框参与计分，包括识别文字为空的框**；另报 empty-text 数量。recall=TP/GT、precision=TP/(TP+FP)、FP/image=FP/images；分母为零输出 null。低 IoU 的扩展几何、拆分/合并框可能产生 FP/FN，不必然代表幻觉文字。这是合成 word-ink 几何协议，不是生产 OCR 准确率或字符识别质量。
+
+以下 Linux CPU 实测区分不可变旧 #61 baseline（成功、17.59 秒）与新 default/alternative 研究（exit 0、9 秒）。独立比较确认全部八个新默认输出的有序 bbox、完整 UTF-8 text bytes、confidence float bits 与旧 baseline 精确一致，corpus pixels/annotations 和默认 cohort 计数亦相同。新研究还验证调用者参数修改/模型隔离，以及两种参数的 synchronous/staged 一致性。
+
+| Run / cohort | Images | GT | TP | FN | FP | Recall | Precision | FP/image |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Old #61 baseline 2/3/64 / ordinary | 3 | 18 | 12 | 6 | 6 | 0.666667 | 0.666667 | 2 |
+| Old #61 baseline 2/3/64 / dense | 3 | 72 | 0 | 72 | 72 | 0 | 0 | 24 |
+| Old #61 baseline 2/3/64 / negative | 2 | 0 | 0 | 0 | 1 | null | 0 | 0.5 |
+| New default 2/3/64 / ordinary | 3 | 18 | 12 | 6 | 6 | 0.666667 | 0.666667 | 2 |
+| New default 2/3/64 / dense | 3 | 72 | 0 | 72 | 72 | 0 | 0 | 24 |
+| New default 2/3/64 / negative | 2 | 0 | 0 | 0 | 1 | null | 0 | 0.5 |
+| Alternative 1/1/16 / ordinary | 3 | 18 | 18 | 0 | 0 | 1 | 1 | 0 |
+| Alternative 1/1/16 / dense | 3 | 72 | 52 | 20 | 20 | 0.722222 | 0.722222 | 6.66667 |
+| Alternative 1/1/16 / negative | 2 | 0 | 0 | 0 | 1 | null | 0 | 0.5 |
+
+所有 cohort/variant 的 empty-text 数量均为零。alternative 只是实验，不改变默认值，不作为必需改进 gate，也不推荐用于所有真实图片。时长仅是观察，不是性能阈值。形态学边界、CTC/SAR、batch/concurrency mechanics tests 与训练模型 corpus 的用途不同；本研究结果不表示所有测试/平台均已验收。
+
 
 ### 统一服务、OpenAI-like 与 MCP SSE
 

@@ -16,3 +16,11 @@ models:
       det: "assets/ppocr_det.onnx"
       rec: "assets/ppocr_rec.onnx"
       dictionary: "assets/ppocr_keys_v1.txt"
+    # Optional model-construction controls (also supported in legacy ocr entries).
+    # Omit or use null to retain defaults; {} explicitly selects defaults.
+    # Integer ranges: kernel_size 1..32, dilation_iterations 0..8,
+    # min_box_area 0..1048576 (strict pre-unclip bounding-box area > value).
+    # ocr_detection:
+    #   kernel_size: 2
+    #   dilation_iterations: 3
+    #   min_box_area: 64

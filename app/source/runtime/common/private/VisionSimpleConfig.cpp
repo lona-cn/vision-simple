@@ -2,7 +2,9 @@
 
 #include <ylt/struct_yaml/yaml_reader.h>
 
+#include <charconv>
 #include <mutex>
+#include <stdexcept>
 #include <set>
 #include <shared_mutex>
 
@@ -12,6 +14,77 @@ namespace {
 constexpr std::string_view MODEL_CONFIG_PATH = "config/models.yaml";
 std::shared_mutex instance_mutex;
 std::unique_ptr<vision_simple::Config> config_instance{nullptr};
+// Checked input DTOs keep the YAML backend's outer-key policy unchanged.
+using RawDetection = std::optional<std::map<std::string, std::string>>;
+struct RawYOLOModelInfo {
+  std::string name, version;
+  std::string path;
+  RawDetection ocr_detection;
+};
+struct RawOCRModelInfo {
+  std::string name, version;
+  std::string det_path, rec_path, char_dict_path;
+  RawDetection ocr_detection;
+};
+struct RawModelDefinition {
+  std::string task, name, version;
+  std::map<std::string, std::string> files;
+  RawDetection ocr_detection;
+};
+struct RawModelConfig {
+  std::vector<RawYOLOModelInfo> yolo;
+  std::vector<RawOCRModelInfo> ocr;
+  std::vector<RawModelDefinition> models;
+};
+
+std::optional<vision_simple::OCRDetectionOptions> NormalizeDetection(
+    const RawDetection& raw, std::string_view task) {
+  if (!raw) return std::nullopt;
+  if (task != "ocr")
+    throw std::invalid_argument("ocr_detection requires an ocr model");
+  vision_simple::OCRDetectionOptions options;
+  for (const auto& [key, text] : *raw) {
+    int* target = nullptr;
+    if (key == "kernel_size") target = &options.kernel_size;
+    else if (key == "dilation_iterations") target = &options.dilation_iterations;
+    else if (key == "min_box_area") target = &options.min_box_area;
+    else throw std::invalid_argument("unknown ocr_detection key");
+    if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos)
+      throw std::invalid_argument("ocr_detection requires decimal integers");
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), *target);
+    if (error != std::errc{} || end != text.data() + text.size())
+      throw std::invalid_argument("ocr_detection requires decimal integers");
+  }
+  if (!options.IsValid())
+    throw std::invalid_argument("ocr_detection value is outside its range");
+  return options;
+}
+
+vision_simple::ModelConfig NormalizeConfig(RawModelConfig raw) {
+  vision_simple::ModelConfig result;
+  result.models.reserve(raw.models.size());
+  result.yolo.reserve(raw.yolo.size());
+  result.ocr.reserve(raw.ocr.size());
+  for (auto& model : raw.models) {
+    auto options = NormalizeDetection(model.ocr_detection, model.task);
+    result.models.push_back({std::move(model.task), std::move(model.name),
+                             std::move(model.version), std::move(model.files),
+                             std::move(options)});
+  }
+  for (auto& model : raw.yolo) {
+    NormalizeDetection(model.ocr_detection, "yolo");
+    result.yolo.push_back({std::move(model.name), std::move(model.version),
+                           std::move(model.path)});
+  }
+  for (auto& model : raw.ocr) {
+    auto options = NormalizeDetection(model.ocr_detection, "ocr");
+    result.ocr.push_back({std::move(model.name), std::move(model.version),
+                          std::move(model.det_path), std::move(model.rec_path),
+                          std::move(model.char_dict_path), std::move(options)});
+  }
+  return result;
+}
 }  // namespace
 
 vision_simple::Config::Config(ModelConfig model_config) {
@@ -23,11 +96,12 @@ vision_simple::Config::Config(ModelConfig model_config) {
       [&](std::string_view task, std::string_view name,
           std::string_view version,
           std::initializer_list<std::pair<const char*, std::string_view>>
-              files) {
+              files,
+          const std::optional<OCRDetectionOptions>& detection = std::nullopt) {
         for (size_t i = 0; i < canonical_count; ++i) {
           const auto& model = models[i];
           if (model.task != task || model.name != name ||
-              model.version != version)
+              model.version != version || model.ocr_detection != detection)
             continue;
           bool equal = true;
           for (const auto& [role, value] : files) {
@@ -55,14 +129,16 @@ vision_simple::Config::Config(ModelConfig model_config) {
     if (is_projection("ocr", legacy.name, legacy.version,
                       {{"det", legacy.det_path},
                        {"rec", legacy.rec_path},
-                       {"dictionary", legacy.char_dict_path}}))
+                       {"dictionary", legacy.char_dict_path}},
+                      legacy.ocr_detection))
       continue;
     models.push_back({"ocr",
                       std::move(legacy.name),
                       std::move(legacy.version),
                       {{"det", std::move(legacy.det_path)},
                        {"rec", std::move(legacy.rec_path)},
-                       {"dictionary", std::move(legacy.char_dict_path)}}});
+                       {"dictionary", std::move(legacy.char_dict_path)}},
+                      std::move(legacy.ocr_detection)});
   }
   model_config.yolo.clear();
   model_config.ocr.clear();
@@ -75,7 +151,8 @@ vision_simple::Config::Config(ModelConfig model_config) {
       model_config.yolo.push_back({model.name, model.version, file("model")});
     } else if (model.task == "ocr") {
       model_config.ocr.push_back({model.name, model.version, file("det"),
-                                  file("rec"), file("dictionary")});
+                                  file("rec"), file("dictionary"),
+                                  model.ocr_detection});
     }
   }
   model_config_ = std::move(model_config);
@@ -87,8 +164,9 @@ vision_simple::Config::Load(const ConfigLoadOptions& options) noexcept {
     auto data_result = ReadAllString(std::string(options.model_config_path));
     if (!data_result) return std::unexpected(std::move(data_result.error()));
     std::string str{std::move(*data_result)};
-    ModelConfig model_config;
-    struct_yaml::from_yaml(model_config, str);
+    RawModelConfig raw;
+    struct_yaml::from_yaml(raw, str);
+    auto model_config = NormalizeConfig(std::move(raw));
     std::set<std::pair<std::string_view, std::string_view>> identities;
     const auto check_identity =
         [&](std::string_view task,

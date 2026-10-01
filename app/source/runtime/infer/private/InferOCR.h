@@ -20,7 +20,8 @@ class InferOCROrtPaddleImpl final : public InferOCR {
                                  std::unique_ptr<Ort::Session> det,
                                  std::unique_ptr<Ort::Session> rec,
                                  size_t batch_size,
-                                 std::array<int64_t, 4> recognition_shape);
+                                 std::array<int64_t, 4> recognition_shape,
+                                 OCRDetectionOptions detection_options);
   ~InferOCROrtPaddleImpl() override;
 
   OCRModelType model_type() const noexcept override;

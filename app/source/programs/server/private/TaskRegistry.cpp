@@ -71,7 +71,9 @@ VSResult<RegisteredModel> LoadOCR(InferContext& context,
   auto dictionary = RequiredFile(definition, "dictionary");
   if (!dictionary) return std::unexpected(std::move(dictionary.error()));
   auto loaded = InferOCR::Create(context, dictionary->get(), det->get(),
-                                 rec->get(), *version, device);
+                                 rec->get(), *version, device,
+                                 definition.ocr_detection.value_or(
+                                     OCRDetectionOptions{}));
   if (!loaded)
     return MK_VSERROR(
         VisionSimpleErrorCode::kModelError,

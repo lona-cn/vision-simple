@@ -17,8 +17,12 @@
 vision_simple::InferOCR::CreateResult vision_simple::InferOCR::Create(
     InferContext& context, std::map<int, std::string> char_dict,
     std::span<uint8_t> det_data, std::span<uint8_t> rec_data,
-    OCRModelType model_type, size_t device_id) noexcept {
+    OCRModelType model_type, size_t device_id,
+    OCRDetectionOptions detection_options) noexcept {
   try {
+    if (!detection_options.IsValid())
+      return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
+                        "Invalid OCR detection options");
     const auto* postprocessor = FindOCRPostProcessor(model_type);
     if (!postprocessor) {
       return MK_VSERROR(VisionSimpleErrorCode::kUnimplementedError,
@@ -103,7 +107,7 @@ vision_simple::InferOCR::CreateResult vision_simple::InferOCR::Create(
               recognition_shape.begin());
     return std::make_unique<InferOCROrtPaddleImpl>(
         *ort_ctx, model_type, std::move(char_dict), std::move(*det),
-        std::move(*rec), batch_size, recognition_shape);
+        std::move(*rec), batch_size, recognition_shape, detection_options);
   } catch (const cv::Exception& error) {
     return MK_VSERROR(VisionSimpleErrorCode::kModelError, error.what());
   } catch (const Ort::Exception& error) {
@@ -163,6 +167,8 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
   const OCRPostProcessor& postprocessor;
   const size_t batch_size;
   const std::array<int64_t, 4> recognition_shape;
+  const OCRDetectionOptions detection_options;
+  const cv::Mat detection_kernel;
   std::unique_ptr<Ort::Session> det, rec;
   Ort::Allocator det_allocator, rec_allocator;
   std::string det_input_name, det_output_name, rec_input_name, rec_output_name;
@@ -200,12 +206,21 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
                 std::map<int, std::string> char_dict,
                 std::unique_ptr<Ort::Session> det,
                 std::unique_ptr<Ort::Session> rec, size_t batch_size,
-                std::array<int64_t, 4> recognition_shape)
+                std::array<int64_t, 4> recognition_shape,
+                OCRDetectionOptions detection_options)
       : model_type(model_type),
         char_dict(std::move(char_dict)),
         postprocessor(*FindOCRPostProcessor(model_type)),
         batch_size(batch_size),
         recognition_shape(recognition_shape),
+        detection_options(detection_options),
+        detection_kernel(detection_options.dilation_iterations > 0 &&
+                                 detection_options.kernel_size > 1
+                             ? cv::getStructuringElement(
+                                   cv::MORPH_RECT,
+                                   cv::Size(detection_options.kernel_size,
+                                            detection_options.kernel_size))
+                             : cv::Mat{}),
         det(std::move(det)),
         rec(std::move(rec)),
         det_allocator(*this->det, ort_ctx.env_memory_info()),
@@ -264,15 +279,11 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
    * @param output_tensor session.Run()后通过IOBinding获得的张量
    * @param transform 检测预处理的实际缩放与填充
    * @param iou_threshold 矩形重合区域IOU阈值，大于该阈值的将会被去重
-   * @param contours_min_area 轮廓查找最小区域阈值
-   * @param rect_min_area 矩形最小区域阈值
-   * @param kernel_size 膨胀操作的kernel_size
    * @return 找到的所有矩形
    */
   InferResult<std::vector<cv::Rect>> DetPostProcess(
       FrameWorkspace& workspace, const Ort::Value& output_tensor,
-      const LetterboxTransform& transform, double iou_threshold = 0.3f,
-      double rect_min_area = 8 * 8, int kernel_size = 2) {
+      const LetterboxTransform& transform, double iou_threshold = 0.3f) {
     if (!output_tensor.IsTensor()) {
       return MK_VSERROR(VisionSimpleErrorCode::kModelError,
                         "OCR detection output must be a tensor");
@@ -301,11 +312,14 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
     cv::Mat gray{img.rows, img.cols, CV_8UC1};
     img.convertTo(gray, CV_8UC1);
     cv::Mat dilated;
-    cv::Mat kernel = cv::getStructuringElement(
-        cv::MORPH_RECT, cv::Size(kernel_size, kernel_size));
-    cv::dilate(gray, dilated, kernel);
-    for (auto i = 0; i < 2; i++) {
-      cv::dilate(dilated, dilated, kernel);
+    if (detection_options.dilation_iterations > 0 &&
+        detection_options.kernel_size > 1) {
+      // Separate calls preserve legacy even-kernel anchor/border behavior.
+      cv::dilate(gray, dilated, detection_kernel);
+      for (int i = 1; i < detection_options.dilation_iterations; ++i)
+        cv::dilate(dilated, dilated, detection_kernel);
+    } else {
+      dilated = gray;
     }
     std::vector<std::vector<cv::Point>> contours;
 #if (CV_MAJOR_VERSION > 4) || \
@@ -321,7 +335,8 @@ struct vision_simple::InferOCROrtPaddleImpl::Impl {
       // DBNet predicts shrunken text regions. Restore their extent before
       // recognition; the AABB of a round polygon offset expands by distance
       // on every axis. Paddle's DB unclip ratio is 1.5.
-      if (auto rect{boundingRect(contour)}; rect.area() > rect_min_area) {
+      if (auto rect{boundingRect(contour)};
+          rect.area() > detection_options.min_box_area) {
         const auto box = cv::minAreaRect(contour);
         const double perimeter = 2.0 * (box.size.width + box.size.height);
         const auto padding =
@@ -657,10 +672,11 @@ vision_simple::InferOCROrtPaddleImpl::InferOCROrtPaddleImpl(
     InferContextORT& ort_ctx, OCRModelType model_type,
     std::map<int, std::string> char_dict, std::unique_ptr<Ort::Session> det,
     std::unique_ptr<Ort::Session> rec, size_t batch_size,
-    std::array<int64_t, 4> recognition_shape)
+    std::array<int64_t, 4> recognition_shape,
+    OCRDetectionOptions detection_options)
     : impl_(std::make_unique<Impl>(ort_ctx, model_type, std::move(char_dict),
                                    std::move(det), std::move(rec), batch_size,
-                                   recognition_shape)) {}
+                                   recognition_shape, detection_options)) {}
 
 vision_simple::OCRModelType vision_simple::InferOCROrtPaddleImpl::model_type()
     const noexcept {

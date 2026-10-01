@@ -276,6 +276,8 @@ jobs:
           xmake build test_pipeline
           xmake build test_yolo_tasks
           xmake build test_ocr_batch
+          xmake build test_ocr_morphology
+          xmake build test_ocr_morphology_dataset
           xmake build test_subtitle_timeline
           xmake build test_image_codec
           xmake build test_image_budget_service
@@ -300,6 +302,8 @@ jobs:
           xmake run test_pipeline --project-root "$GITHUB_WORKSPACE"
           xmake run test_yolo_tasks --project-root "$GITHUB_WORKSPACE"
           xmake run test_ocr_batch --project-root "$GITHUB_WORKSPACE"
+          xmake run test_ocr_morphology --project-root "$GITHUB_WORKSPACE"
+          xmake run test_ocr_morphology_dataset --project-root "$GITHUB_WORKSPACE"
           xmake run test_image_budget_service --project-root "$GITHUB_WORKSPACE"
 
       - name: Preflight CPU HTTP fixtures
