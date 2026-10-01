@@ -121,8 +121,13 @@ def expect_post(server, route, expectations, body, *, expected=202, headers=None
         if status != 202:
             require(response_headers.get('connection', '').strip() == 'close',
                     'Early Expect rejection did not declare connection close')
-            while receive():
-                pass
+            try:
+                while receive():
+                    pass
+            except ConnectionResetError:
+                # Rejecting an already-uploaded body may close with RST after the full response.
+                if headers_only:
+                    raise
         require(not buffered, 'Expect exchange returned extra response bytes')
         require(time.monotonic() < deadline, 'Expect exchange exceeded the 2s deadline')
 

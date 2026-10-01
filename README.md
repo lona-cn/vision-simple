@@ -612,6 +612,7 @@ v0、原生 v1、OpenAI-like 和 MCP 共用 `InferenceService`，不重复加载
 - 新版本结果含 `structuredContent` 及等价 JSON 文本；旧版本通过文本保留完整结构。执行错误为 `isError:true`，包含稳定 `error.code`、`image_index` 和恢复建议；协议错误使用 JSON-RPC error，字符串/整数请求 ID 不混用。
 - `notifications/cancelled` 的 `requestId` 取消本会话对应请求；断连取消该会话全部任务。取消及超时等待正在运行的原生阶段退出，不强制中断 ORT，也不影响其他会话的相同 ID。
 - POST headers 接纳保留原顺序：可信 Host/Origin（403）、JSON media type/UTF-8 charset（415）、声明正文长度（413）、transport 正在停止（503）、存在且未关闭的会话（404），随后才检查 `Expect`。仅接受单个 `100-continue` token，大小写不敏感、允许两端空格/tab；所有前置检查通过后才发送 `100 Continue`。HTTP parser 交付的其他非空值（包括逗号分隔/重复 token）在 headers 阶段返回 HTTP 417 和固定 `text/plain` 正文 `Unsupported expectation`，不发送 `100 Continue`、不等待上传正文。当前 libhv HTTP/1 parser 丢弃前导空格/tab：线上仅含空格/tab 的 Expect 会变为空值，与省略/空 `Expect` 一样不发送 `100 Continue`、沿用普通正文接收流程。parser 交付非空 `Expect` 时的 HTTP 错误及所有 413 都发送 `Connection: close`；其他拒绝保留原有正文 consume/discard 流程。这些 transport 错误不是原生错误 JSON 或 SSE JSON-RPC error；关闭 POST 连接不会关闭独立 SSE 会话。会话生命周期、执行队列及正文/图像限额不变。
+- TCP 关闭回归在无正文提前拒绝时严格检查完整响应后的 EOF；若客户端已发送正文，则仅在完整拒绝响应及 `Connection: close` 校验通过后接受 EOF 或 TCP RST。收到响应头/完整正文之前的复位、超时或额外响应字节仍然失败。
 - 固定上限：32 会话、2 执行 worker、16 排队任务、每会话 8 个活动工具请求、64 MiB POST 正文、8 MiB 待发送结果/写缓冲。每 15 秒心跳；持续积压写缓冲约 30 秒或无活动请求且 5 分钟无消息时关闭会话，定时检查可能延迟至下一次心跳。超过结果缓冲上限会关闭会话，需缩小批次重新连接。
 - Host 只允许回环地址及显式非 wildcard 的监听 host，端口须匹配；提供 Origin 时必须是相应可信 HTTP(S) authority。MCP 不启用全局宽松 CORS。远程使用需显式绑定可信地址，或由鉴权代理重写为受信任的后端 Host/Origin。
 
