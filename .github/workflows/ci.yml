@@ -306,6 +306,23 @@ jobs:
         if: matrix.run_http
         run: python scripts/check_ci_fixtures.py --project-root "$GITHUB_WORKSPACE" --layer http
 
+      - name: Setup Python for documentation example tests
+        if: matrix.run_http
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install documentation example validators
+        if: matrix.run_http
+        run: python -m pip install -r scripts/requirements-doc-tests.txt
+
+      - name: Validate and run published documentation examples
+        if: matrix.run_http
+        run: |
+          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+          python scripts/test_documentation_validation.py
+          python scripts/test_documentation_examples.py --server "$server" --project-root "$GITHUB_WORKSPACE"
+
       - name: Build and run subtitle FIFO and expiry regression
         if: matrix.run_http
         run: |

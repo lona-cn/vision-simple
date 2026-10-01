@@ -492,7 +492,25 @@ Initialization `params` must include `protocolVersion`, an object `capabilities`
 - Bounds: 32 sessions, 2 execution workers, 16 queued jobs, 8 active tool calls/session, 64 MiB POST body, 8 MiB queued output/socket buffers. Heartbeats occur every15s; sustained buffered writes close after about30s, and sessions with no active work expire after5min without messages (checked on heartbeat ticks). Oversized output closes the session; reconnect with a smaller batch.
 - Host accepts loopback names and an explicitly configured nonwildcard bind host with matching port. Supplied Origin must identify a corresponding trusted HTTP(S) authority. MCP bypasses permissive global CORS. Remote access requires an explicit trusted bind address or an authenticated proxy rewriting trusted backend Host/Origin.
 
-`.mcp.json` targets the local default port. OpenAI SDK `api_key` is not authentication here: use a trusted network or external authenticated proxy for every protocol. Disable SSE proxy buffering and allow long connections. Regression commands appear below; multi-step agent evaluations are in `scripts/mcp_evals.xml`.
+**Claude Code project configuration:** the tracked [.mcp.json.example](.mcp.json.example) defines `mcpServers.vision-simple` with `type: "sse"` and loopback URL `http://127.0.0.1:11451/mcp/sse`. First start the actual server using [Build and run](#build-project), then create a local `.mcp.json` from the repository root:
+
+```powershell
+# Windows PowerShell: copy only when the destination is absent; never overwrite
+if (-not (Test-Path -LiteralPath .mcp.json)) {
+    [System.IO.File]::Copy((Join-Path $PWD '.mcp.json.example'), (Join-Path $PWD '.mcp.json'), $false)
+}
+```
+
+```sh
+# Linux (GNU coreutils): leave existing files, directories and symbolic links untouched
+if [ ! -e .mcp.json ] && [ ! -L .mcp.json ]; then
+    cp -nT .mcp.json.example .mcp.json
+fi
+```
+
+If `.mcp.json` already exists, manually merge only the example's `vision-simple` entry into its existing `mcpServers`, preserving all other configuration; do not replace the file. If your server uses a port other than 11451, change the local entry's URL port, retaining `/mcp/sse`. Copying configuration does not start the server. Open Claude Code at the repository root and approve the project MCP server when prompted.
+
+OpenAI SDK `api_key` is not authentication here: use a trusted network or external authenticated proxy for every protocol. Disable SSE proxy buffering and allow long connections. Regression commands appear below; multi-step agent evaluations are in `scripts/mcp_evals.xml`.
 
 ### C++ migration
 
@@ -629,7 +647,8 @@ Run these commands from the repository root. If you just launched the server as 
 **CI coverage layers:** execution gates and cross-build artifact checks are distinct. These definitions do not claim that a particular hosted run passed.
 
 - Five native `build_tests` rows (Linux GCC Release, Clang/libc++ Release, GCC ASan+UBSan, Windows MSVC CPU and Windows MSVC DirectML) explicitly build and run **14 C++ executables**. Deterministic regressions cover common/conversion/vision helpers, YOLO postprocessing, OCR decoding, configuration, tracking, subtitle timelines and image codecs. A separate CPU fixture-backed step runs inference inputs, pipelines, YOLO tasks, OCR batches and shared-service image budgets using real ONNX sessions, including deliberate failure/invalid models.
-- Only the two CPU `run_http` rows (Linux GCC Release and Windows MSVC CPU Release) also run `test_subtitle_service`, making **15 C++ executables per CPU row**, plus **nine real-server HTTP drivers**: generic HTTP/startup, management security, bounded dispatch, subtitle media, protocol, model registry, tracking with a real detector and image, YOLO tasks and image budgets. Subtitle media requires FFmpeg and a usable font; Windows MP4 decoding uses Media Foundation. Missing prerequisites fail, not skip.
+- Only the two CPU `run_http` rows (Linux GCC Release and Windows MSVC CPU Release) also run `test_subtitle_service`, making **15 C++ executables per CPU row**, plus **nine real-server HTTP drivers**: generic HTTP/startup, management security, bounded dispatch, subtitle media, protocol, model registry, tracking with a real detector and image, YOLO tasks and image budgets. Both rows also run a separate documentation-example driver for full OpenAPI/schema/image validation, exact YOLO/OCR requests, and MCP initialization/tool discovery, making **10 script drivers in total**; that test step uses Python 3.12 and test-only dependencies, adding no server runtime dependency. Subtitle media requires FFmpeg and a usable font; Windows MP4 decoding uses Media Foundation. Missing prerequisites fail, not skip.
+- Documentation validation also includes separate static boundary unit tests for invalid schemas and rejected examples. These are not HTTP/real-server integration drivers and do not increase the HTTP driver count.
 - ARM64 CPU/RKNPU, ARMv7 and RISC-V64 cross rows retain artifact architecture checks; they do not execute those binaries. The DirectML row does not establish GPU/DirectML inference coverage; these CPU tests do not verify real CUDA, TensorRT or RKNPU hardware inference either.
 - Existing release-policy gates remain separate: **2 artifact tests + 11 Docker release tests**. The Docker workflow remains independent; its native CPU container smoke is not proof for every Dockerfile or hardware execution provider.
 
@@ -698,6 +717,29 @@ xmake run test_subtitle_service --project-root .
 The Python 3 standard-library HTTP driver creates isolated configuration, ports and processes; it does not touch an existing port 11451 service. Missing models, dictionaries, images or failure fixtures fail the run rather than count as SKIP.
 
 The management-security driver uses the standard real CPU model/image fixtures and explicitly stages a test-only secret in isolated temporary configuration/process environment, not a production credential. The Windows x64 native driver passed in 85.93 s; this does not verify a Docker/proxy deployment.
+
+**Documentation-example regression:** install the test-only PyYAML, openapi-spec-validator and Pillow dependencies; these add no server runtime dependency. This driver validates the public MCP configuration, the complete OpenAPI 3.0 specification and local references, all schema/media examples, and full decoding of compact base64 images. It then sends the exact documented YOLO/OCR requests to an isolated CPU server process, checking HTTP 200, response schemas and one result per input, and performs MCP initialization and tool discovery. It does not touch an existing port 11451 service. Complete the CPU build, Git LFS download and HTTP fixture preflight above first:
+
+This documentation driver requires Python 3.10 or newer; installing its test dependencies in a virtual environment is recommended.
+
+```powershell
+# Windows: use the native CPU build above; adjust for a custom build directory
+python -m pip install -r scripts/requirements-doc-tests.txt
+$server = 'build/windows/x64/release/vision_simple-server.exe'
+python scripts/test_documentation_validation.py
+python scripts/test_documentation_examples.py --server "$server" --project-root .
+```
+
+```sh
+# Linux: discover the actual native executable from the current xmake configuration
+python3 -m pip install -r scripts/requirements-doc-tests.txt
+server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+python3 scripts/test_documentation_validation.py
+python3 scripts/test_documentation_examples.py --server "$server" --project-root .
+```
+
+Both `--server` and `--project-root` are required for the documentation integration driver `test_documentation_examples.py`; the static boundary unit tests do not start a server.
+
 
 ```powershell
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .

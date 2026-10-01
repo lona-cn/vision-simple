@@ -491,7 +491,25 @@ v0、原生 v1、OpenAI-like 和 MCP 共用 `InferenceService`，不重复加载
 - 固定上限：32 会话、2 执行 worker、16 排队任务、每会话 8 个活动工具请求、64 MiB POST 正文、8 MiB 待发送结果/写缓冲。每 15 秒心跳；持续积压写缓冲约 30 秒或无活动请求且 5 分钟无消息时关闭会话，定时检查可能延迟至下一次心跳。超过结果缓冲上限会关闭会话，需缩小批次重新连接。
 - Host 只允许回环地址及显式非 wildcard 的监听 host，端口须匹配；提供 Origin 时必须是相应可信 HTTP(S) authority。MCP 不启用全局宽松 CORS。远程使用需显式绑定可信地址，或由鉴权代理重写为受信任的后端 Host/Origin。
 
-仓库 `.mcp.json` 指向本地默认端口。OpenAI SDK 的 `api_key` 在本服务中不是认证凭证；三个协议均需可信网络或外部鉴权代理。代理需关闭 SSE 缓冲并允许长连接。验收命令见下方回归章节，多步骤 Agent 验收题见 `scripts/mcp_evals.xml`。
+**Claude Code 项目配置**：仓库提供 [.mcp.json.example](.mcp.json.example)，使用 `mcpServers.vision-simple`、`type: "sse"` 和回环 URL `http://127.0.0.1:11451/mcp/sse`。先按[构建与启动](#构建项目)启动实际服务，再从仓库根目录创建本地 `.mcp.json`：
+
+```powershell
+# Windows PowerShell：仅在目标不存在时复制，不覆盖已有配置
+if (-not (Test-Path -LiteralPath .mcp.json)) {
+    [System.IO.File]::Copy((Join-Path $PWD '.mcp.json.example'), (Join-Path $PWD '.mcp.json'), $false)
+}
+```
+
+```sh
+# Linux（GNU coreutils）：已有文件、目录或符号链接时不复制
+if [ ! -e .mcp.json ] && [ ! -L .mcp.json ]; then
+    cp -nT .mcp.json.example .mcp.json
+fi
+```
+
+已有 `.mcp.json` 时，只手动合并示例中的 `vision-simple` 条目到现有 `mcpServers`，保留其他配置，不要整文件覆盖。若实际服务端口不是 11451，修改本地条目的 URL 端口，保留 `/mcp/sse` 路径；复制配置不会启动服务。在仓库根目录打开 Claude Code 并按客户端提示批准项目 MCP 服务。
+
+OpenAI SDK 的 `api_key` 在本服务中不是认证凭证；三个协议均需可信网络或外部鉴权代理。代理需关闭 SSE 缓冲并允许长连接。验收命令见下方回归章节，多步骤 Agent 验收题见 `scripts/mcp_evals.xml`。
 
 ### C++ 迁移说明
 
@@ -631,7 +649,8 @@ xmake build server
 **CI 覆盖分层**：实际执行门控与交叉编译产物检查彼此独立；下列描述是覆盖范围，不代表某次托管运行已经通过。
 
 - 五个原生 `build_tests` 行（Linux GCC Release、Clang/libc++ Release、GCC ASan+UBSan、Windows MSVC CPU 和 Windows MSVC DirectML）显式构建并运行 **14 个 C++ 可执行文件**。确定性回归覆盖 common/conversion/vision helper、YOLO 后处理、OCR 解码、配置、跟踪、字幕时间线与图像 codec；独立的 CPU fixture-backed 步骤使用真实 ONNX session 运行推理输入、pipeline、YOLO 多任务、OCR batch 与共享服务图像预算，包含刻意构造的故障/无效模型。
-- 仅两个 CPU `run_http` 行（Linux GCC Release 与 Windows MSVC CPU Release）额外运行 `test_subtitle_service`，即**每个 CPU 行 15 个 C++ 可执行文件**，并运行 **9 个真实服务 HTTP driver**：通用 HTTP/启动、管理安全、有界调度、字幕媒体、协议、模型注册、真实检测器和图像驱动的跟踪、YOLO 多任务与图像预算。字幕媒体需要 FFmpeg 和可用字体；Windows MP4 解码使用 Media Foundation。缺少前置条件即失败，不跳过。
+- 仅两个 CPU `run_http` 行（Linux GCC Release 与 Windows MSVC CPU Release）额外运行 `test_subtitle_service`，即**每个 CPU 行 15 个 C++ 可执行文件**，并运行 **9 个真实服务 HTTP driver**：通用 HTTP/启动、管理安全、有界调度、字幕媒体、协议、模型注册、真实检测器和图像驱动的跟踪、YOLO 多任务与图像预算。两行还运行独立的文档示例 driver，校验完整 OpenAPI/schema/图片、原样 YOLO/OCR 请求与 MCP 初始化/工具发现，合计 **10 个脚本 driver**；该测试步骤使用 Python 3.12 和仅测试用依赖，不新增服务运行依赖。字幕媒体需要 FFmpeg 和可用字体；Windows MP4 解码使用 Media Foundation。缺少前置条件即失败，不跳过。
+- 文档校验还包含独立的静态边界单元测试，用于检查无效 schema 与示例拒绝路径；它不属于上述 HTTP/真实服务集成 driver，不增加 HTTP driver 数量。
 - ARM64 CPU/RKNPU、ARMv7 与 RISC-V64 交叉编译行保留产物架构检查，不执行目标二进制。DirectML 行不证明 GPU/DirectML 推理覆盖；这些 CPU 测试也不证明 CUDA、TensorRT 或 RKNPU 真实硬件推理。
 - 既有发布策略门控独立保留：**2 个产物测试 + 11 个 Docker 发布测试**。Docker 工作流保持独立；其原生 CPU 容器 smoke 不代表全部 Dockerfile 或硬件执行提供程序已经验证。
 
@@ -700,6 +719,29 @@ xmake run test_subtitle_service --project-root .
 HTTP 回归使用 Python 3 标准库，独立创建临时配置、端口和进程，不触碰现有 11451 服务。模型、字典、图片和小型 ONNX 故障 fixture 必须存在；缺失即失败，不记为 SKIP。
 
 管理安全 driver 使用标准真实 CPU 模型/图像 fixture，在隔离临时配置/进程环境中显式提供仅测试用秘密，不是生产凭证。Windows x64 原生 driver 在 85.93 秒通过；不代表 Docker/代理部署已验证。
+
+**文档示例回归**：另需仅用于测试的 PyYAML、openapi-spec-validator 和 Pillow；不会新增服务运行依赖。下列 driver 校验公开 MCP 配置、完整 OpenAPI 3.0 规范与本地引用、全部 schema/media 示例和紧凑 base64 图片的完整解码；随后在独立 CPU 服务进程中原样发送文档中的 YOLO/OCR 请求，检查 HTTP 200、响应 schema 及输入/结果数量，并执行 MCP 初始化与工具发现。不触碰已有 11451 服务。先完成上面的 CPU 构建、Git LFS 下载与 HTTP fixture 预检，再运行：
+
+此文档 driver 需要 Python 3.10 或更高版本；建议在虚拟环境中安装测试依赖。
+
+```powershell
+# Windows：使用上文原生 CPU 构建产物；自定义目录请改为实际路径
+python -m pip install -r scripts/requirements-doc-tests.txt
+$server = 'build/windows/x64/release/vision_simple-server.exe'
+python scripts/test_documentation_validation.py
+python scripts/test_documentation_examples.py --server "$server" --project-root .
+```
+
+```sh
+# Linux：从当前 xmake 配置查询实际原生可执行文件
+python3 -m pip install -r scripts/requirements-doc-tests.txt
+server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+python3 scripts/test_documentation_validation.py
+python3 scripts/test_documentation_examples.py --server "$server" --project-root .
+```
+
+文档集成 driver `test_documentation_examples.py` 的 `--server` 和 `--project-root` 都是必填参数；静态边界单元测试不需要启动服务。
+
 
 ```powershell
 python scripts/test_http_regression.py --server build/windows/x64/release/vision_simple-server.exe --project-root .
