@@ -1,0 +1,516 @@
+{
+  "issue": 64,
+  "investigation": "INV-02",
+  "source_commit": "45483242c948b1752e146a5d36b735bfce821eef",
+  "image_sha256": "a7159a90e9985acf12bb95d9184422f9db556e10a7ed8ad6f4c94f464006ad0d",
+  "toolchain": {
+    "compiler": "Debian GCC 16.2.0-3",
+    "xmake": "3.1.1+20260905",
+    "os": "Debian forky/sid x86_64",
+    "glibc": "2.43-6",
+    "ort": "1.22.0 CPU",
+    "system_packages": "libc6:amd64\t2.43-6\nlibgcc-s1:amd64\t16.2.0-3\nlibstdc++6:amd64\t16.2.0-3\nzlib1g:amd64\t1:1.3.dfsg+really1.3.2-3\n"
+  },
+  "actual_xmake_configuration": "{\n    __toolchains_linux_x86_64 = {\n        \"gcc\"\n    },\n    __toolchains_linux_x86_64_host = {\n        \"envs\",\n        \"gcc\",\n        \"yasm\",\n        \"nasm\",\n        \"fasm\",\n        \"cuda\",\n        \"go\",\n        \"rust\",\n        \"swift\",\n        \"gfortran\",\n        \"fpc\"\n    },\n    arch = \"x86_64\",\n    builddir = \"build/release-linux\",\n    ccache = true,\n    host = \"linux\",\n    kind = \"binary\",\n    ldflags = \"-Wl,--no-as-needed -lz\",\n    mode = \"release\",\n    ndk_stdcxx = true,\n    plat = \"linux\",\n    runtimes = \"stdc++_static\",\n    toolchain = \"gcc\",\n    with_cuda = false,\n    with_rknpu = false,\n    with_tensorrt = false\n}",
+  "configure_encoding": "Verbatim observed /src/.xmake/linux/x86_64/xmake.conf, not a reconstructed CLI",
+  "commands": {
+    "target_queries": [
+      [
+        "xmake",
+        "lua",
+        "-q",
+        "-c",
+        "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))"
+      ],
+      [
+        "xmake",
+        "lua",
+        "-q",
+        "-c",
+        "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('runtime'):targetfile()))"
+      ]
+    ],
+    "pack": [
+      "python3",
+      "/src/scripts/release_artifacts.py",
+      "pack",
+      "--server",
+      "/src/build/release-linux/linux/x86_64/release/vision_simple-server",
+      "--runtime",
+      "/src/build/release-linux/linux/x86_64/release/libvsrt_linux_x86_64_release.a",
+      "--output",
+      "/vision-simple-soname01/truthful/vision_simple-linux-x86_64-gcc16-cpu-soname01-UTF8.zip",
+      "--platform",
+      "linux",
+      "--arch",
+      "x86_64",
+      "--variant",
+      "gcc16-cpu",
+      "--commit",
+      "45483242c948b1752e146a5d36b735bfce821eef",
+      "--timestamp",
+      "2026-10-01T12:45:56.448503+00:00",
+      "--build-name",
+      "Local SONAME investigation / Debian GCC 16.2.0 / CPU Release",
+      "--xmake-version",
+      "3.1.1+20260905",
+      "--configure",
+      "{\n    __toolchains_linux_x86_64 = {\n        \"gcc\"\n    },\n    __toolchains_linux_x86_64_host = {\n        \"envs\",\n        \"gcc\",\n        \"yasm\",\n        \"nasm\",\n        \"fasm\",\n        \"cuda\",\n        \"go\",\n        \"rust\",\n        \"swift\",\n        \"gfortran\",\n        \"fpc\"\n    },\n    arch = \"x86_64\",\n    builddir = \"build/release-linux\",\n    ccache = true,\n    host = \"linux\",\n    kind = \"binary\",\n    ldflags = \"-Wl,--no-as-needed -lz\",\n    mode = \"release\",\n    ndk_stdcxx = true,\n    plat = \"linux\",\n    runtimes = \"stdc++_static\",\n    toolchain = \"gcc\",\n    with_cuda = false,\n    with_rknpu = false,\n    with_tensorrt = false\n}"
+    ],
+    "dependency_resolution": [
+      "cwd=/vision-simple-soname01/truthful/extracted",
+      "env PATH=/usr/bin:/bin ldd /vision-simple-soname01/truthful/extracted/vision_simple-server"
+    ],
+    "runtime": "Python os.chroot(/vision-simple-soname01/truthful/rootfs); os.chdir(/release); exec /release/vision_simple-server with runtime_environment; GET http://127.0.0.1:11451/v0/infer/models; SIGINT; wait",
+    "analysis": [
+      "readelf -d <server and each copied DSO>",
+      "readelf --version-info <server and each copied DSO>",
+      "readelf -p .comment <server>",
+      "dpkg-query -S <each resolved system dependency>"
+    ]
+  },
+  "pack_exit_code": 0,
+  "artifacts": {
+    "server": {
+      "filename": "vision_simple-server",
+      "sha256": "d31c9645b859e900641e5e407278e3c158c152518fe234b7e074e76b2cbdc154",
+      "size": 19063312,
+      "elf": {
+        "name": "vision_simple-server",
+        "type": "file",
+        "link_target": null,
+        "sha256": "d31c9645b859e900641e5e407278e3c158c152518fe234b7e074e76b2cbdc154",
+        "SONAME": [],
+        "DT_NEEDED": [
+          "libonnxruntime.so.1",
+          "libz.so.1",
+          "libm.so.6",
+          "libgcc_s.so.1",
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "RUNPATH": [
+          "."
+        ]
+      }
+    },
+    "runtime": {
+      "path": "libvsrt_linux_x86_64_release.a",
+      "size": 3403590,
+      "sha256": "0c2a34b5b2a9de273008b1584f45ca600225cadacd1655b6f6dceec8c867b357"
+    },
+    "collector": {
+      "filename": "scripts/release_artifacts.py",
+      "sha256": "05c65afb24eed76867c36905af7e258cbcd578ac5303d1575b955092a6a3b954"
+    },
+    "archive": {
+      "filename": "vision_simple-linux-x86_64-gcc16-cpu-soname01-UTF8.zip",
+      "sha256": "47bd2d33a1e498dd05b24b0da1205fb96bcccc24f2f5f3e4cdb804537abecc74",
+      "timestamp": "2026-10-01T12:45:56.448503+00:00",
+      "build_name": "Local SONAME investigation / Debian GCC 16.2.0 / CPU Release",
+      "variant": "gcc16-cpu",
+      "entry_count": 85,
+      "payload_hashes_verified": 84
+    }
+  },
+  "copied_libraries": [
+    {
+      "name": "libonnxruntime.so",
+      "type": "file",
+      "link_target": null,
+      "sha256": "3da6146e14e7b8aaec625dde11d6114c7457c87a5f93d744897da8781e35c673",
+      "SONAME": [
+        "libonnxruntime.so.1"
+      ],
+      "DT_NEEDED": [
+        "libdl.so.2",
+        "librt.so.1",
+        "libpthread.so.0",
+        "libstdc++.so.6",
+        "libm.so.6",
+        "libgcc_s.so.1",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "RUNPATH": [
+        "$ORIGIN"
+      ],
+      "size": 21042416
+    },
+    {
+      "name": "libonnxruntime.so.1.22.0",
+      "type": "file",
+      "link_target": null,
+      "sha256": "3da6146e14e7b8aaec625dde11d6114c7457c87a5f93d744897da8781e35c673",
+      "SONAME": [
+        "libonnxruntime.so.1"
+      ],
+      "DT_NEEDED": [
+        "libdl.so.2",
+        "librt.so.1",
+        "libpthread.so.0",
+        "libstdc++.so.6",
+        "libm.so.6",
+        "libgcc_s.so.1",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "RUNPATH": [
+        "$ORIGIN"
+      ],
+      "size": 21042416
+    },
+    {
+      "name": "libonnxruntime_providers_shared.so",
+      "type": "file",
+      "link_target": null,
+      "sha256": "e4706ea02be3999167f000bb1ff7391c86e95d2d96f78eb33225c14b172a8451",
+      "SONAME": [
+        "libonnxruntime_providers_shared.so"
+      ],
+      "DT_NEEDED": [
+        "libstdc++.so.6",
+        "libm.so.6",
+        "libgcc_s.so.1",
+        "libc.so.6"
+      ],
+      "RUNPATH": [],
+      "size": 14632
+    },
+    {
+      "name": "libonnxruntime.so.1",
+      "type": "file",
+      "link_target": null,
+      "sha256": "3da6146e14e7b8aaec625dde11d6114c7457c87a5f93d744897da8781e35c673",
+      "SONAME": [
+        "libonnxruntime.so.1"
+      ],
+      "DT_NEEDED": [
+        "libdl.so.2",
+        "librt.so.1",
+        "libpthread.so.0",
+        "libstdc++.so.6",
+        "libm.so.6",
+        "libgcc_s.so.1",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "RUNPATH": [
+        "$ORIGIN"
+      ],
+      "size": 21042416
+    }
+  ],
+  "xmake_package_libraries": [
+    {
+      "path": "/root/.xmake/packages/o/onnxruntime/1.22.0/457f7ceb14e6414781398059bb516d98/lib/libonnxruntime.so",
+      "type": "file",
+      "link_target": null,
+      "resolved": "/root/.xmake/packages/o/onnxruntime/1.22.0/457f7ceb14e6414781398059bb516d98/lib/libonnxruntime.so",
+      "sha256": "3da6146e14e7b8aaec625dde11d6114c7457c87a5f93d744897da8781e35c673"
+    },
+    {
+      "path": "/root/.xmake/packages/o/onnxruntime/1.22.0/457f7ceb14e6414781398059bb516d98/lib/libonnxruntime.so.1.22.0",
+      "type": "file",
+      "link_target": null,
+      "resolved": "/root/.xmake/packages/o/onnxruntime/1.22.0/457f7ceb14e6414781398059bb516d98/lib/libonnxruntime.so.1.22.0",
+      "sha256": "3da6146e14e7b8aaec625dde11d6114c7457c87a5f93d744897da8781e35c673"
+    },
+    {
+      "path": "/root/.xmake/packages/o/onnxruntime/1.22.0/457f7ceb14e6414781398059bb516d98/lib/libonnxruntime_providers_shared.so",
+      "type": "file",
+      "link_target": null,
+      "resolved": "/root/.xmake/packages/o/onnxruntime/1.22.0/457f7ceb14e6414781398059bb516d98/lib/libonnxruntime_providers_shared.so",
+      "sha256": "e4706ea02be3999167f000bb1ff7391c86e95d2d96f78eb33225c14b172a8451"
+    },
+    {
+      "path": "/root/.xmake/packages/o/onnxruntime/1.22.0/457f7ceb14e6414781398059bb516d98/lib/libonnxruntime.so.1",
+      "type": "file",
+      "link_target": null,
+      "resolved": "/root/.xmake/packages/o/onnxruntime/1.22.0/457f7ceb14e6414781398059bb516d98/lib/libonnxruntime.so.1",
+      "sha256": "3da6146e14e7b8aaec625dde11d6114c7457c87a5f93d744897da8781e35c673"
+    }
+  ],
+  "archive_entry_names": [
+    "assets/hd2-yolo11n-fp16.onnx",
+    "assets/hd2-yolo11n-fp16.pt",
+    "assets/hd2-yolo11n-fp32.onnx",
+    "assets/hd2.avi",
+    "assets/hd2.png",
+    "assets/http_yolo_reference.json",
+    "assets/ocr_det_batch.onnx",
+    "assets/ocr_det_box.onnx",
+    "assets/ocr_det_runtime_failure.onnx",
+    "assets/ocr_rec_batch.onnx",
+    "assets/ocr_rec_batch_required.onnx",
+    "assets/ocr_rec_fixed_batch.onnx",
+    "assets/ocr_rec_runtime_failure.onnx",
+    "assets/ocr_rec_sar_batch.onnx",
+    "assets/ocr_sar_dictionary.txt",
+    "assets/ppocr_det.onnx",
+    "assets/ppocr_keys_v1.txt",
+    "assets/ppocr_rec.onnx",
+    "assets/reliability/yolo26_detect_conflicting_mode.onnx",
+    "assets/reliability/yolo26_detect_e2e.onnx",
+    "assets/reliability/yolo26_detect_e2e_fp16.onnx",
+    "assets/reliability/yolo26_detect_embedded_nms.onnx",
+    "assets/reliability/yolo26_detect_empty_args.onnx",
+    "assets/reliability/yolo26_detect_invalid_mode.onnx",
+    "assets/reliability/yolo26_detect_missing_args.onnx",
+    "assets/reliability/yolo26_detect_missing_mode.onnx",
+    "assets/reliability/yolo26_detect_missing_task.onnx",
+    "assets/reliability/yolo26_detect_raw.onnx",
+    "assets/reliability/yolo26_detect_raw_conflict.onnx",
+    "assets/reliability/yolo26_detect_raw_fp16.onnx",
+    "assets/reliability/yolo26_detect_threshold_e2e.onnx",
+    "assets/reliability/yolo26_detect_threshold_raw.onnx",
+    "assets/reliability/yolo26_detect_wrong_task.onnx",
+    "assets/reliability/yolo26_obb_bad_extra.onnx",
+    "assets/reliability/yolo26_obb_e2e.onnx",
+    "assets/reliability/yolo26_obb_e2e_fp16.onnx",
+    "assets/reliability/yolo26_obb_raw.onnx",
+    "assets/reliability/yolo26_obb_raw_fp16.onnx",
+    "assets/reliability/yolo26_pose_bad_class.onnx",
+    "assets/reliability/yolo26_pose_bad_extra.onnx",
+    "assets/reliability/yolo26_pose_conflicting_mode.onnx",
+    "assets/reliability/yolo26_pose_e2e.onnx",
+    "assets/reliability/yolo26_pose_e2e_fp16.onnx",
+    "assets/reliability/yolo26_pose_embedded_nms.onnx",
+    "assets/reliability/yolo26_pose_missing_kpt_shape.onnx",
+    "assets/reliability/yolo26_pose_missing_mode.onnx",
+    "assets/reliability/yolo26_pose_missing_task.onnx",
+    "assets/reliability/yolo26_pose_out_of_range_class.onnx",
+    "assets/reliability/yolo26_pose_raw.onnx",
+    "assets/reliability/yolo26_pose_raw_fp16.onnx",
+    "assets/reliability/yolo26_seg_bad_proto.onnx",
+    "assets/reliability/yolo26_seg_e2e.onnx",
+    "assets/reliability/yolo26_seg_e2e_fp16.onnx",
+    "assets/reliability/yolo26_seg_raw.onnx",
+    "assets/reliability/yolo26_seg_raw_fp16.onnx",
+    "assets/reliability/yolo_names_detect.onnx",
+    "assets/reliability/yolo_names_escape_invalid.onnx",
+    "assets/reliability/yolo_names_invalid.onnx",
+    "assets/reliability/yolo_names_obb.onnx",
+    "assets/reliability/yolo_names_unclosed.onnx",
+    "assets/reliability/yolo_obb.onnx",
+    "assets/reliability/yolo_obb_fp16.onnx",
+    "assets/reliability/yolo_pose.onnx",
+    "assets/reliability/yolo_pose_d2.onnx",
+    "assets/reliability/yolo_pose_end2end.onnx",
+    "assets/reliability/yolo_pose_end2end_args.onnx",
+    "assets/reliability/yolo_pose_fp16.onnx",
+    "assets/reliability/yolo_pose_nan.onnx",
+    "assets/reliability/yolo_pose_nms_direct.onnx",
+    "assets/reliability/yolo_pose_nms_json.onnx",
+    "assets/reliability/yolo_pose_nms_python.onnx",
+    "assets/reliability/yolo_seg.onnx",
+    "assets/reliability/yolo_seg_fp16.onnx",
+    "assets/static/index.html",
+    "assets/yolo_runtime_failure.onnx",
+    "config/log.properties",
+    "config/models.yaml",
+    "config/server.yaml",
+    "libonnxruntime.so",
+    "libonnxruntime.so.1",
+    "libonnxruntime.so.1.22.0",
+    "libonnxruntime_providers_shared.so",
+    "libvsrt_linux_x86_64_release.a",
+    "vision_simple-server",
+    "build-info.json"
+  ],
+  "required_abi_versions": {
+    "vision_simple-server": [
+      "GLIBC_2.14",
+      "GLIBC_2.17",
+      "GLIBC_2.18",
+      "GLIBC_2.2.5",
+      "GLIBC_2.25",
+      "GLIBC_2.26",
+      "GLIBC_2.27",
+      "GLIBC_2.29",
+      "GLIBC_2.3",
+      "GLIBC_2.3.2",
+      "GLIBC_2.3.4",
+      "GLIBC_2.32",
+      "GLIBC_2.33",
+      "GLIBC_2.34",
+      "GLIBC_2.36",
+      "GLIBC_2.38",
+      "GLIBC_2.4",
+      "GLIBC_2.43",
+      "GLIBC_2.6",
+      "GLIBC_2.7",
+      "GLIBC_2.9"
+    ],
+    "libonnxruntime.so.1": [
+      "CXXABI_1.3",
+      "CXXABI_1.3.11",
+      "CXXABI_1.3.2",
+      "CXXABI_1.3.5",
+      "CXXABI_1.3.7",
+      "CXXABI_1.3.8",
+      "CXXABI_1.3.9",
+      "GLIBCXX_3.4",
+      "GLIBCXX_3.4.11",
+      "GLIBCXX_3.4.14",
+      "GLIBCXX_3.4.15",
+      "GLIBCXX_3.4.17",
+      "GLIBCXX_3.4.18",
+      "GLIBCXX_3.4.19",
+      "GLIBCXX_3.4.20",
+      "GLIBCXX_3.4.21",
+      "GLIBCXX_3.4.22",
+      "GLIBCXX_3.4.9",
+      "GLIBC_2.14",
+      "GLIBC_2.16",
+      "GLIBC_2.17",
+      "GLIBC_2.2.5",
+      "GLIBC_2.27",
+      "GLIBC_2.3",
+      "GLIBC_2.3.3",
+      "GLIBC_2.3.4",
+      "GLIBC_2.4",
+      "GLIBC_2.6"
+    ]
+  },
+  "system_dependency_count": 9,
+  "system_dependencies": [
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libz.so.1",
+      "resolved": "/usr/lib/x86_64-linux-gnu/libz.so.1.3.2",
+      "sha256": "032754aa5f865b32034dbc2e6b70153f29f38cf182dc41fa36aa469143fa53ca",
+      "owner": "zlib1g:amd64: /usr/lib/x86_64-linux-gnu/libz.so.1.3.2\n"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+      "resolved": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+      "sha256": "d765d99423b9aba7fc34b7af48d91aeecc70bdc0ae6233a9a7ba60d4c6d3c13d",
+      "owner": "libc6:amd64: /usr/lib/x86_64-linux-gnu/libm.so.6\n"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+      "resolved": "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+      "sha256": "7648d44539f19f2f22178616d5279a48c350edb7756f7075ce8114624f22c821",
+      "owner": "libgcc-s1:amd64: /usr/lib/x86_64-linux-gnu/libgcc_s.so.1\n"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+      "resolved": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+      "sha256": "5f7640b3c2dd8885f594ff0d55e2891889c7d4adb4e2b2de97c56264c07982cb",
+      "owner": "libc6:amd64: /usr/lib/x86_64-linux-gnu/libc.so.6\n"
+    },
+    {
+      "path": "/lib64/ld-linux-x86-64.so.2",
+      "resolved": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+      "sha256": "8ba1d385b2689fade277dca3639cf9ef0355722bcb1aabdc5f5f0ace75746ccc",
+      "owner": "libc6:amd64: /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2\n"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libdl.so.2",
+      "resolved": "/usr/lib/x86_64-linux-gnu/libdl.so.2",
+      "sha256": "32c2c2b7723a23cfe1837017925425e1148a5de0fbbb29cfe84a9f24502a41f4",
+      "owner": "libc6:amd64: /usr/lib/x86_64-linux-gnu/libdl.so.2\n"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/librt.so.1",
+      "resolved": "/usr/lib/x86_64-linux-gnu/librt.so.1",
+      "sha256": "b0ece07429f6c08b987df4f3d19d060e6e05061798951d92e47208702a73caf6",
+      "owner": "libc6:amd64: /usr/lib/x86_64-linux-gnu/librt.so.1\n"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libpthread.so.0",
+      "resolved": "/usr/lib/x86_64-linux-gnu/libpthread.so.0",
+      "sha256": "8b36a37e74791184ed90f1eb968fad1910c96793d5b3e7e8219ee3ee382ee336",
+      "owner": "libc6:amd64: /usr/lib/x86_64-linux-gnu/libpthread.so.0\n"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+      "resolved": "/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.36",
+      "sha256": "ea10cca8a089638b5dffc949955a2d8eabdc03639f843abac3e068f3e7b028c0",
+      "owner": "libstdc++6:amd64: /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.36\n"
+    }
+  ],
+  "runtime_environment": {
+    "PATH": "/usr/bin:/bin",
+    "HOME": "/tmp",
+    "LD_DEBUG": "libs,files"
+  },
+  "runtime_root": "/vision-simple-soname01/truthful/rootfs",
+  "runtime_cwd": "/vision-simple-soname01/truthful/rootfs/release",
+  "loaded_files": [
+    "/vision-simple-soname01/truthful/rootfs/lib64/ld-linux-x86-64.so.2",
+    "/vision-simple-soname01/truthful/rootfs/release/libonnxruntime.so.1",
+    "/vision-simple-soname01/truthful/rootfs/release/vision_simple-server",
+    "/vision-simple-soname01/truthful/rootfs/usr/lib/x86_64-linux-gnu/libc.so.6",
+    "/vision-simple-soname01/truthful/rootfs/usr/lib/x86_64-linux-gnu/libdl.so.2",
+    "/vision-simple-soname01/truthful/rootfs/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+    "/vision-simple-soname01/truthful/rootfs/usr/lib/x86_64-linux-gnu/libm.so.6",
+    "/vision-simple-soname01/truthful/rootfs/usr/lib/x86_64-linux-gnu/libpthread.so.0",
+    "/vision-simple-soname01/truthful/rootfs/usr/lib/x86_64-linux-gnu/librt.so.1",
+    "/vision-simple-soname01/truthful/rootfs/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+    "/vision-simple-soname01/truthful/rootfs/usr/lib/x86_64-linux-gnu/libz.so.1"
+  ],
+  "response": {
+    "status": 200,
+    "headers": {
+      "Access-Control-Allow-Origin": "*",
+      "Connection": "close",
+      "Content-Length": "51",
+      "Content-Type": "application/json",
+      "Date": "Thu, 01 Oct 2026 12:46:05 GMT",
+      "Server": "libhv/1.3.3"
+    },
+    "body": "{\"ocr\":[\"ppocr-v4\"],\"yolo\":[\"hd2-fp16\",\"hd2-fp32\"]}"
+  },
+  "shutdown": {
+    "signal": "SIGINT",
+    "exit_code": 2,
+    "forced_kill": false
+  },
+  "raw_log_sha256": "379eb8ff20d7c0fde3b1e9c3717ec602df10d8022839ed06519e1f54b4469c46",
+  "raw_proof_sha256": "b2bac05a1bdd054f56e46fd8d7a784017083f87b898f9b98fa1f0ecceeba1b48",
+  "missing_required_archive_aliases": [],
+  "conclusion": "No missing required SONAME alias in this actual ORT 1.22 CPU release sample; no collector or test modification justified.",
+  "observed_errors": [
+    {
+      "stage": "Initial ldd from outside release cwd",
+      "error": "libonnxruntime.so.1 => not found",
+      "cause": "Server RUNPATH is dot; archive contains required file; correct release cwd resolves it."
+    },
+    {
+      "stage": "Initial minimal rootfs closure",
+      "error": "libdl.so.2 absent",
+      "cause": "Harness copied only direct server dependencies, not ORT transitive OS dependencies; full nine-system-file closure succeeds."
+    },
+    {
+      "stage": "Windows raw proof export",
+      "error": "operation not permitted copying dev/null",
+      "cause": "Device node cannot export to Windows C filesystem; individual portable evidence files and archive extracted successfully; actual rootfs retained in owned container."
+    },
+    {
+      "stage": "Runtime warning",
+      "error": "log4cplus Failed to open file logs/vision-simple.log",
+      "cause": "No logs directory in archive; control response succeeds; no warning suppression or unrelated fix."
+    }
+  ],
+  "initial_metadata_error": "Initial parent raw archive used GCC14/xmake2.9.7 matrix labels. It is retained as mislabelled initial evidence; only the truthful archive above is selected.",
+  "bounds": [
+    "Actual reused GCC16.2/xmake3.1.1 CPU Linux x86_64 image only.",
+    "No Ubuntu24.04 GCC14 CI equivalence claimed.",
+    "No cross-architecture, GPU hardware, GPU provider execution or republished release claimed.",
+    "Rootfs had no /src, /app, SDK/package cache, LD_LIBRARY_PATH or mounts."
+  ],
+  "source_changes": [],
+  "release_regressions": {
+    "python": "Python 3.14.4 (Windows)",
+    "commands": [
+      "python -B -m unittest discover -s scripts -p test_release_artifacts.py -v",
+      "python -B -m unittest discover -s scripts -p test_docker_release.py -v"
+    ],
+    "archive_tests_passed": 2,
+    "docker_release_tests_passed": 11,
+    "failed": 0,
+    "skipped": 0,
+    "scope": "Existing packaging/publication-policy regression suites; isolated ELF startup is recorded separately above."
+  }
+}
