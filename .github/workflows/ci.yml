@@ -1,193 +1,38 @@
 name: CI
+run-name: ASan evidence / ${{ github.ref_name }} / ${{ github.run_id }}
 
 on:
-  push:
-    branches: [main, dev]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: asan-evidence-b42dc07-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
 
 jobs:
-  release-context:
-    name: Prepare release context
+  asan-diagnostic:
+    name: Linux x86_64 / GCC 14 / ASan + UBSan evidence
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/release-asan-b42dc07'
     runs-on: ubuntu-24.04
-    outputs:
-      release_date: ${{ steps.release.outputs.release_date }}
-      release_time: ${{ steps.release.outputs.release_time }}
-      release_timestamp: ${{ steps.release.outputs.release_timestamp }}
-      release_tag: ${{ steps.release.outputs.release_tag }}
-    steps:
-      - name: Generate release identifiers
-        id: release
-        run: |
-          timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          release_date="${timestamp:0:4}${timestamp:5:2}${timestamp:8:2}"
-          release_time="${timestamp:11:2}${timestamp:14:2}"
-          release_tag="build-${release_date}-${release_time}-${GITHUB_SHA:0:8}-r${GITHUB_RUN_ATTEMPT}"
-          {
-            printf 'release_date=%s\n' "$release_date"
-            printf 'release_time=%s\n' "$release_time"
-            printf 'release_timestamp=%s\n' "$timestamp"
-            printf 'release_tag=%s\n' "$release_tag"
-          } >> "$GITHUB_OUTPUT"
-
-  build-and-test:
-    name: ${{ matrix.name }}
-    needs: release-context
-    runs-on: ${{ matrix.os }}
     timeout-minutes: 240
     strategy:
-      fail-fast: false
-      max-parallel: 6
       matrix:
         include:
-          - name: Linux x86_64 / GCC 14 / Release
-            os: ubuntu-24.04
-            cache_key: linux-x86_64-gcc14-release
-            package_key: linux-x86_64-gcc14-release-cpu
-            policy: build.ccache:y
-            apt_packages: g++-14 libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel ffmpeg fonts-dejavu-core
-            configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 -m release --with_cuda=n --with_tensorrt=n --with_rknpu=n
-            build_tests: true
-            run_http: true
-            verify_pattern: ''
-            publish: true
-            release_platform: linux
-            release_arch: x86_64
-            release_variant: gcc14-cpu
-
-          - name: Linux x86_64 / Clang 18 / Release
-            os: ubuntu-24.04
-            xmake_version: '3.1.1'
-            cache_key: linux-x86_64-clang18-libcxx-release
-            package_key: linux-x86_64-clang18-libcxx-cpu
-            policy: build.ccache:y
-            apt_packages: clang-18 libc++-18-dev libc++abi-18-dev libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
-            configure: -p linux -a x86_64 --toolchain=clang --cc=clang-18 --cxx=clang++-18 -m release --runtimes=c++_shared --with_cuda=n --with_tensorrt=n --with_rknpu=n
-            build_tests: true
-            run_http: false
-            verify_pattern: ''
-            publish: false
-
-          - name: Linux x86_64 / GCC 14 / ASan + UBSan
-            os: ubuntu-24.04
-            cache_key: linux-x86_64-gcc14-asan-ubsan
+          - cache_key: linux-x86_64-gcc14-asan-ubsan
             package_key: linux-x86_64-gcc14-asan-ubsan
             policy: build.ccache:y,build.sanitizer.address:y,build.sanitizer.undefined:y
             apt_packages: g++-14 libopencv-dev iproute2 python3-dev python3-pip python3-setuptools python3-wheel
             configure: -p linux -a x86_64 --toolchain=gcc --cc=gcc-14 --cxx=g++-14 -m release --with_cuda=n --with_tensorrt=n --with_rknpu=n
             build_tests: true
-            run_http: false
-            verify_pattern: ''
-            publish: false
-
-          - name: Windows x64 / MSVC / Release
-            os: windows-2022
-            cache_key: windows-x64-msvc-release
-            package_key: windows-x64-msvc-cpu
-            policy: build.ccache:y
-            apt_packages: ''
-            configure: -p windows -a x64 --toolchain=msvc -m release --runtimes=MD --with_dml=n --with_cuda=n --with_tensorrt=n
-            build_tests: true
-            run_http: true
-            verify_pattern: ''
-            publish: true
-            release_platform: windows
-            release_arch: x64
-            release_variant: msvc-cpu
-
-          - name: Windows x64 / MSVC / DirectML
-            os: windows-2022
-            cache_key: windows-x64-msvc-directml
-            package_key: windows-x64-msvc-directml
-            policy: build.ccache:y
-            apt_packages: ''
-            configure: -p windows -a x64 --toolchain=msvc -m release --runtimes=MD --with_dml=y --with_cuda=n --with_tensorrt=n
-            build_tests: true
-            run_http: false
-            verify_pattern: ''
-            publish: true
-            release_platform: windows-directml
-            release_arch: x64
-            release_variant: msvc-directml
-
-
-          - name: Linux ARM64 / GCC cross-build
-            os: ubuntu-24.04
-            cache_key: linux-arm64-gcc-cross
-            package_key: linux-arm64-gcc-cross
-            policy: build.ccache:y
-            apt_packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3-dev python3-numpy python3-pip python3-setuptools python3-wheel
-            configure: -p linux -a arm64 --cross=aarch64-linux-gnu- -k binary -m release --runtimes=stdc++_static --with_cuda=n --with_tensorrt=n --with_rknpu=n
-            build_tests: false
-            run_http: false
-            verify_pattern: ARM aarch64
-            publish: true
-            release_platform: linux
-            release_arch: arm64
-            release_variant: gcc-cpu
-
-          - name: Linux ARM64 / GCC cross-build / RKNPU
-            os: ubuntu-24.04
-            cache_key: linux-arm64-gcc-cross-rknpu
-            package_key: linux-arm64-gcc-cross-rknpu
-            policy: build.ccache:y
-            apt_packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3-dev python3-numpy python3-pip python3-setuptools python3-wheel
-            configure: -p linux -a arm64 --cross=aarch64-linux-gnu- -k binary -m release --runtimes=stdc++_static --with_cuda=n --with_tensorrt=n --with_rknpu=y
-            build_tests: false
-            run_http: false
-            verify_pattern: ARM aarch64
-            publish: true
-            release_platform: linux-rknpu
-            release_arch: arm64
-            release_variant: gcc-rknpu
-
-          - name: Linux ARMv7 / GCC cross-build
-            os: ubuntu-24.04
-            cache_key: linux-armv7-gcc-cross
-            package_key: linux-armv7-gcc-cross
-            policy: build.ccache:y
-            apt_packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf python3-dev python3-numpy python3-pip python3-setuptools python3-wheel
-            configure: -p linux -a arm --cross=arm-linux-gnueabihf- -k binary -m release --runtimes=stdc++_static --with_cuda=n --with_tensorrt=n --with_rknpu=n
-            build_tests: false
-            run_http: false
-            verify_pattern: ARM
-            publish: true
-            release_platform: linux
-            release_arch: armv7
-            release_variant: gcc-cpu
-
-          - name: Linux RISC-V 64 / GCC cross-build
-            os: ubuntu-24.04
-            cache_key: linux-riscv64-gcc-cross
-            package_key: linux-riscv64-gcc-cross
-            policy: build.ccache:y
-            apt_packages: gcc-riscv64-linux-gnu g++-riscv64-linux-gnu python3-dev python3-numpy python3-pip python3-setuptools python3-wheel
-            configure: -p linux -a riscv64 --cross=riscv64-linux-gnu- -k binary -m release --runtimes=stdc++_static --with_cuda=n --with_tensorrt=n --with_rknpu=n
-            build_tests: false
-            run_http: false
-            verify_pattern: RISC-V
-            publish: true
-            release_platform: linux
-            release_arch: riscv64
-            release_variant: gcc-cpu
-
     defaults:
       run:
         shell: bash
-
     env:
       ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
       XMAKE_ROOT: y
-
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -196,22 +41,177 @@ jobs:
           submodules: recursive
           lfs: ${{ matrix.build_tests }}
 
-      - name: Test release tooling
-        if: matrix.cache_key == 'linux-x86_64-gcc14-release'
-        run: python scripts/test_release_artifacts.py
+      - name: Prepare diagnostic controllers
+        run: |
+          mkdir -p asan-diagnostic/native-elf
+          cat > asan-diagnostic/gdb-controller.py <<'PY'
+          import gdb, os, json, shlex, signal, traceback
+          from pathlib import Path
+          out = Path(os.environ['DIAG_TARGET_DIR'])
+          state = {'target': os.environ['DIAG_TARGET'], 'main_reached': False, 'exit_code': None, 'fatal_signal': None, 'controller_error': None}
+          def capture(label):
+              print('DIAGNOSTIC_STOP=' + label, flush=True)
+              for command in ['thread apply all bt full', 'info registers', 'x/i $pc', 'x/16bx $pc', 'x/16i $pc', 'x/16i $pc-16', 'info proc mappings', 'info sharedlibrary']:
+                  try:
+                      print(gdb.execute(command, to_string=True), flush=True)
+                  except gdb.error as error:
+                      print(command + ': ' + str(error), flush=True)
+              try:
+                  pid = gdb.selected_inferior().pid
+                  if pid:
+                      (out / (label + '-proc-maps.txt')).write_text(Path('/proc/%d/maps' % pid).read_text())
+              except Exception as error:
+                  print('proc maps capture: ' + str(error), flush=True)
+          class MainMarker(gdb.Breakpoint):
+              def stop(self):
+                  state['main_reached'] = True
+                  print('DIAG_ENTER_MAIN', flush=True)
+                  capture('MAIN_REACHED')
+                  state['marker_stop'] = True
+                  return True
+          class LibcStartMarker(gdb.Breakpoint):
+              def stop(self):
+                  try:
+                      # Ubuntu x86_64 SysV: __libc_start_main receives main in RDI.
+                      address = int(gdb.parse_and_eval('$rdi'))
+                      print('MAIN_RESOLVED_VIA_LIBC_START_MAIN_RDI=0x%x' % address, flush=True)
+                      MainMarker('*0x%x' % address)
+                  except Exception as error:
+                      print('MAIN_ADDRESS_UNAVAILABLE: ' + str(error), flush=True)
+                  self.enabled = False
+                  return False
+          def exited(event):
+              state['exit_code'] = getattr(event, 'exit_code', None)
+          gdb.events.exited.connect(exited)
+          def stopped(event):
+              if isinstance(event, gdb.SignalEvent):
+                  print('FIRST_CHANCE_SIGNAL=' + event.stop_signal, flush=True)
+                  if event.stop_signal in ['SIGSEGV', 'SIGILL', 'SIGABRT', 'SIGBUS']:
+                      state['fatal_signal'] = event.stop_signal
+                      capture(event.stop_signal)
+          gdb.events.stop.connect(stopped)
+          status = 125
+          try:
+              gdb.execute('set pagination off')
+              gdb.execute('set confirm off')
+              gdb.execute('set disable-randomization off')
+              gdb.execute('show disable-randomization')
+              gdb.execute('handle SIGSEGV SIGILL SIGABRT SIGBUS stop print pass')
+              try:
+                  symbol = gdb.parse_and_eval('&main')
+                  if symbol is not None:
+                      MainMarker('main')
+                      print('MAIN_BREAKPOINT_AVAILABLE', flush=True)
+                  else:
+                      print('MAIN_BREAKPOINT_UNAVAILABLE: original release symbols stripped; compile flags unchanged', flush=True)
+              except gdb.error as error:
+                  print('MAIN_SYMBOL_UNAVAILABLE: ' + str(error), flush=True)
+                  gdb.execute('set breakpoint pending on')
+                  LibcStartMarker('__libc_start_main')
+                  print('MAIN_FALLBACK_PENDING: Linux x86_64 SysV __libc_start_main RDI; no compile flags changed', flush=True)
+              arguments = json.loads(os.environ['DIAG_ARGUMENTS'])
+              gdb.execute('set args ' + shlex.join(arguments) + ' > ' + shlex.quote(str(out / 'app.stdout')) + ' 2> ' + shlex.quote(str(out / 'app.stderr')))
+              gdb.execute('run')
+              while state.pop('marker_stop', False) and state['exit_code'] is None and not state['fatal_signal']:
+                  gdb.execute('continue')
+              if state['fatal_signal']:
+                  status = 128 + int(getattr(signal, state['fatal_signal']))
+                  gdb.execute('kill')
+              elif state['exit_code'] is not None:
+                  status = int(state['exit_code'])
+              else:
+                  state['controller_error'] = 'inferior stopped without a recorded normal exit or requested fatal signal'
+                  capture('UNEXPECTED_STOP')
+                  gdb.execute('kill')
+          except Exception:
+              state['controller_error'] = traceback.format_exc()
+              print(state['controller_error'], flush=True)
+              try:
+                  gdb.execute('kill')
+              except gdb.error:
+                  pass
+          state['propagated_status'] = status
+          (out / 'result.json').write_text(json.dumps(state, indent=2) + '\n')
+          print('INFERIOR_RESULT=' + json.dumps(state), flush=True)
+          gdb.execute('quit %d' % status)
+          PY
+          cat > asan-diagnostic/run-native.py <<'PY'
+          import json, os, subprocess, signal
+          from pathlib import Path
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          diag = root / 'asan-diagnostic'
+          targets = ["test_vision_helper","test_cvt","test_common","test_trace_id","test_yolo_postprocess","test_ocr_decode","test_infer_inputs","test_config_load","test_tracker","test_pipeline","test_yolo_tasks","test_ocr_batch","test_ocr_morphology","test_ocr_morphology_dataset","test_subtitle_timeline","test_image_codec","test_image_budget_service"]
+          fixtures = set(["test_infer_inputs","test_pipeline","test_yolo_tasks","test_ocr_batch","test_ocr_morphology","test_ocr_morphology_dataset","test_image_budget_service"])
+          rows = []
+          for target in targets:
+              out = diag / target
+              out.mkdir(exist_ok=True)
+              env = os.environ.copy()
+              env.update(DIAG_TARGET=target, DIAG_TARGET_DIR=str(out), DIAG_ARGUMENTS=json.dumps(['--project-root', str(root)] if target in fixtures else []))
+              with (out / 'gdb.log').open('w') as log:
+                  try:
+                      process = subprocess.Popen(['xmake', 'lua', str(diag / 'run-gdb.lua'), target, str(diag / 'gdb-controller.py')], cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                      wrapper_status = process.wait(timeout=600)
+                  except subprocess.TimeoutExpired:
+                      os.killpg(process.pid, signal.SIGKILL)
+                      process.wait()
+                      wrapper_status = 124
+                      log.write('CONTROLLER_TIMEOUT: one attempt consumed; no retry\n')
+              result_path = out / 'result.json'
+              result = json.loads(result_path.read_text()) if result_path.exists() else {'controller_error': 'no inferior result recorded', 'propagated_status': 125}
+              result['wrapper_status'] = wrapper_status
+              result['target'] = target
+              result['passed'] = wrapper_status == 0 and result.get('exit_code') == 0 and result.get('propagated_status') == 0 and not result.get('fatal_signal') and not result.get('controller_error')
+              rows.append(result)
+              print(json.dumps(result), flush=True)
+              for stream in ['app.stdout', 'app.stderr']:
+                  path = out / stream
+                  print('=== ' + target + ' ' + stream + ' ===', flush=True)
+                  if path.exists():
+                      print(path.read_text(errors='replace'), flush=True)
+          codec = next(row for row in rows if row['target'] == 'test_image_codec')
+          interpretation = 'INCONCLUSIVE: codec passed on this runner under debugger; this does not fix or disprove the original failure.' if codec['passed'] else 'Codec failed: inspect first-chance signal, stack, instructions, mappings and application streams; no fix applied.'
+          print(interpretation, flush=True)
+          (diag / 'summary.json').write_text(json.dumps({'interpretation': interpretation, 'targets': rows}, indent=2) + '\n')
+          raise SystemExit(0 if all(row['passed'] for row in rows) else 1)
+          PY
+          cat > asan-diagnostic/run-gdb.lua <<'LUA'
+          import("core.project.config")
+          import("core.project.project")
+          import("private.action.run.runenvs")
+          function main(name, commands)
+              config.load()
+              project.load_targets()
+              local target = assert(project.target(name), "missing target: " .. name)
+              local targetfile = path.absolute(target:targetfile())
+              local function add_packages(t, seen)
+                  if seen[t:name()] then return end
+                  seen[t:name()] = true
+                  os.addenvs(t:pkgenvs())
+                  for _, dep in ipairs(t:orderdeps()) do add_packages(dep, seen) end
+              end
+              add_packages(target, {})
+              local addenvs, setenvs = runenvs.make(target)
+              print("DIAGNOSTIC_TARGETFILE=" .. targetfile)
+              print("DIAGNOSTIC_RUNDIR=" .. path.absolute(target:rundir()))
+              for key, value in pairs(addenvs or {}) do print("DIAGNOSTIC_ADDENV " .. key .. "=" .. table.concat(table.wrap(value), ":")) end
+              for key, value in pairs(setenvs or {}) do print("DIAGNOSTIC_SETENV " .. key .. "=" .. table.concat(table.wrap(value), ":")) end
+              os.execv("gdb", {"--batch", "-nx", "-q", "-x", commands, "--args", targetfile}, {curdir = target:rundir(), addenvs = addenvs, setenvs = setenvs})
+          end
+          LUA
 
-      - name: Setup xmake
+      - name: Setup xmake without cache saves
         uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a # v1
         with:
           xmake-version: ${{ matrix.xmake_version || '2.9.7' }}
-          actions-cache-folder: .xmake-tool-cache
-          actions-cache-key: xmake-${{ matrix.xmake_version || '2.9.7' }}
+          # Omit actions-cache-folder/key: this action otherwise saves its tool cache in post.
 
       - name: Resolve xmake package path
         id: package-path
         run: |
           package_path="$(xmake l -c 'import("core.package.package"); io.write(package.installdir())')"
           printf 'path=%s\n' "$package_path" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$package_path" > asan-diagnostic/package-path.txt
 
       - name: Restore package cache
         id: package-cache
@@ -231,292 +231,118 @@ jobs:
           restore-keys: |
             xmake-build-v2-${{ matrix.cache_key }}--
 
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
+      - name: Install Linux system dependencies and debugger
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ${{ matrix.apt_packages }}
-      - name: Ensure Windows native subtitle decoder prerequisite
-        if: matrix.run_http && runner.os == 'Windows'
-        shell: powershell
+          sudo apt-get install --no-install-recommends -y ${{ matrix.apt_packages }} gdb binutils file
+
+      - name: Capture original runner and toolchain state (read-only)
+        if: always()
         run: |
-          $ErrorActionPreference = 'Stop'
-          $feature = Get-WindowsFeature -Name Server-Media-Foundation
-          if (-not $feature.Installed) {
-            $result = Install-WindowsFeature -Name Server-Media-Foundation
-            if (-not $result.Success -or $result.RestartNeeded -eq 'Yes') {
-              throw 'Native MP4 subtitle regression requires Media Foundation installed without a pending restart.'
-            }
-          }
+          {
+            git rev-parse HEAD
+            git submodule status --recursive
+            printf 'GITHUB_SHA=%s\nImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "$GITHUB_SHA" "${ImageOS-}" "${ImageVersion-}" "$RUNNER_OS" "$RUNNER_ARCH"
+            printf 'ASAN_OPTIONS=%s\nUBSAN_OPTIONS=%s\n' "$ASAN_OPTIONS" "$UBSAN_OPTIONS"
+            uname -a
+            cat /proc/cpuinfo
+            lscpu
+            sysctl vm.mmap_rnd_bits vm.mmap_rnd_compat_bits kernel.randomize_va_space kernel.core_pattern
+            ulimit -a
+            gcc-14 --version
+            g++-14 --version
+            xmake --version
+            gdb --version
+            dpkg-query -W -f='${Package} ${Version}\n' 'libasan*' 'libubsan*' 'libc6*' 'gcc-14*' 'libgcc*' || true
+          } 2>&1 | tee asan-diagnostic/runner-state.log
+          printf 'package-cache-match=%s\ncompiler-cache-match=%s\n' '${{ steps.package-cache.outputs.cache-matched-key }}' '${{ steps.compiler-cache.outputs.cache-matched-key }}' > asan-diagnostic/cache-restores.txt
 
-      - name: Install Windows subtitle fixture generator
-        if: matrix.run_http && runner.os == 'Windows'
-        run: choco install ffmpeg --version=6.1.1 --yes --no-progress
-      - name: Configure
-        run: xmake f ${{ matrix.configure }} --policies=${{ matrix.policy }} -y
+      - name: Configure unchanged sanitizer slice
+        id: configure
+        run: xmake f ${{ matrix.configure }} --policies=${{ matrix.policy }} -y 2>&1 | tee asan-diagnostic/configure.log
 
-      - name: Build server
-        run: xmake build server || xmake build -vD server
+      - name: Preflight actual native CPU fixtures
+        id: fixtures
+        run: python scripts/check_ci_fixtures.py --project-root "$GITHUB_WORKSPACE" --layer native 2>&1 | tee asan-diagnostic/fixture-preflight.log
 
-      - name: Preflight native CPU fixtures
-        if: matrix.build_tests
-        run: python scripts/check_ci_fixtures.py --project-root "$GITHUB_WORKSPACE" --layer native
-
-      - name: Build native regression targets
-        if: matrix.build_tests
+      - name: Build real server and same seventeen native targets (one build each)
+        id: build
+        continue-on-error: true
         run: |
-          xmake build test_vision_helper
-          xmake build test_cvt
-          xmake build test_common
-          xmake build test_trace_id
-          xmake build test_yolo_postprocess
-          xmake build test_ocr_decode
-          xmake build test_infer_inputs
-          xmake build test_config_load
-          xmake build test_tracker
-          xmake build test_pipeline
-          xmake build test_yolo_tasks
-          xmake build test_ocr_batch
-          xmake build test_ocr_morphology
-          xmake build test_ocr_morphology_dataset
-          xmake build test_subtitle_timeline
-          xmake build test_image_codec
-          xmake build test_image_budget_service
+          failed=0
+          for target in server test_vision_helper test_cvt test_common test_trace_id test_yolo_postprocess test_ocr_decode test_infer_inputs test_config_load test_tracker test_pipeline test_yolo_tasks test_ocr_batch test_ocr_morphology test_ocr_morphology_dataset test_subtitle_timeline test_image_codec test_image_budget_service; do
+            if ! xmake build -vD "$target" 2>&1 | tee "asan-diagnostic/build-$target.log"; then
+              failed=1
+            fi
+          done
+          exit "$failed"
 
-      - name: Run deterministic native regressions
-        if: matrix.build_tests
+      - name: Capture native ELF and unchanged xmake configuration
+        if: always()
         run: |
-          xmake run test_vision_helper
-          xmake run test_cvt
-          xmake run test_common
-          xmake run test_trace_id
-          xmake run test_yolo_postprocess
-          xmake run test_ocr_decode
-          xmake run test_config_load
-          xmake run test_tracker
-          xmake run test_subtitle_timeline
-          xmake run test_image_codec
+          python3 - <<'PY'
+          import hashlib, os, shutil, subprocess
+          from pathlib import Path
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          diag = root / 'asan-diagnostic'
+          binary_dir = root / 'build/linux/x86_64/release'
+          targets = ['server'] + ["test_vision_helper","test_cvt","test_common","test_trace_id","test_yolo_postprocess","test_ocr_decode","test_infer_inputs","test_config_load","test_tracker","test_pipeline","test_yolo_tasks","test_ocr_batch","test_ocr_morphology","test_ocr_morphology_dataset","test_subtitle_timeline","test_image_codec","test_image_budget_service"]
+          with (diag / 'elf-inspection.log').open('w') as log:
+              for target in targets:
+                  binary = binary_dir / ('vision_simple-server' if target == 'server' else target)
+                  if not binary.exists():
+                      log.write('MISSING_ELF=' + str(binary) + '\n')
+                      continue
+                  shutil.copy2(binary, diag / 'native-elf' / target)
+                  log.write('ELF_SHA256=' + hashlib.sha256(binary.read_bytes()).hexdigest() + ' ' + str(binary) + '\n')
+                  log.flush()
+                  for command in [['file', str(binary)], ['readelf', '-h', '-l', '-d', '-n', str(binary)], ['ldd', str(binary)]]:
+                      subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
+                  if target == 'test_image_codec':
+                      subprocess.run(['nm', '-a', str(binary)], stdout=log, stderr=subprocess.STDOUT, check=False)
+              package_root_file = diag / 'package-path.txt'
+              if package_root_file.exists():
+                  package_root = Path(package_root_file.read_text().strip())
+                  for binary in package_root.glob('t/turbobase64/**/*.a'):
+                      log.write('TURBOBASE64_ARCHIVE_SHA256=' + hashlib.sha256(binary.read_bytes()).hexdigest() + ' ' + str(binary) + '\n')
+                      log.flush()
+                      with (diag / ('turbobase64-' + hashlib.sha256(str(binary).encode()).hexdigest()[:12] + '-disassembly.log')).open('w') as disassembly:
+                          subprocess.run(['objdump', '-d', str(binary)], stdout=disassembly, stderr=subprocess.STDOUT, check=False)
+                      shutil.copy2(binary, diag / ('turbobase64-' + hashlib.sha256(str(binary).encode()).hexdigest()[:12] + '.a'))
+          for conf in (root / '.xmake').rglob('xmake.conf'):
+              destination = diag / 'xmake-configuration' / conf.relative_to(root)
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(conf, destination)
+          PY
 
-      - name: Run CPU fixture-backed native regressions
-        if: matrix.build_tests
-        run: |
-          xmake run test_infer_inputs --project-root "$GITHUB_WORKSPACE"
-          xmake run test_pipeline --project-root "$GITHUB_WORKSPACE"
-          xmake run test_yolo_tasks --project-root "$GITHUB_WORKSPACE"
-          xmake run test_ocr_batch --project-root "$GITHUB_WORKSPACE"
-          xmake run test_ocr_morphology --project-root "$GITHUB_WORKSPACE"
-          xmake run test_ocr_morphology_dataset --project-root "$GITHUB_WORKSPACE"
-          xmake run test_image_budget_service --project-root "$GITHUB_WORKSPACE"
+      - name: Run all seventeen native targets once under GDB with original ASLR
+        id: native
+        if: success() && steps.build.outcome == 'success'
+        continue-on-error: true
+        run: python3 asan-diagnostic/run-native.py 2>&1 | tee asan-diagnostic/native-controller.log
 
-      - name: Preflight CPU HTTP fixtures
-        if: matrix.run_http
-        run: python scripts/check_ci_fixtures.py --project-root "$GITHUB_WORKSPACE" --layer http
-
-      - name: Setup Python for documentation example tests
-        if: matrix.run_http
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install documentation example validators
-        if: matrix.run_http
-        run: python -m pip install -r scripts/requirements-doc-tests.txt
-
-      - name: Validate and run published documentation examples
-        if: matrix.run_http
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          python scripts/test_documentation_validation.py
-          python scripts/test_documentation_examples.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-
-      - name: Build and run subtitle FIFO and expiry regression
-        if: matrix.run_http
-        run: |
-          xmake build test_subtitle_service
-          xmake run test_subtitle_service --project-root "$GITHUB_WORKSPACE"
-
-      - name: Run real-child selected-model diagnostic regression
-        if: matrix.run_http
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          python scripts/test_diagnostics.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-      - name: Run real-server HTTP and startup regression
-        if: matrix.run_http
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          python scripts/test_http_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-          python scripts/test_management_security.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-
-      - name: Run real-server protocol and model registry regression
-        if: matrix.run_http
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          python scripts/test_protocol_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-          python scripts/test_model_registry.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-
-      - name: Run real-server detector-to-tracker regression
-        if: matrix.run_http
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          python scripts/test_tracking_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE" \
-            --yolo-model "$GITHUB_WORKSPACE/app/assets/test/hd2-yolo11n-fp32.onnx" \
-            --yolo-image "$GITHUB_WORKSPACE/app/assets/test/hd2.png"
-
-      - name: Run real-server YOLO task and image budget regression
-        if: matrix.run_http
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          python scripts/test_yolo_tasks_http.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-          python scripts/test_image_budget.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-
-      - name: Run real-server bounded HTTP dispatch regression
-        if: matrix.run_http
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          python scripts/test_http_dispatch.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-      - name: Run real-server subtitle regression
-        if: matrix.run_http
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          python scripts/test_subtitle_regression.py --server "$server" --project-root "$GITHUB_WORKSPACE"
-      - name: Verify cross-built server architecture
-        if: matrix.verify_pattern != ''
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          description="$(file "$server")"
-          printf '%s\n' "$description"
-          case "$description" in
-            *"${{ matrix.verify_pattern }}"*) ;;
-            *) printf 'Expected architecture marker: %s\n' "${{ matrix.verify_pattern }}" >&2; exit 1 ;;
-          esac
-
-      - name: Package release artifacts
-        if: matrix.publish && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        env:
-          ARCHIVE_NAME: vision_simple-${{ matrix.release_platform }}-${{ matrix.release_arch }}-${{ needs.release-context.outputs.release_date }}-${{ needs.release-context.outputs.release_time }}-UTF8.zip
-          BUILD_NAME: ${{ matrix.name }}
-          CONFIGURE_ARGS: ${{ matrix.configure }}
-          RELEASE_ARCH: ${{ matrix.release_arch }}
-          RELEASE_PLATFORM: ${{ matrix.release_platform }}
-          RELEASE_TIMESTAMP: ${{ needs.release-context.outputs.release_timestamp }}
-          RELEASE_VARIANT: ${{ matrix.release_variant }}
-          XMAKE_VERSION: ${{ matrix.xmake_version || '2.9.7' }}
-        run: |
-          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
-          runtime="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('runtime'):targetfile()))")"
-          python scripts/release_artifacts.py pack \
-            --server "$server" \
-            --runtime "$runtime" \
-            --output "$GITHUB_WORKSPACE/release-assets/$ARCHIVE_NAME" \
-            --platform "$RELEASE_PLATFORM" \
-            --arch "$RELEASE_ARCH" \
-            --variant "$RELEASE_VARIANT" \
-            --commit "$GITHUB_SHA" \
-            --timestamp "$RELEASE_TIMESTAMP" \
-            --build-name "$BUILD_NAME" \
-            --xmake-version "$XMAKE_VERSION" \
-            --configure "$CONFIGURE_ARGS"
-
-      - name: Upload release archive
-        if: matrix.publish && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      - name: Upload diagnostic logs, commands, native ELF and configuration
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          path: release-assets/vision_simple-${{ matrix.release_platform }}-${{ matrix.release_arch }}-${{ needs.release-context.outputs.release_date }}-${{ needs.release-context.outputs.release_time }}-UTF8.zip
-          archive: false
+          name: asan-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: asan-diagnostic/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
-      - name: Save package cache
-        if: github.event_name != 'pull_request' && success() && steps.package-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ${{ steps.package-path.outputs.path }}
-          key: ${{ steps.package-cache.outputs.cache-primary-key }}
-
-      - name: Save compiler cache
-        if: github.event_name != 'pull_request' && success() && steps.compiler-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: build/.build_cache
-          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
-
-      - name: Report cache restoration
+      - name: Enforce diagnostic failures (never green when an inferior failed)
         if: always()
         env:
-          MATRIX_NAME: ${{ matrix.name }}
-          PACKAGE_HIT: ${{ steps.package-cache.outputs.cache-hit }}
-          PACKAGE_MATCHED: ${{ steps.package-cache.outputs.cache-matched-key }}
-          COMPILER_HIT: ${{ steps.compiler-cache.outputs.cache-hit }}
-          COMPILER_MATCHED: ${{ steps.compiler-cache.outputs.cache-matched-key }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          NATIVE_OUTCOME: ${{ steps.native.outcome }}
         run: |
-          cache_status() {
-            if [[ "$1" == "true" ]]; then
-              printf 'exact'
-            elif [[ -n "$2" ]]; then
-              printf 'fallback'
-            else
-              printf 'miss'
-            fi
-          }
-          package_status="$(cache_status "$PACKAGE_HIT" "$PACKAGE_MATCHED")"
-          compiler_status="$(cache_status "$COMPILER_HIT" "$COMPILER_MATCHED")"
-          {
-            printf '### Cache restoration — %s\n\n' "$MATRIX_NAME"
-            printf '| Cache | Status | Matched key |\n'
-            printf '| --- | --- | --- |\n'
-            printf '| Package | `%s` | `%s` |\n' "$package_status" "${PACKAGE_MATCHED:-none}"
-            printf '| Compiler | `%s` | `%s` |\n' "$compiler_status" "${COMPILER_MATCHED:-none}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  release:
-    name: Publish release
-    needs: [release-context, build-and-test]
-    if: success() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Download release archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: vision_simple-*-UTF8.zip
-          path: release-assets
-          merge-multiple: true
-          skip-decompress: true
-
-      - name: Generate release notes and checksums
-        env:
-          RELEASE_TIMESTAMP: ${{ needs.release-context.outputs.release_timestamp }}
-        run: |
-          git log -1 --format=%B "$GITHUB_SHA" > release-assets/commit-message.txt
-          python scripts/release_artifacts.py notes \
-            --assets-dir release-assets \
-            --commit-message release-assets/commit-message.txt \
-            --output release-notes.md \
-            --checksums release-assets/SHA256SUMS.txt \
-            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            --run-number "$GITHUB_RUN_NUMBER" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --timestamp "$RELEASE_TIMESTAMP" \
-            --commit "$GITHUB_SHA" \
-            --expected-count 7
-
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_DATE: ${{ needs.release-context.outputs.release_date }}
-          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
-          RELEASE_TIME: ${{ needs.release-context.outputs.release_time }}
-        run: |
-          gh release create "$RELEASE_TAG" \
-            release-assets/vision_simple-*-UTF8.zip \
-            release-assets/SHA256SUMS.txt \
-            --target "$GITHUB_SHA" \
-            --title "vision-simple ${RELEASE_DATE} ${RELEASE_TIME} UTC" \
-            --notes-file release-notes.md \
-            --latest
+          test "$BUILD_OUTCOME" = success
+          test "$NATIVE_OUTCOME" = success
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          summary = json.loads(Path('asan-diagnostic/summary.json').read_text())
+          assert len(summary['targets']) == 17 and all(row['passed'] for row in summary['targets']), summary
+          print(summary['interpretation'])
+          PY
