@@ -730,6 +730,8 @@ xmake f -p linux -a riscv64 --cross=riscv64-linux-gnu- -m release
 xmake build server
 ```
 
+- **AMD64 TurboBase64 可移植性**：标量对象使用 `-march=x86-64`，避免缓存中的宿主机原生指令（包括 ASAN 生成的代码）超出运行 CPU 支持范围。项目固定使用 `2022.02.21-vs.1` 并设置 `system=false`，避免复用旧版本已安装包或系统包；保留既有 SSSE3、AVX、Haswell 优化对象及运行时分派，ASAN/UBSAN 策略不变。
+
 ### 启用硬件加速 (Execution Provider)
 
 RKNPU 公开支持矩阵（Linux ARM/ARM64）：

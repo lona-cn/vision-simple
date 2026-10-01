@@ -724,6 +724,8 @@ xmake f -p linux -a riscv64 --cross=riscv64-linux-gnu- -m release
 xmake build server
 ```
 
+- **AMD64 TurboBase64 portability:** scalar objects use `-march=x86-64` so cached host-native instructions, including ASAN-generated code, do not exceed the runtime CPU's instruction support. The project pins `2022.02.21-vs.1` with `system=false` to avoid reusing older installed versions or system packages; existing SSSE3, AVX and Haswell optimized objects and runtime dispatch remain intact, and ASAN/UBSAN policies are unchanged.
+
 ### Enable Hardware Acceleration (Execution Provider)
 
 Public RKNPU support matrix (Linux ARM/ARM64):

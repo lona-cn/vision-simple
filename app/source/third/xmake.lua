@@ -1,6 +1,7 @@
 IncludeSubDirs(os.scriptdir())
 -- pkgs
-add_requires("magic_enum 0.9.6","turbobase64","yalantinglibs","log4cplus")
+add_requires("magic_enum 0.9.6","yalantinglibs","log4cplus")
+add_requires("turbobase64 2022.02.21-vs.1", {system = false})
 add_requires("libhv 1.3.3-vs.1", {system = false})
 -- onnxruntime
 if is_arch("x86_64") or is_arch("x64") then

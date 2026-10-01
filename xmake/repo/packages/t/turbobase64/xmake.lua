@@ -4,10 +4,11 @@ package("turbobase64")
     set_license("GPL-3.0")
 
     add_urls("https://github.com/powturbo/Turbo-Base64.git")
-    add_versions("2022.02.21", "cf6e4f2f7fbe7fc5fe780fdf1cc4d1aa609fc46e")
+    -- Separate package identity prevents reuse of host-native scalar builds.
+    add_versions("2022.02.21-vs.1", "cf6e4f2f7fbe7fc5fe780fdf1cc4d1aa609fc46e")
 
     -- CMake build support and patch is from https://github.com/powturbo/Turbo-Base64/pull/14
-    add_patches("2022.02.21", path.join(os.scriptdir(), "patches", "2022.02.21", "header.patch"), "0458a4eaf2b4f5429fcd7755ad8637240cb05081d2ab0531e41ed52ef1e8a477")
+    add_patches("2022.02.21-vs.1", path.join(os.scriptdir(), "patches", "2022.02.21", "header.patch"), "0458a4eaf2b4f5429fcd7755ad8637240cb05081d2ab0531e41ed52ef1e8a477")
 
     add_configs("ncheck", {description = "Dinsable for checking for more fast decoding", default = false, type = "boolean"})
     add_configs("fullcheck", {description = "Enable full base64 checking", default = false, type = "boolean"})
