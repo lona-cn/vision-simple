@@ -19,6 +19,7 @@
 #include "ManagementAccess.h"
 #include "HttpDispatch.h"
 #include "InferenceProtocol.h"
+#include "InferenceRequestOptions.h"
 #include "LogFacade.h"
 #include "Logger.h"
 #include "MCPAdapter.h"
@@ -32,6 +33,7 @@ struct InferRequest {
   std::string model;
   std::vector<std::string> images;
   std::optional<std::chrono::milliseconds> timeout;
+  YOLOInferenceOptions options;
 };
 
 enum class FailureStage {
@@ -129,9 +131,11 @@ int DispatchRequest(HttpDispatch& dispatch, const HttpContextPtr& ctx,
 }
 
 std::optional<InferRequest> ParseRequest(const std::string& body,
-                                         size_t max_images) {
-  const auto json = nlohmann::json::parse(body);
-  if (!json.is_object()) return std::nullopt;
+                                         size_t max_images, InferenceKind kind) {
+  const auto json = ParseInferenceJson(body);
+  if (json.is_discarded() || !json.is_object()) return std::nullopt;
+  const auto options = ParseInferenceOptions(json, kind);
+  if (!options) return std::nullopt;
   const auto model = json.find("model");
   const auto images = json.find("images");
   if (model == json.end() || !model->is_string() ||
@@ -151,7 +155,7 @@ std::optional<InferRequest> ParseRequest(const std::string& body,
     timeout = std::chrono::milliseconds(value);
   }
   return InferRequest{model->get<std::string>(),
-                      images->get<std::vector<std::string>>(), timeout};
+                      images->get<std::vector<std::string>>(), timeout, *options};
 }
 template <typename T>
 bool ParseInteger(std::string_view text, T& value) {
@@ -498,10 +502,10 @@ class HTTPServerImpl : public HTTPServer {
             RequestStage& stage, std::stop_token stop,
             HttpDispatch::Clock::time_point started) -> PreparedResponse {
       auto request = ParseRequest(
-          body, service_->options().pipeline.max_batch_images);
+          body, service_->options().pipeline.max_batch_images, kind);
       if (!request) return ErrorResponse(stage);
       auto result = service_->Run(
-          kind, request->model, request->images,
+          kind, request->model, request->images, request->options,
           ServiceControl{.stop = stop, .timeout = request->timeout, .started = started});
       if (!result) {
         auto response = ServiceErrorResponse(result.error());

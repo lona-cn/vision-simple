@@ -77,6 +77,10 @@ docker run -it --rm --name vs -p 127.0.0.1:11451:11451 vision-simple:local
 
 ### HTTP v0 错误与批量语义
 
+`yolo`、`seg`、`pose`、`obb` 的原生 v0/v1 请求支持可选顶层数值 `confidence`、`nms_iou`，范围 `[0,1]`。省略 confidence 为 `0.125`；省略 raw NMS IoU 时检测为 `0.3`，分割/姿态/OBB 为 `0.45`。end-to-end 导出仍校验 `nms_iou`，但不应用它、不执行第二次 NMS。控制只影响本请求的每张图片；confidence 改变目标筛选，不改变 mask 二值化或关键点置信度。OCR 拒绝任一显式字段，即使值等于默认值；现有 `0.125` recognition 阈值抑制逐个 token，不是检测像素阈值或整行过滤。
+
+布尔、null、字符串、数组、对象及有限越界控制值均无效。语义校验先于模型查找/图片解码，空批次也校验：原生/OpenAI 返回 HTTP 400 `invalid_request`（`stream:true` 也返回普通 JSON），MCP 返回当前版本的文本/structured `isError:true` 工具结果，不新增 JSON-RPC 错误。transport 接纳与取消/截止时间/关闭优先级不变；NaN、Infinity 或溢出等不可表示的 JSON 数字在任何位置（包括嵌套、无关字段及较早的重复键）均按既有解析错误拒绝：原生 `invalid_request`、OpenAI `invalid_json`、MCP `id:null` 的 JSON-RPC `-32700`，不静默丢弃或回退默认值。省略字段保持既有 JSON 行为。
+
 成功字段保持不变：YOLO 返回 `class_names`/`results`，OCR 返回 `results`。`model` 必须为非空字符串，`images` 必须为字符串数组；有效模型接受空数组。HTTP 200 保证结果数量与输入数量相等、顺序一致；某张图没有目标时，该项为空数组。
 
 任一图片失败即整批失败，不返回部分结果。顺序为请求校验、模型查找/加载、取消/超时/关闭检查、请求 credit 接纳、按索引 header 预检、整批字节预留、全部图片解码、流水线推理、序列化；模型/配置失败仍优先于图像接纳错误。
@@ -171,9 +175,9 @@ stats 新增服务级 `image_budget`：`in_use_bytes`、`peak_bytes`、`active_r
 
 请求可附加整数 `timeout_ms`（1–300000）覆盖默认 deadline；HTTP 从完整正文提交调度时计时，包含 queue 等待、模型加载和解码，不对序列化、网络或原生调用作硬实时保证。超时为 `504 request_timeout`，接纳耗尽为 `503 service_overloaded` 与 `Retry-After: 1`，控制错误 image_index 为 null。取消优先于超时，再优先于关闭；有服务 credit 时图像校验优先于全局字节接纳，无 credit 时服务 overload 优先于无效图像。
 
-C++ 调用者可使用 `InferPipeline::Create`，再调用 `Run(model, images, confidence, PipelineControl{stop_token, deadline})`；`Close()` 拒绝新任务并取消未完成批次，销毁前等待所有调用者退出。取消优先于超时、关闭和普通错误；Run 等待已执行原生阶段与输入析构完成后才返回。输入像素及模型须在整个调用期间有效，外部不得修改像素。普通 HTTP 与 MCP 断连均请求合作式取消，不能硬打断原生调用。
+C++ YOLO/任务调用者使用 `InferPipeline::Create`，再调用 `Run(model, images, YOLOInferenceOptions{.confidence = 0.1f}, PipelineControl{stop_token, deadline})`；OCR 保留 `Run(model, images, float confidence, control)`。options 按值捕获到本批次，不写入调度 `PipelineOptions` 或模型/context/cache 状态。`Close()` 拒绝新任务并取消未完成批次，销毁前等待所有调用者退出。取消优先于超时、关闭和普通错误；Run 等待已执行原生阶段与输入析构完成后才返回。输入像素及模型须在整个调用期间有效，外部不得修改像素。HTTP 与 MCP 断连请求合作式取消，不能硬打断原生调用。
 
-同步 `InferYOLO/InferOCR::Run` 签名不变，与流水线共享阶段算法和会话执行锁；流水线任务拥有独立工作区，每个模型最多缓存 2 个空闲流水线工作区。未加入流水线适配的自定义模型返回明确错误，不以同步调用伪装分阶段执行。
+同步 `InferYOLO`、`InferYOLOTask` 和 `InferOCR::Run` 与流水线共享阶段算法和会话执行锁；YOLO 调用现在接受 `YOLOInferenceOptions`，OCR 保留标量 confidence 签名。流水线任务拥有独立工作区，每个模型最多缓存 2 个空闲流水线工作区。未加入流水线适配的自定义模型返回明确错误，不以同步调用伪装分阶段执行。
 
 ### 任务注册与统一模型配置
 
@@ -312,6 +316,8 @@ image_path = Path("image.jpg")
 endpoint = "http://127.0.0.1:11451/v1/infer/yolo"
 payload = {
     "model": "yolo26n",
+    "confidence": 0.1,
+    "nms_iou": 0.3,
     "images": [base64.b64encode(image_path.read_bytes()).decode("ascii")],
 }
 request = Request(
@@ -328,7 +334,7 @@ with urlopen(request, timeout=120) as response:
 
 使用现有 `POST /v1/infer/{task}`；检测也支持原有 `/v0/infer/yolo`。响应结构、模型缓存、批次顺序与整批失败语义不变。C++ 检测仍使用 `InferYOLO::Create(context, path, YOLOVersion::kV26)`；其他任务改为显式版本，例如 `InferYOLOTask::Create(context, path, YOLOTask::kPose, YOLOVersion::kV26)`。旧任务调用者在 `task` 后补 `YOLOVersion::kV11`，可选 device_id 顺延。
 
-后处理沿用本项目契约：YOLO11/YOLO26 raw 检测先以严格 `score > confidence` 筛选，在未裁剪、未取整的浮点模型空间框上按类别执行 NMS（IoU 阈值 0.3），再映射到原图、裁剪并取整；退化框及输出空框丢弃。固定模型输出的 NMS 候选选择不随原图尺寸改变，公开整数 `bbox:[x,y,width,height]` 格式不变。其他 raw 任务的 NMS IoU 为 0.45；OBB 使用多边形 IoU，**不同于 Ultralytics 的概率 IoU**。YOLO10/YOLO26 end-to-end（NMS-free）不作二次抑制，保留 `score >= confidence` 语义。Letterbox 使用黑色 padding，关键点保留图外坐标；mask 先插值 logits 再二值化、裁剪至整数 bbox。因此直接与 Ultralytics 默认 padding、mask 缩放、关键点裁剪比较不会逐像素一致，应统一预处理并明确这些差异。
+后处理沿用本项目契约：YOLO11/YOLO26 raw 检测以严格 `score > confidence` 筛选；end-to-end 检测及分割/姿态/OBB 使用包含边界的 `score >= confidence`。raw 检测在未裁剪、未取整的浮点模型空间框上按类别 NMS（省略 IoU 时为 `0.3`），再映射、裁剪并取整；退化框及输出空框丢弃。固定模型输出的 NMS 候选选择不随原图尺寸改变，整数 `bbox:[x,y,width,height]` 不变。其他 raw 任务默认 IoU 为 `0.45`；OBB 使用多边形 IoU，**不同于 Ultralytics 的概率 IoU**。显式 `nms_iou` 只覆盖 raw 抑制；YOLO10/YOLO26 end-to-end（NMS-free）不作二次 NMS。Letterbox 保留黑色 padding，关键点保留图外坐标；mask 先插值 logits 再二值化、裁剪至整数 bbox，不能据此假设与 Ultralytics 结果一致。
 
 #### 已验证兼容性与限制
 
@@ -362,6 +368,8 @@ with urlopen(request, timeout=120) as response:
 ```
 
 会话首帧建立的轨迹立即确认；后续新建轨迹才受 `min_hits` 确认门槛约束。空 `tracks` 也可能是成功结果，例如没有检测或新目标尚未确认。
+
+跟踪 `Step` 独立接收客户端提供的 detections，不存在融合检测/跟踪路由。手动串联检测→跟踪时，客户端可选不高于 tracker `low_threshold` 的 detector `confidence`，转发低分候选；raw 检测严格排除等于阈值的分数，若需保留边界应再调低。例如 `confidence:0.1` 可保留 `0.1` 与检测默认 `0.125` 之间的候选。这是客户端策略，并非所有 tracker 输入都会被截断。
 
 - `timestamp` 是有限非负秒数，`frame_index` 是 0–9007199254740991 的整数；两者在同一会话内均须严格递增。经过的秒数控制运动预测，索引间隔计入过期帧数。被拒绝帧不推进状态；reset 清空序列、ID 和时间。推进返回 `frame_index`、`timestamp` 和 `tracks:[{track_id,class_id,confidence,bbox}]`，仅输出本帧观测到的已确认轨迹，不输出丢失预测。状态含可空 `last_frame_index`/`last_timestamp` 及 `active_tracks`/`lost_tracks`。
 - 算法为 `"bytetrack"` 或 `"botsort"`。默认选项：`high_threshold:0.5`、`low_threshold:0.1`、`new_track_threshold:0.6`、`match_threshold:0.8`、`max_lost_frames:30`、`min_hits:2`、`max_tracks:256`、`max_detections:256`、`camera_motion:true`、`appearance:false`、`proximity_threshold:0.5`、`appearance_threshold:0.25`。阈值范围 [0,1]，须 low < high ≤ new；匹配阈值表示最大代价，不是最低 IoU。`min_hits` 为 1–10000，`max_lost_frames` 为 0–10000，两个容量选项均为 1–256。
@@ -473,6 +481,7 @@ v0、原生 v1、OpenAI-like 和 MCP 共用 `InferenceService`，不重复加载
 
 - `GET /v1/models?limit=100` 返回 `object:"list"` 和 `data`；模型 ID 为 `<task>:<原名>`，task 包括 `yolo`、`ocr`、`seg`、`pose`、`obb`。limit 为 1–200；`has_more` 为 true 时，将 `next_cursor` 原样作为下一页 `after`，勿自行构造游标。
 - `POST /v1/chat/completions` 接受 `model`、`messages`、可选 `stream`、`timeout_ms`、`n:1` 和 `response_format:{"type":"json_object"}`（或 `"text"`）。用户消息的 `image_url.url` 必须是 PNG/JPEG/WebP/BMP 的 base64 data URL，`detail` 仅支持省略或 `"auto"`；不抓取远程 URL。
+- YOLO 系列模型 ID 支持相同顶层 `confidence`/`nms_iou` 及省略默认值；OCR ID 拒绝这两字段。OpenAI Python SDK 可在 `chat.completions.create` 传 `extra_body={"confidence":0.1,"nms_iou":0.3}`：SDK 将它们合并到 HTTP 正文顶层，wire 不支持字面 `extra_body` 对象。
 - 至少提供一张图片；按消息及 content 数组中的图片顺序推理。文字上下文不改变检测/OCR行为，这不是聊天生成模型。其他生成参数、工具调用、JSON Schema 输出和 Responses API 不在兼容范围，不支持的参数返回 400，不静默假装生效。
 - `choices[0].message.content` 是完整任务结果的 JSON 字符串：YOLO/新任务包含 `class_names/results`，OCR 包含 `results`；几何信息遵循上述各任务契约，不会编造 token usage。
 - `stream:true` 返回 `chat.completion.chunk` SSE（role、完整结果 content、finish_reason）及 `[DONE]`；不是逐 token 或逐图流。整批成功后才提交流头，之前的失败仍返回正常 HTTP JSON 错误。
@@ -486,6 +495,7 @@ v0、原生 v1、OpenAI-like 和 MCP 共用 `InferenceService`，不重复加载
 
 - `list_models`：可选 `limit`（1–200）和 `cursor`，返回 `data:[{id,kind,name}]` 及可选 `next_cursor`。
 - 自动生成的 `infer_yolo` / `infer_ocr` / `infer_seg` / `infer_pose` / `infer_obb`：`{"model":"配置原名","images":["原始base64"],"timeout_ms":60000}`；不要传带任务前缀的 catalog ID 或 data URL。输入 JSON Schema 随工具发现返回。
+- 只有 `infer_yolo`、`infer_seg`、`infer_pose`、`infer_obb` 的 schema 宣告并接受可选数值 `confidence`、`nms_iou`，例如在 YOLO arguments 中加入 `"confidence":0.1,"nms_iou":0.3`。`infer_ocr` 不宣告这些字段，显式检测控制会被拒绝。
 - 新版本结果含 `structuredContent` 及等价 JSON 文本；旧版本通过文本保留完整结构。执行错误为 `isError:true`，包含稳定 `error.code`、`image_index` 和恢复建议；协议错误使用 JSON-RPC error，字符串/整数请求 ID 不混用。
 - `notifications/cancelled` 的 `requestId` 取消本会话对应请求；断连取消该会话全部任务。取消及超时等待正在运行的原生阶段退出，不强制中断 ORT，也不影响其他会话的相同 ID。
 - 固定上限：32 会话、2 执行 worker、16 排队任务、每会话 8 个活动工具请求、64 MiB POST 正文、8 MiB 待发送结果/写缓冲。每 15 秒心跳；持续积压写缓冲约 30 秒或无活动请求且 5 分钟无消息时关闭会话，定时检查可能延迟至下一次心跳。超过结果缓冲上限会关闭会话，需缩小批次重新连接。
@@ -513,7 +523,7 @@ OpenAI SDK 的 `api_key` 在本服务中不是认证凭证；三个协议均需�
 
 ### C++ 迁移说明
 
-- `InferYOLO/InferOCR::Create/Run` 签名不变。Run 接受非空二维 `CV_8UC3`，支持非连续 ROI；灰度、BGRA、浮点图像以及非有限或超出 `[0,1]` 的 confidence 返回参数错误。
+- 必须重新编译 C++ SDK 及全部调用者：`InferYOLO::Run(image, YOLOInferenceOptions)` 和 `InferYOLOTask::Run(image, YOLOInferenceOptions)` 替换原 YOLO 标量 confidence 参数，不保留兼容重载。公开 aggregate `YOLOInferenceOptions` 含 `std::optional<float> confidence` 和 `std::optional<float> nms_iou`；`{}` 保留省略默认值。它拥有数值，不借用外部 options 存储。这些控制不改变 `Create` 签名；`InferOCR::Run(image, float confidence)` 保持不变。Run 接受非空二维 `CV_8UC3`，支持非连续 ROI；灰度、BGRA、浮点图像及显式非有限或超出 `[0,1]` 的控制值返回参数错误。
 - YOLO11/YOLO26 raw 检测在浮点模型空间按类别 NMS 后才裁剪/取整；v10 仅支持端到端 `[1,N,6]`，v10/v26 end-to-end 均不重复 NMS。confidence 阈值语义、黑色 Letterbox 填充和 OCR 检测归一化不变。
 - YOLO26 检测使用 `YOLOVersion::kV26`；`InferYOLOTask::Create` 的路径和内存重载现在都要求在 `task` 后显式传入版本。旧分割／姿态／OBB 调用补 `YOLOVersion::kV11`，YOLO26 调用传 `YOLOVersion::kV26`，可选 `device_id` 放在版本之后。
 - PP-OCR CTC 文件路径 Create 使用 Paddle 字典文件约定：文件不含 blank 和末尾空格类别，由加载器补空格；直接传入 map 时，调用者须提供全部非 blank 类别，键为 `class_id - 1`。SAR 使用上述独立字典约定。
@@ -834,7 +844,7 @@ int main() {
     auto model = InferYOLO::Create(**ctx, "assets/hd2-yolo11n-fp32.onnx", YOLOVersion::kV11);
     if (!model) return 1;
     auto image = cv::imread("assets/hd2.png");
-    auto result = (*model)->Run(image, 0.625f);
+    auto result = (*model)->Run(image, YOLOInferenceOptions{.confidence = 0.625f});
     return result ? 0 : 1;
 }
 ```

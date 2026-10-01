@@ -12,6 +12,7 @@ import threading
 import time
 
 from test_http_regression import Server, close_values, fixture, infer, model_stats, model_yaml, require
+from test_http_regression import THRESHOLD_INVALID, threshold_expected, threshold_image
 
 
 def wire(server, method, route, payload=None, headers=None, raw=None):
@@ -396,6 +397,104 @@ def mcp_matrix(server, images, baselines):
     print('PASS early body limits, split-upload error responses, session bound/recovery and keep-alive')
 
 
+def threshold_protocol_matrix(server):
+    shapes = [(64, 64), (128, 128)]
+    images = [threshold_image(*shape) for shape in shapes]
+    cases = [{}, {'confidence': .1}, {'confidence': .1, 'nms_iou': 0},
+             {'confidence': .1, 'nms_iou': 1}, {'confidence': 1}, {'confidence': 0, 'nms_iou': -0.0}]
+    for mode in ('raw', 'e2e'):
+        for controls in cases:
+            payload = chat_payload('yolo', 'tiny-threshold-' + mode, images, **controls)
+            expected = threshold_expected(mode, controls, shapes)
+            status, body = server.request('/v1/chat/completions', payload)
+            require(status == 200 and close_values(json.loads(body['choices'][0]['message']['content']), expected), str(body))
+            status, headers, raw = wire(server, 'POST', '/v1/chat/completions', {**payload, 'stream': True})
+            require(status == 200 and headers['Content-Type'].startswith('text/event-stream'), str((status, raw)))
+            chunks = [line[6:] for line in raw.decode().splitlines() if line.startswith('data: ')]
+            require(chunks[-1] == '[DONE]', 'Controlled stream missing terminator')
+            content = ''.join(json.loads(chunk)['choices'][0]['delta'].get('content', '') for chunk in chunks[:-1])
+            require(close_values(json.loads(content), expected), 'Controlled SSE result differs')
+    for version in ('2024-11-05', '2025-11-25'):
+        with Session(server) as session:
+            session.initialize(version)
+            tools = {tool['name']: tool for tool in session.call('tools/list')['result']['tools']}
+            for name in ('infer_yolo', 'infer_seg', 'infer_pose', 'infer_obb'):
+                require({'confidence', 'nms_iou'} <= tools[name]['inputSchema']['properties'].keys(), name)
+            require(not {'confidence', 'nms_iou'} & tools['infer_ocr']['inputSchema']['properties'].keys(), 'OCR schema controls')
+            for mode in ('raw', 'e2e'):
+                pending = []
+                for index, controls in enumerate(cases):
+                    request_id = f'{mode}-{index}'
+                    session.send('tools/call', {'name': 'infer_yolo', 'arguments': {
+                        'model': 'tiny-threshold-' + mode, 'images': images, **controls}}, request_id)
+                    pending.append((request_id, threshold_expected(mode, controls, shapes)))
+                for request_id, expected in pending:
+                    response = session.receive(request_id)
+                    require(('structuredContent' in response['result']) == (version != '2024-11-05'), 'MCP negotiated format')
+                    require(close_values(tool_data(response), expected), f'MCP controls differ: {request_id}')
+            for field in ('confidence', 'nms_iou'):
+                for value in THRESHOLD_INVALID:
+                    for batch in ([], ['%%%']):
+                        response = session.tool('infer_yolo', {'model': 'unknown', 'images': batch, field: value})
+                        require('error' not in response and response['result'].get('isError') is True, str(response))
+                        detail = json.loads(response['result']['content'][0]['text'])
+                        require(detail['error']['code'] == 'invalid_request', str(detail))
+                        if 'structuredContent' in response['result']:
+                            require(close_values(detail, response['result']['structuredContent']), 'MCP error parity')
+                response = session.tool('infer_ocr', {'model': 'unknown', 'images': [], field: .125 if field == 'confidence' else .3})
+                require(response['result'].get('isError') is True and
+                        json.loads(response['result']['content'][0]['text'])['error']['code'] == 'invalid_request', str(response))
+            for field in ('confidence', 'nms_iou'):
+                for literal in ('NaN', 'Infinity', '1e400', '-1e400'):
+                    session.post(raw='{"jsonrpc":"2.0","id":"syntax","method":"tools/call","params":'
+                                     '{"name":"infer_yolo","arguments":{"model":"unknown","images":[],"' +
+                                     field + '":' + literal + '}}}')
+                    require(session.receive(None)['error']['code'] == -32700, 'Numeric RPC parse contract')
+            valid_message = {'jsonrpc': '2.0', 'id': 'overflow', 'method': 'tools/call', 'params': {
+                'name': 'infer_yolo', 'arguments': {'model': 'tiny-threshold-raw', 'images': images, 'confidence': .1}}}
+            encoded = json.dumps(valid_message)
+            malformed = (encoded[:-1] + ',"extension":{"nested":[-1e400]}}',
+                         encoded.replace('"confidence": 0.1', '"confidence":1e400,"confidence":0.1'))
+            for raw in malformed:
+                session.post(raw=raw)
+                require(session.receive(None)['error']['code'] == -32700, 'Nested/duplicate overflow escaped RPC parsing')
+            string_model = session.tool('infer_yolo', {'model': 'NaN Infinity 1e400', 'images': images[:1]})
+            require('error' not in string_model and string_model['result'].get('isError') is True and
+                    json.loads(string_model['result']['content'][0]['text'])['error']['code'] == 'unknown_model',
+                    f'Numeric-looking model string was treated as JSON syntax: {string_model}')
+            require(close_values(tool_data(session.tool('infer_yolo', {
+                'model': 'tiny-threshold-raw', 'images': images, 'confidence': .1})),
+                threshold_expected('raw', {'confidence': .1}, shapes)), 'MCP parser errors changed valid recovery')
+    for field in ('confidence', 'nms_iou'):
+        for value in THRESHOLD_INVALID:
+            for batch in ([], ['%%%']):
+                for stream in (False, True):
+                    status, body = server.request('/v1/chat/completions',
+                        chat_payload('yolo', 'unknown', batch, stream=stream, **{field: value}))
+                    require(status == 400 and body['error']['code'] == 'invalid_request' and
+                            body['error']['type'] == 'invalid_request_error', str((status, body)))
+        status, body = server.request('/v1/chat/completions',
+                                      chat_payload('ocr', 'unknown', images[:1], **{field: .125 if field == 'confidence' else .3}))
+        require(status == 400 and body['error']['code'] == 'invalid_request', str((status, body)))
+    for field in ('confidence', 'nms_iou'):
+        for literal in ('NaN', 'Infinity', '1e400', '-1e400'):
+            raw = json.dumps(chat_payload('yolo', 'unknown', images[:1]))[:-1] + ',"' + field + '":' + literal + '}'
+            status, body = server.request('/v1/chat/completions', raw=raw)
+            require(status == 400 and body['error']['code'] == 'invalid_json', str((status, body)))
+    valid_chat = chat_payload('yolo', 'tiny-threshold-raw', images, confidence=.1)
+    encoded = json.dumps(valid_chat)
+    malformed = (encoded[:-1] + ',"extension":{"nested":[1e400]}}',
+                 encoded.replace('"confidence": 0.1', '"confidence":1e400,"confidence":0.1'))
+    for raw in malformed:
+        status, body = server.request('/v1/chat/completions', raw=raw)
+        require(status == 400 and body['error']['code'] == 'invalid_json',
+                f'Nested/duplicate overflow escaped OpenAI parsing: {status} {body}')
+    status, recovered = server.request('/v1/chat/completions', valid_chat)
+    require(status == 200 and close_values(json.loads(recovered['choices'][0]['message']['content']),
+            threshold_expected('raw', {'confidence': .1}, shapes)), 'OpenAI parser errors changed valid recovery')
+    print('PASS confidence/NMS OpenAI JSON/SSE and both MCP versions, semantic/syntax errors and OCR isolation')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', required=True, type=Path)
@@ -408,6 +507,7 @@ def main():
         try:
             server.wait_ready()
             unknown_model_matrix(server, images)
+            threshold_protocol_matrix(server)
             baselines = openai_matrix(server, images)
             mcp_matrix(server, images, baselines)
         except BaseException:

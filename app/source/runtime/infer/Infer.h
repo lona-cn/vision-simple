@@ -1,6 +1,8 @@
 #pragma once
 #include <onnxruntime_cxx_api.h>
 
+#include <bit>
+#include <cstdint>
 #include <expected>
 #include <opencv2/opencv.hpp>
 #include <optional>
@@ -68,6 +70,24 @@ enum class YOLOVersion : uint8_t {
   kV26 = 26,
 };
 
+// Per-call controls; omitted values preserve export-path defaults.
+struct YOLOInferenceOptions {
+  std::optional<float> confidence;
+  std::optional<float> nms_iou;
+
+  constexpr bool IsValid() const noexcept {
+    const auto valid = [](std::optional<float> value) constexpr {
+      if (!value) return true;
+      const auto word = std::bit_cast<uint32_t>(*value);
+      return word <= 0x3f800000u || word == 0x80000000u;
+    };
+    return valid(confidence) && valid(nms_iou);
+  }
+  constexpr bool HasControls() const noexcept {
+    return confidence.has_value() || nms_iou.has_value();
+  }
+};
+
 struct YOLOResult {
   int32_t class_id;
   cv::Rect bbox;
@@ -92,7 +112,7 @@ class VISION_SIMPLE_API InferYOLO {
   virtual YOLOVersion version() const noexcept = 0;
   virtual const std::vector<std::string>& class_names() const noexcept = 0;
   virtual RunResult Run(const cv::Mat& image,
-                        float confidence_threshold) noexcept = 0;
+                        YOLOInferenceOptions options) noexcept = 0;
   static CreateResult Create(InferContext& context, std::span<uint8_t> data,
                              YOLOVersion version,
                              size_t device_id = 0) noexcept;

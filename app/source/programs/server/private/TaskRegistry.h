@@ -27,5 +27,6 @@ const TaskDescriptor* FindTask(InferenceKind kind) noexcept;
 const TaskDescriptor* FindTask(std::string_view id) noexcept;
 ServiceResult<InferencePayload> RunRegisteredTask(
     RegisteredModel& model, InferPipeline& pipeline,
-    std::span<const cv::Mat> images, PipelineControl control) noexcept;
+    std::span<const cv::Mat> images, YOLOInferenceOptions options,
+    PipelineControl control) noexcept;
 }  // namespace vision_simple

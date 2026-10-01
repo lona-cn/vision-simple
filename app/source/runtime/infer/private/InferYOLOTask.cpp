@@ -100,8 +100,8 @@ class TaskModel final : public InferYOLOTask {
         return;
       }
   }
-  VSResult<void> Pre(Workspace& ws, const cv::Mat& image, float threshold) {
-    auto valid = ValidateInferInput(image, threshold);
+  VSResult<void> Pre(Workspace& ws, const cv::Mat& image, YOLOInferenceOptions options) {
+    auto valid = ValidateInferInput(image, options);
     if (!valid) return std::unexpected(std::move(valid.error()));
     auto& chw = ws.helper.Letterbox(
         image,
@@ -161,7 +161,9 @@ class TaskModel final : public InferYOLOTask {
         overlap;
     return total > 0 ? overlap / total : 0;
   }
-  RunResult Post(Workspace& ws, float threshold) {
+  RunResult Post(Workspace& ws, YOLOInferenceOptions options) {
+    const float threshold = options.confidence.value_or(.125f);
+    const double nms_iou = options.nms_iou ? double(*options.nms_iou) : .45;
     auto values = ws.binding.GetOutputValues();
     if (values.size() != outputs.size())
       return ModelError("Unexpected YOLO task outputs");
@@ -264,7 +266,7 @@ class TaskModel final : public InferYOLOTask {
       if (!end_to_end) {
         for (const auto& selected : kept)
           if (candidate.label == selected.label &&
-              IoU(candidate, selected, kind == YOLOTask::kOBB) > .45) {
+              IoU(candidate, selected, kind == YOLOTask::kOBB) > nms_iou) {
             suppress = true;
             break;
           }
@@ -348,19 +350,19 @@ class TaskModel final : public InferYOLOTask {
   class Task final : public detail::FrameTask {
     TaskModel& model;
     const cv::Mat& image;
-    float threshold;
+    YOLOInferenceOptions options;
     std::unique_ptr<Workspace> ws;
     detail::PipelineLane lane = detail::PipelineLane::kPreprocess;
     YOLOTaskFrameResult result;
 
    public:
-    Task(TaskModel& m, const cv::Mat& img, float t)
-        : model(m), image(img), threshold(t), ws(m.Acquire()) {}
+    Task(TaskModel& m, const cv::Mat& img, YOLOInferenceOptions opts)
+        : model(m), image(img), options(opts), ws(m.Acquire()) {}
     ~Task() override { model.Release(std::move(ws)); }
     VSResult<std::optional<detail::PipelineLane>> Advance() noexcept override {
       try {
         if (lane == detail::PipelineLane::kPreprocess) {
-          auto prepared = model.Pre(*ws, image, threshold);
+          auto prepared = model.Pre(*ws, image, options);
           if (!prepared) return std::unexpected(std::move(prepared.error()));
           lane = detail::PipelineLane::kInference;
           return lane;
@@ -370,7 +372,7 @@ class TaskModel final : public InferYOLOTask {
           lane = detail::PipelineLane::kPostprocess;
           return lane;
         }
-        auto decoded = model.Post(*ws, threshold);
+        auto decoded = model.Post(*ws, options);
         if (!decoded) return std::unexpected(std::move(decoded.error()));
         result = std::move(*decoded);
         return std::nullopt;
@@ -382,9 +384,9 @@ class TaskModel final : public InferYOLOTask {
       return std::move(result);
     }
   };
-  RunResult Run(const cv::Mat& image, float threshold) noexcept override {
+  RunResult Run(const cv::Mat& image, YOLOInferenceOptions options) noexcept override {
     try {
-      Task task(*this, image, threshold);
+      Task task(*this, image, options);
       for (;;) {
         auto next = task.Advance();
         if (!next) return std::unexpected(std::move(next.error()));
@@ -398,13 +400,13 @@ class TaskModel final : public InferYOLOTask {
 }  // namespace
 
 VSResult<std::unique_ptr<detail::FrameTask>> detail::MakeFrameTask(
-    InferYOLOTask& model, const cv::Mat& image, float threshold) noexcept {
+    InferYOLOTask& model, const cv::Mat& image, YOLOInferenceOptions options) noexcept {
   try {
     auto* native = dynamic_cast<TaskModel*>(&model);
     if (!native)
       return MK_VSERROR(VisionSimpleErrorCode::kUnimplementedError,
                         "Unsupported staged YOLO task backend");
-    return std::make_unique<TaskModel::Task>(*native, image, threshold);
+    return std::make_unique<TaskModel::Task>(*native, image, options);
   } catch (const std::exception& e) {
     return MK_VSERROR(VisionSimpleErrorCode::kRuntimeError, e.what());
   }

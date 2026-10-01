@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "InferenceProtocol.h"
+#include "InferenceRequestOptions.h"
 #include "HTTPAuthority.h"
 
 namespace vision_simple {
@@ -172,10 +173,21 @@ Json Tools(size_t max_images) {
          "next_cursor for more entries; use each entry's raw name with its "
          "matching infer_<kind> tool, not its prefixed catalog ID."},
         {"inputSchema", paging}}});
-  for (const auto& task : RegisteredTasks())
+  for (const auto& task : RegisteredTasks()) {
+    Json schema = infer;
+    if (task.kind != InferenceKind::kOCR) {
+      schema["properties"]["confidence"] =
+          {{"type", "number"}, {"minimum", 0}, {"maximum", 1},
+           {"description", "Detection confidence cutoff; omit for 0.125."}};
+      schema["properties"]["nms_iou"] =
+          {{"type", "number"}, {"minimum", 0}, {"maximum", 1},
+           {"description", "Raw-output NMS IoU cutoff; omit for the task default. "
+                           "Valid but inactive for end-to-end exports."}};
+    }
     tools.push_back({{"name", "infer_" + std::string(task.id)},
                      {"description", task.description},
-                     {"inputSchema", infer}});
+                     {"inputSchema", std::move(schema)}});
+  }
   return tools;
 }
 }  // namespace
@@ -380,7 +392,7 @@ struct MCPAdapter::State : std::enable_shared_from_this<MCPAdapter::State> {
   void Receive(const std::shared_ptr<Session>& session,
                const std::string& body) {
     const auto started = Clock::now();
-    Json message = Json::parse(body, nullptr, false);
+    Json message = ParseInferenceJson(body);
     if (message.is_discarded()) {
       Send(session, RpcError(nullptr, -32700, "Parse error"));
       return;
@@ -586,7 +598,15 @@ struct MCPAdapter::State : std::enable_shared_from_this<MCPAdapter::State> {
            job.key);
       return;
     }
-    if (!Fields(args, {"model", "images", "timeout_ms"}) ||
+    const auto* task = FindTask(std::string_view(job.tool).substr(6));
+    if (!task) {
+      invalid();
+      return;
+    }
+    const bool fields_valid = task->kind == InferenceKind::kOCR
+        ? Fields(args, {"model", "images", "timeout_ms"})
+        : Fields(args, {"model", "images", "timeout_ms", "confidence", "nms_iou"});
+    if (!fields_valid ||
         !args.contains("model") || !args["model"].is_string() ||
         args["model"].get_ref<const std::string&>().empty() ||
         !args.contains("images") || !args["images"].is_array() ||
@@ -595,6 +615,17 @@ struct MCPAdapter::State : std::enable_shared_from_this<MCPAdapter::State> {
         (args.contains("timeout_ms") &&
          !Bounded(args["timeout_ms"], 1, 300000))) {
       invalid();
+      return;
+    }
+    const auto options = ParseInferenceOptions(args, task->kind);
+    if (!options) {
+      Send(job.session,
+           RpcResult(job.id, ToolResult(
+               {{"error", {{"code", "invalid_request"},
+                           {"message", options.error().message},
+                           {"param", options.error().parameter},
+                           {"image_index", nullptr}}}}, job.modern, true)),
+           {}, job.key);
       return;
     }
     std::vector<std::string> images;
@@ -612,14 +643,9 @@ struct MCPAdapter::State : std::enable_shared_from_this<MCPAdapter::State> {
     if (args.contains("timeout_ms"))
       control.timeout =
           std::chrono::milliseconds(args["timeout_ms"].get<int64_t>());
-    const auto* task = FindTask(std::string_view(job.tool).substr(6));
-    if (!task) {
-      invalid();
-      return;
-    }
     auto response =
         service->Run(task->kind, args["model"].get_ref<const std::string&>(),
-                     images, control);
+                     images, *options, control);
     if (!response) {
       Send(job.session,
            RpcResult(job.id, ToolError(response.error(), job.modern)), {},

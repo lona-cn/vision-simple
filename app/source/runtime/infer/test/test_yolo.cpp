@@ -84,11 +84,6 @@ int main(int argc, char* argv[]) {
   const char* WINDIW_TITLE = "YOLO Detection";
   cv::namedWindow(WINDIW_TITLE, cv::WINDOW_NORMAL); // 支持调整大小
   cv::resizeWindow(WINDIW_TITLE, 1720, 720);        // 设置窗口大小
-  // auto image = cv::imread("assets/hd2.png");
-  // auto result = infer_yolo->get()->Run(image, 0.625);
-  // drawYOLOResults(image, result->results);
-  // cv::imshow("YOLO Detection", image);
-  // cv::waitKey(0);
   SafeQueue<cv::Mat> decode_queue, show_queue;
   std::atomic_bool exit_flag{false};
   std::jthread video_thread{[&] {
@@ -113,7 +108,7 @@ int main(int argc, char* argv[]) {
           decode_queue.PopFrontFor(std::chrono::milliseconds(1));
       if (!front_frame_opt) continue;
       auto img = *std::move(front_frame_opt);
-      auto result = infer_yolo->get()->Run(img, 0.225f);
+      auto result = infer_yolo->get()->Run(img, YOLOInferenceOptions{0.225f});
       drawYOLOResults(img, result->results);
       fps_counter.update();
       fps_counter.display(img);

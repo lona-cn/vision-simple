@@ -165,7 +165,7 @@ YOLOFilter::YOLOFilter(YOLOVersion version,
 YOLOVersion YOLOFilter::version() const noexcept { return version_; }
 
 YOLOFilter::FilterResult YOLOFilter::DecodeRaw(
-    std::span<const float> infer_output, float confidence_threshold,
+    std::span<const float> infer_output, float confidence_threshold, float nms_iou,
     const LetterboxTransform& transform) const {
   if (!ValidOutputShape(YOLODetectionLayout::kRaw, shapes_, class_names_.size()) ||
       !ValidOutputLength(shapes_, infer_output.size()))
@@ -238,7 +238,7 @@ YOLOFilter::FilterResult YOLOFilter::DecodeRaw(
       const double intersection = width * height;
       const double iou = intersection /
                          (candidate.area + other.area - intersection);
-      if (iou > 0.3f) other.suppressed = true;
+      if (iou > nms_iou) other.suppressed = true;
     }
     const auto box = VisionHelper::ScaleCoords(transform, candidate.xyxy);
     if (box.width > 0 && box.height > 0)
@@ -283,8 +283,12 @@ YOLOFilter::FilterResult YOLOFilter::DecodeEndToEnd(
 }
 
 YOLOFilter::FilterResult YOLOFilter::operator()(
-    std::span<const float> infer_output, float confidence_threshold,
+    std::span<const float> infer_output, YOLOInferenceOptions options,
     const LetterboxTransform& transform) const {
+  if (!options.IsValid())
+    return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
+                      "Detector controls must be finite and within [0,1]");
+  const float confidence_threshold = options.confidence.value_or(.125f);
   if (version_ != YOLOVersion::kV10 && version_ != YOLOVersion::kV11 &&
       version_ != YOLOVersion::kV26)
     return std::unexpected(VisionSimpleError{
@@ -292,7 +296,8 @@ YOLOFilter::FilterResult YOLOFilter::operator()(
   if (layout_ == YOLODetectionLayout::kEndToEnd)
     return DecodeEndToEnd(infer_output, confidence_threshold, transform);
   if (layout_ == YOLODetectionLayout::kRaw)
-    return DecodeRaw(infer_output, confidence_threshold, transform);
+    return DecodeRaw(infer_output, confidence_threshold,
+                     options.nms_iou.value_or(.3f), transform);
   return std::unexpected(VisionSimpleError{
       VisionSimpleErrorCode::kModelError, "Missing YOLO detection layout"});
 }
@@ -319,17 +324,17 @@ struct InferYOLOOrtImpl::Workspace {
 class InferYOLOOrtImpl::Task final : public detail::FrameTask {
   InferYOLOOrtImpl& model_;
   const cv::Mat& image_;
-  float threshold_;
+  YOLOInferenceOptions options_;
   std::unique_ptr<Workspace> workspace_;
   detail::PipelineLane lane_ = detail::PipelineLane::kPreprocess;
   YOLOFrameResult result_;
 
  public:
-  Task(InferYOLOOrtImpl& model, const cv::Mat& image, float threshold,
+  Task(InferYOLOOrtImpl& model, const cv::Mat& image, YOLOInferenceOptions options,
        std::unique_ptr<Workspace> workspace)
       : model_(model),
         image_(image),
-        threshold_(threshold),
+        options_(options),
         workspace_(std::move(workspace)) {}
 
   ~Task() override { model_.ReleaseWorkspace(std::move(workspace_)); }
@@ -337,7 +342,7 @@ class InferYOLOOrtImpl::Task final : public detail::FrameTask {
   VSResult<std::optional<detail::PipelineLane>> Advance() noexcept override {
     try {
       if (lane_ == detail::PipelineLane::kPreprocess) {
-        auto prepared = model_.PreProcess(*workspace_, image_, threshold_);
+        auto prepared = model_.PreProcess(*workspace_, image_, options_);
         if (!prepared) return std::unexpected(std::move(prepared.error()));
         lane_ = detail::PipelineLane::kInference;
         return lane_;
@@ -347,7 +352,7 @@ class InferYOLOOrtImpl::Task final : public detail::FrameTask {
         lane_ = detail::PipelineLane::kPostprocess;
         return lane_;
       }
-      auto result = model_.PostProcess(*workspace_, threshold_);
+      auto result = model_.PostProcess(*workspace_, options_);
       if (!result) return std::unexpected(std::move(result.error()));
       result_ = std::move(*result);
       return std::nullopt;
@@ -423,7 +428,7 @@ void InferYOLOOrtImpl::ReleaseWorkspace(
 
 VSResult<std::unique_ptr<vision_simple::detail::FrameTask>>
 vision_simple::detail::MakeFrameTask(InferYOLO& model, const cv::Mat& image,
-                                     float confidence_threshold) noexcept {
+                                     YOLOInferenceOptions options) noexcept {
   try {
     auto* ort = dynamic_cast<InferYOLOOrtImpl*>(&model);
     if (!ort)
@@ -431,7 +436,7 @@ vision_simple::detail::MakeFrameTask(InferYOLO& model, const cv::Mat& image,
           VisionSimpleError{VisionSimpleErrorCode::kUnimplementedError,
                             "Unsupported YOLO backend for staged inference"});
     return std::make_unique<InferYOLOOrtImpl::Task>(
-        *ort, image, confidence_threshold, ort->AcquireWorkspace());
+        *ort, image, options, ort->AcquireWorkspace());
   } catch (const cv::Exception& e) {
     return std::unexpected(
         VisionSimpleError{VisionSimpleErrorCode::kRuntimeError, e.what()});
@@ -452,8 +457,8 @@ const std::vector<std::string>& InferYOLOOrtImpl::class_names() const noexcept {
 
 VSResult<void> InferYOLOOrtImpl::PreProcess(Workspace& workspace,
                                             const cv::Mat& image,
-                                            float confidence_threshold) {
-  if (auto valid = ValidateInferInput(image, confidence_threshold); !valid)
+                                            YOLOInferenceOptions options) {
+  if (auto valid = ValidateInferInput(image, options); !valid)
     return std::unexpected(std::move(valid.error()));
   auto timer = LogContext::ScopedTimer("YOLO::preprocess", nullptr);
   auto& chw =
@@ -490,7 +495,7 @@ void InferYOLOOrtImpl::Execute(Workspace& workspace) {
 }
 
 InferYOLO::RunResult InferYOLOOrtImpl::PostProcess(Workspace& workspace,
-                                                   float confidence_threshold) {
+                                                   YOLOInferenceOptions options) {
   auto timer = LogContext::ScopedTimer("YOLO::postprocess", nullptr);
   auto outputs = workspace.binding.GetOutputValues();
   if (outputs.size() != 1 || !outputs[0].IsTensor())
@@ -515,22 +520,22 @@ InferYOLO::RunResult InferYOLOOrtImpl::PostProcess(Workspace& workspace,
     output_data = output.GetTensorData<float>();
   }
   auto result = filter_(std::span<const float>(output_data, count),
-                        confidence_threshold, workspace.transform);
+                        options, workspace.transform);
   LogFacade::Timing("yolo", "YOLO::postprocess", timer.elapsed_ms());
   return result;
 }
 
 InferYOLO::RunResult InferYOLOOrtImpl::Run(
-    const cv::Mat& image, float confidence_threshold) noexcept {
+    const cv::Mat& image, YOLOInferenceOptions options) noexcept {
   try {
     const std::lock_guard lock(run_mutex_);
     auto total_timer = LogContext::ScopedTimer(
         "YOLO::Run::total", LogFacade::TimerCallback("yolo"));
     LogFacade::Info("yolo", "YOLO inference started");
-    auto prepared = PreProcess(*legacy_workspace_, image, confidence_threshold);
+    auto prepared = PreProcess(*legacy_workspace_, image, options);
     if (!prepared) return std::unexpected(std::move(prepared.error()));
     Execute(*legacy_workspace_);
-    return PostProcess(*legacy_workspace_, confidence_threshold);
+    return PostProcess(*legacy_workspace_, options);
   } catch (const cv::Exception& e) {
     return std::unexpected(
         VisionSimpleError{VisionSimpleErrorCode::kRuntimeError, e.what()});

@@ -268,7 +268,7 @@ struct SubtitleService::Impl {
             frame(cv::Rect(left, top, right - left, bottom - top));
         auto response =
             inference->RunFrames(InferenceKind::kOCR, job->options.model,
-                                 std::span<const cv::Mat>(&cropped, 1),
+                                 std::span<const cv::Mat>(&cropped, 1), {},
                                  ServiceControl{job->cancel.get_token()});
         if (!response)
           return job->cancel.stop_requested() ? nullptr : "ocr_failed";

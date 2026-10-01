@@ -18,7 +18,7 @@ int test_v11_class_aware_nms() {
   const std::array<float, 24> output{
       100, 100, 100, 400, 100,  100,  100,   400,  80,    80,    80,    80,
       80,  80,  80,  80,  0.9f, 0.8f, 0.05f, 0.1f, 0.05f, 0.05f, 0.85f, 0.05f};
-  auto result = filter(output, 0.5f, transform);
+  auto result = filter(output, YOLOInferenceOptions{0.5f}, transform);
   TEST_ASSERT(result.has_value(), "v11 valid output accepted");
   TEST_ASSERT_EQ(
       result->results.size(), size_t{2},
@@ -40,7 +40,7 @@ int test_v11_class_aware_nms() {
     }
   }
   TEST_ASSERT(first && second, "both classes retained");
-  auto boundary = filter(output, 0.9f, transform);
+  auto boundary = filter(output, YOLOInferenceOptions{0.9f}, transform);
   TEST_ASSERT(boundary && boundary->results.empty(),
               "v11 preserves strict confidence threshold");
   TEST_PASS("v11 class-aware NMS, confidence and class mapping");
@@ -56,7 +56,7 @@ int test_raw_nms_before_clipping(YOLOVersion version) {
     const double gain = 640.0 / size;
     const LetterboxTransform transform{{size, size}, {640, 640}, {640, 640},
                                        gain, gain, 0, 0};
-    auto result = filter(output, 0.5f, transform);
+    auto result = filter(output, YOLOInferenceOptions{0.5f, .4f}, transform);
     TEST_ASSERT(result.has_value(), "raw clipping witness accepted");
     TEST_ASSERT_EQ(result->results.size(), size_t{2},
                    "raw NMS keeps both unclipped model-space candidates");
@@ -85,7 +85,7 @@ int test_raw_nms_before_rounding(YOLOVersion version) {
     const double gain = 640.0 / size;
     const LetterboxTransform transform{{size, size}, {640, 640}, {640, 640},
                                        gain, gain, 0, 0};
-    auto result = filter(output, 0.5f, transform);
+    auto result = filter(output, YOLOInferenceOptions{0.5f}, transform);
     TEST_ASSERT(result.has_value(), "raw subpixel witness accepted");
     TEST_ASSERT_EQ(result->results.size(), size_t{1},
                    "raw NMS suppresses using floating model-space IoU");
@@ -94,6 +94,11 @@ int test_raw_nms_before_rounding(YOLOVersion version) {
     TEST_ASSERT_EQ(result->results[0].bbox,
                    size == 640 ? cv::Rect(10, 10, 4, 4) : cv::Rect(21, 20, 8, 8),
                    "floating NMS survivor is mapped and rounded for output");
+    const auto relaxed = filter(output, YOLOInferenceOptions{.5f, .4f}, transform);
+    TEST_ASSERT(relaxed && relaxed->results.size() == 2 &&
+                    relaxed->results[0].confidence == .9f &&
+                    relaxed->results[1].confidence == .8f,
+                "explicit IoU uses floating geometry rather than rounded output");
   }
   TEST_PASS("raw NMS uses subpixel geometry independently of original size");
   return 0;
@@ -111,7 +116,7 @@ int test_raw_nms_classes_and_empty_boxes(YOLOVersion version) {
       20, 20, 20, 20, 20, 20, 10, 0.2f,
       0.9f, 0.8f, 0.1f, 0.95f, 0.95f, 0.5f, 0.95f, 0.95f,
       0.1f, 0.1f, 0.85f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
-  auto result = filter(output, 0.5f, transform);
+  auto result = filter(output, YOLOInferenceOptions{0.5f}, transform);
   TEST_ASSERT(result.has_value(), "raw class and empty-box candidates accepted");
   TEST_ASSERT_EQ(result->results.size(), size_t{2},
                  "classes isolated; degenerate, clipped and rounded empty boxes discarded");
@@ -128,12 +133,12 @@ int test_raw_nms_classes_and_empty_boxes(YOLOVersion version) {
     }
   }
   TEST_ASSERT(first && second, "negative-coordinate NMS never mixes classes");
-  auto boundary = filter(output, 0.95f, transform);
+  auto boundary = filter(output, YOLOInferenceOptions{0.95f}, transform);
   TEST_ASSERT(boundary && boundary->results.empty(), "raw confidence equality is excluded");
-  auto empty = filter(output, 1.0f, transform);
+  auto empty = filter(output, YOLOInferenceOptions{1.0f}, transform);
   TEST_ASSERT(empty && empty->results.empty(), "no eligible candidates yields empty output");
   YOLOFilter zero(version, {"target"}, {1, 5, 0}, YOLODetectionLayout::kRaw);
-  auto zero_result = zero({}, 0.5f, transform);
+  auto zero_result = zero({}, YOLOInferenceOptions{0.5f}, transform);
   TEST_ASSERT(zero_result && zero_result->results.empty(), "zero raw rows yield empty output");
   TEST_PASS("raw class isolation, strict threshold and empty-box handling");
   return 0;
@@ -150,7 +155,7 @@ int test_v10_coordinates_without_second_nms() {
       100,  200, 300,  300, 0.9f, 0,   100,  200, 300,   300,
       0.5f, 0,   -20,  130, 50,   170, 0.8f, 0,   100,   200,
       100,  300, 0.9f, 0,   400,  200, 500,  300, 0.49f, 0};
-  auto result = filter(output, 0.5f, transform);
+  auto result = filter(output, YOLOInferenceOptions{0.5f}, transform);
   TEST_ASSERT(result.has_value(), "v10 end-to-end output accepted");
   TEST_ASSERT_EQ(result->results.size(), size_t{3},
                  "v10 retains overlapping detections without NMS");
@@ -176,30 +181,30 @@ int test_malformed_shapes_and_lengths() {
            {1, -1, 6},
            {1, std::numeric_limits<int64_t>::max(), 6}}) {
     YOLOFilter filter(YOLOVersion::kV10, {"target"}, shape);
-    auto result = filter(detection, 0.5f, transform);
+    auto result = filter(detection, YOLOInferenceOptions{0.5f}, transform);
     TEST_ASSERT(!result, "v10 rejects unsupported shape");
     TEST_ASSERT(result.error().code == VisionSimpleErrorCode::kModelError,
                 "v10 shape is model error");
   }
   YOLOFilter v10(YOLOVersion::kV10, {"target"}, {1, 1, 6});
-  TEST_ASSERT(!v10(std::span<const float>(detection).first(5), 0.5f, transform),
+  TEST_ASSERT(!v10(std::span<const float>(detection).first(5), YOLOInferenceOptions{0.5f}, transform),
               "v10 rejects truncated span");
   std::array<float, 7> extra{};
-  TEST_ASSERT(!v10(extra, 0.5f, transform), "v10 rejects trailing data");
+  TEST_ASSERT(!v10(extra, YOLOInferenceOptions{0.5f}, transform), "v10 rejects trailing data");
   for (const auto& shape : std::vector<std::vector<int64_t>>{
            {}, {1, 5}, {2, 5, 1}, {1, 4, 1}, {1, 6, 1}, {1, 5, -1}}) {
     YOLOFilter filter(YOLOVersion::kV11, {"target"}, shape);
-    auto result = filter(detection, 0.5f, transform);
+    auto result = filter(detection, YOLOInferenceOptions{0.5f}, transform);
     TEST_ASSERT(!result, "v11 rejects malformed shape or class count");
     TEST_ASSERT(result.error().code == VisionSimpleErrorCode::kModelError,
                 "v11 shape is model error");
   }
   YOLOFilter v11(YOLOVersion::kV11, {"target"}, {1, 5, 1});
-  TEST_ASSERT(!v11(std::span<const float>(detection).first(4), 0.5f, transform),
+  TEST_ASSERT(!v11(std::span<const float>(detection).first(4), YOLOInferenceOptions{0.5f}, transform),
               "v11 rejects truncated span");
-  TEST_ASSERT(!v11(detection, 0.5f, transform), "v11 rejects trailing data");
+  TEST_ASSERT(!v11(detection, YOLOInferenceOptions{0.5f}, transform), "v11 rejects trailing data");
   YOLOFilter empty(YOLOVersion::kV10, {"target"}, {1, 0, 6});
-  auto no_detections = empty({}, 0.5f, transform);
+  auto no_detections = empty({}, YOLOInferenceOptions{0.5f}, transform);
   TEST_ASSERT(no_detections && no_detections->results.empty(),
               "zero detections are successful empty output");
   TEST_PASS("rank, shape, class dimensions and exact span lengths");
@@ -214,7 +219,7 @@ int test_malformed_class_and_nonfinite_values() {
        {-1.0f, 1.0f, 0.5f, 1e30f, std::bit_cast<float>(0x7fc00000u),
         std::bit_cast<float>(0x7f800000u)}) {
     const std::array<float, 6> output{10, 10, 20, 20, 0.1f, class_id};
-    auto result = v10(output, 0.5f, transform);
+    auto result = v10(output, YOLOInferenceOptions{0.5f}, transform);
     TEST_ASSERT(!result,
                 "invalid class rejected even below confidence threshold");
     TEST_ASSERT(result.error().code == VisionSimpleErrorCode::kModelError,
@@ -223,10 +228,10 @@ int test_malformed_class_and_nonfinite_values() {
   YOLOFilter v11(YOLOVersion::kV11, {"target"}, {1, 5, 1});
   std::array<float, 5> output{10, 10, 20, 20,
                               std::bit_cast<float>(0x7fc00000u)};
-  TEST_ASSERT(!v11(output, 0.5f, transform),
+  TEST_ASSERT(!v11(output, YOLOInferenceOptions{0.5f}, transform),
               "non-finite class confidence rejected");
   output = {std::bit_cast<float>(0x7f800000u), 10, 20, 20, 0.9f};
-  TEST_ASSERT(!v11(output, 0.5f, transform), "non-finite coordinates rejected");
+  TEST_ASSERT(!v11(output, YOLOInferenceOptions{0.5f}, transform), "non-finite coordinates rejected");
   TEST_PASS("class indices and non-finite output rejected safely");
   return 0;
 }
@@ -245,7 +250,7 @@ int test_v26_layouts_and_metadata() {
       60, 60, 140, 140, 0.9f, 0, 60, 60, 140, 140, 0.8f, 0,
       60, 60, 140, 140, 0.85f, 1, 60, 60, 140, 140, 0.5f, 0,
       60, 60, 140, 140, 0.1f, 0, 60, 60, 140, 140, 0.1f, 0};
-  auto result = e2e(rows, 0.5f, transform);
+  auto result = e2e(rows, YOLOInferenceOptions{0.5f}, transform);
   TEST_ASSERT(result && result->results.size() == 4,
               "YOLO26 end-to-end keeps overlaps and threshold equality");
   TEST_ASSERT_EQ(result->results[0].bbox, cv::Rect(60, 60, 80, 80),
@@ -263,36 +268,36 @@ int test_v26_layouts_and_metadata() {
       80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80,
       0.9f, 0.8f, 0.05f, 0.5f, 0.1f, 0.1f,
       0.05f, 0.05f, 0.85f, 0.1f, 0.1f, 0.1f};
-  result = raw(channels, 0.5f, transform);
+  result = raw(channels, YOLOInferenceOptions{0.5f}, transform);
   TEST_ASSERT(result && result->results.size() == 2,
               "YOLO26 raw applies class-aware NMS and strict threshold");
   TEST_ASSERT_EQ(result->results[0].bbox, cv::Rect(60, 60, 80, 80),
                  "YOLO26 raw boxes are center xywh");
   YOLOFilter unspecified(YOLOVersion::kV26, {"first", "second"}, {1, 6, 6});
-  TEST_ASSERT(!unspecified(channels, 0.5f, transform),
+  TEST_ASSERT(!unspecified(channels, YOLOInferenceOptions{0.5f}, transform),
               "ambiguous shape alone never selects YOLO26 mode");
   auto malformed = rows;
   malformed[5] = 0.5f;
-  TEST_ASSERT(!e2e(malformed, 0.5f, transform),
+  TEST_ASSERT(!e2e(malformed, YOLOInferenceOptions{0.5f}, transform),
               "YOLO26 rejects fractional class indexes");
   malformed = channels;
   malformed[0] = std::numeric_limits<float>::max();
   malformed[12] = std::numeric_limits<float>::max();
-  TEST_ASSERT(!raw(malformed, 0.5f, transform),
+  TEST_ASSERT(!raw(malformed, YOLOInferenceOptions{0.5f}, transform),
               "YOLO26 rejects coordinate arithmetic overflow");
   malformed = channels;
   malformed[35] = std::numeric_limits<float>::quiet_NaN();
-  TEST_ASSERT(!raw(malformed, 0.5f, transform),
+  TEST_ASSERT(!raw(malformed, YOLOInferenceOptions{0.5f}, transform),
               "YOLO26 rejects nonfinite scores below threshold");
   for (const auto& shape : std::vector<std::vector<int64_t>>{
            {2, 6, 6}, {1, -1, 6}, {1, 6, -1},
            {1, std::numeric_limits<int64_t>::max(), 6}}) {
     YOLOFilter invalid_shape(YOLOVersion::kV26, {"first", "second"}, shape,
                              YOLODetectionLayout::kEndToEnd);
-    TEST_ASSERT(!invalid_shape(rows, 0.5f, transform),
+    TEST_ASSERT(!invalid_shape(rows, YOLOInferenceOptions{0.5f}, transform),
                 "YOLO26 rejects dynamic, batched and oversized outputs");
   }
-  TEST_ASSERT(!e2e(std::span(rows).first(35), 0.5f, transform),
+  TEST_ASSERT(!e2e(std::span(rows).first(35), YOLOInferenceOptions{0.5f}, transform),
               "YOLO26 rejects truncated tensors");
   const std::array<std::array<std::string_view, 3>, 17> invalid{{
       {"", "True", ""},

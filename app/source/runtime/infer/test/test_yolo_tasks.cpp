@@ -1,3 +1,4 @@
+#include <bit>
 #include <array>
 #include <cmath>
 #include <filesystem>
@@ -65,10 +66,36 @@ int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
   auto half = InferYOLOTask::Create(context, bytes->span(), task, version);
   TEST_ASSERT(half, "create FP16 task model from memory");
   const cv::Mat square(64, 64, CV_8UC3, cv::Scalar::all(0));
-  auto reference = (*model)->Run(square, .5f);
-  auto half_result = (*half)->Run(square, .5f);
+  auto reference = (*model)->Run(square, YOLOInferenceOptions{.5f});
+  auto half_result = (*half)->Run(square, YOLOInferenceOptions{.5f});
   TEST_ASSERT(reference && half_result && Same(*reference, *half_result),
               "FP16/FP32 decode agrees");
+  const auto unfiltered = (*model)->Run(square, YOLOInferenceOptions{.5f, 1.f});
+  TEST_ASSERT(unfiltered && std::visit([](const auto& frame) { return frame.results.size() == 3; }, *unfiltered),
+              "raw IoU1 retains duplicate; one-to-one exports keep every row");
+  auto survivors = *unfiltered;
+  if (!end_to_end) std::visit([](auto& frame) { frame.results.pop_back(); }, survivors);
+  TEST_ASSERT(Same(*reference, survivors), "NMS controls preserve surviving masks, keypoints and oriented geometry");
+  if (end_to_end) {
+    const auto zero_iou = (*model)->Run(square, YOLOInferenceOptions{.5f, 0.f});
+    TEST_ASSERT(zero_iou && Same(*zero_iou, *reference), "one-to-one task outputs never receive a second NMS");
+  }
+  const auto equality = (*model)->Run(square, YOLOInferenceOptions{.95f, 1.f});
+  TEST_ASSERT(equality && std::visit([](const auto& frame) {
+                return frame.results.size() == 1 && frame.results[0].confidence == .95f;
+              }, *equality), "task confidence equality remains inclusive");
+  for (uint32_t bits : {0x7fc00001u, 0xffc00001u, 0x7f800000u, 0xff800000u,
+                        0x80000001u, 0xbf000000u, 0x3f800001u}) {
+    for (bool nms : {false, true}) {
+      YOLOInferenceOptions options;
+      (nms ? options.nms_iou : options.confidence) = std::bit_cast<float>(bits);
+      const auto invalid = (*model)->Run(square, options);
+      TEST_ASSERT(!invalid && invalid.error().code == VisionSimpleErrorCode::kParameterError,
+                  "task rejects invalid optional controls before decoding");
+      const auto recovery = (*model)->Run(square, YOLOInferenceOptions{.5f});
+      TEST_ASSERT(recovery && Same(*recovery, *reference), "task control error leaves geometry and workspace unchanged");
+    }
+  }
   if (task == YOLOTask::kSegmentation) {
     const auto& items = std::get<YOLOSegmentationFrame>(*reference).results;
     TEST_ASSERT(items.size() == (end_to_end ? 3 : 2),
@@ -91,7 +118,7 @@ int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
     }
     const cv::Mat saved = items[0].mask.clone();
     auto again =
-        (*model)->Run(cv::Mat(57, 101, CV_8UC3, cv::Scalar::all(255)), .5f);
+        (*model)->Run(cv::Mat(57, 101, CV_8UC3, cv::Scalar::all(255)), YOLOInferenceOptions{.5f});
     TEST_ASSERT(again && !cv::countNonZero(items[0].mask != saved),
                 "later workspace reuse does not mutate retained masks");
   } else if (task == YOLOTask::kPose) {
@@ -108,7 +135,7 @@ int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
                     Near(items[1].keypoints[1].confidence, .2f),
                 "keypoint confidence below detection threshold is preserved");
     auto wide =
-        (*model)->Run(cv::Mat(57, 101, CV_8UC3, cv::Scalar::all(0)), .5f);
+        (*model)->Run(cv::Mat(57, 101, CV_8UC3, cv::Scalar::all(0)), YOLOInferenceOptions{.5f});
     TEST_ASSERT(wide, "pose accepts non-square original");
     const auto& point = std::get<YOLOPoseFrame>(*wide).results[1].keypoints[0];
     TEST_ASSERT(
@@ -129,7 +156,7 @@ int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
     TEST_ASSERT(Near(center.x, 32) && Near(center.y, 32),
                 "OBB retains center coordinates rather than decoding as xyxy");
     auto wide =
-        (*model)->Run(cv::Mat(16, 128, CV_8UC3, cv::Scalar::all(0)), .5f);
+        (*model)->Run(cv::Mat(16, 128, CV_8UC3, cv::Scalar::all(0)), YOLOInferenceOptions{.5f});
     TEST_ASSERT(wide, "OBB supports severe letterbox padding");
     const auto& corners = std::get<YOLOOBBFrame>(*wide).results[1].corners;
     TEST_ASSERT(
@@ -143,21 +170,31 @@ int Exercise(InferContext& context, const fs::path& assets, YOLOTask task,
        {cv::Size(64, 64), cv::Size(101, 57), cv::Size(128, 64),
         cv::Size(32, 96), cv::Size(64, 64)})
     images.emplace_back(size, CV_8UC3, cv::Scalar::all(0));
-  const auto batch = (*pipeline)->Run(**model, images, .5f);
+  for (const auto options : {YOLOInferenceOptions{.5f, 1.f}, YOLOInferenceOptions{.95f, 1.f}, YOLOInferenceOptions{.5f, 0.f}}) {
+    const auto controlled = (*pipeline)->Run(**model, images, options);
+    TEST_ASSERT(controlled && controlled->size() == images.size(), "staged task controls complete the batch");
+    for (size_t i = 0; i < images.size(); ++i) {
+      const auto direct = (*model)->Run(images[i], options);
+      TEST_ASSERT(direct && Same(*direct, (*controlled)[i]), "staged task controls preserve exact masks/keypoints/corners per frame");
+    }
+  }
+  const auto bad_nms = (*pipeline)->Run(**model, {}, YOLOInferenceOptions{std::nullopt, std::bit_cast<float>(0x80000001u)});
+  TEST_ASSERT(!bad_nms && bad_nms.error().kind == PipelineFailureKind::kInvalidRequest, "task pipeline rejects invalid NMS even for an empty batch");
+  const auto batch = (*pipeline)->Run(**model, images, YOLOInferenceOptions{.5f});
   TEST_ASSERT(batch && batch->size() == images.size(),
               "pipeline completes every task image");
   for (size_t i = 0; i < images.size(); ++i) {
-    const auto direct = (*model)->Run(images[i], .5f);
+    const auto direct = (*model)->Run(images[i], YOLOInferenceOptions{.5f});
     TEST_ASSERT(direct && Same(*direct, (*batch)[i]),
                 "pipeline output geometry/masks and order match direct path");
   }
   const std::array<cv::Mat, 2> invalid{square, cv::Mat()};
-  const auto failed = (*pipeline)->Run(**model, invalid, .5f);
+  const auto failed = (*pipeline)->Run(**model, invalid, YOLOInferenceOptions{.5f});
   TEST_ASSERT(!failed && failed.error().image_index == 1,
               "invalid staged input reports correct index");
-  TEST_ASSERT(!(*model)->Run(square, std::numeric_limits<float>::quiet_NaN()),
+  TEST_ASSERT(!(*model)->Run(square, YOLOInferenceOptions{std::numeric_limits<float>::quiet_NaN()}),
               "non-finite threshold rejected");
-  const auto recovered = (*pipeline)->Run(**model, images, .5f);
+  const auto recovered = (*pipeline)->Run(**model, images, YOLOInferenceOptions{.5f});
   TEST_ASSERT(recovered && Same((*recovered)[0], *reference),
               "failed request releases reusable workspace and capacity");
   auto mismatch = InferYOLOTask::Create(
@@ -201,7 +238,7 @@ int MetadataAndRecovery(InferContext& context, const fs::path& assets) {
   auto d2 = InferYOLOTask::Create(context, path("pose_d2"), YOLOTask::kPose,
                                  YOLOVersion::kV11);
   TEST_ASSERT(d2, "create two-dimensional keypoints model");
-  auto points = (*d2)->Run(black, .5f);
+  auto points = (*d2)->Run(black, YOLOInferenceOptions{.5f});
   TEST_ASSERT(points, "decode two-dimensional keypoints");
   const auto& items = std::get<YOLOPoseFrame>(*points).results;
   TEST_ASSERT(items.size() == 2 && items[1].keypoints.size() == 2 &&
@@ -217,21 +254,21 @@ int MetadataAndRecovery(InferContext& context, const fs::path& assets) {
   auto nan = InferYOLOTask::Create(context, path("pose_nan"), YOLOTask::kPose,
                                   YOLOVersion::kV11);
   TEST_ASSERT(nan, "create input-dependent non-finite output model");
-  auto before = (*nan)->Run(black, .5f);
+  auto before = (*nan)->Run(black, YOLOInferenceOptions{.5f});
   TEST_ASSERT(before, "finite output succeeds before runtime NaN");
-  TEST_ASSERT(!(*nan)->Run(white, .5f),
+  TEST_ASSERT(!(*nan)->Run(white, YOLOInferenceOptions{.5f}),
               "actual non-finite ONNX output is rejected");
-  auto after = (*nan)->Run(black, .5f);
+  auto after = (*nan)->Run(black, YOLOInferenceOptions{.5f});
   TEST_ASSERT(after && Same(*before, *after),
               "same model recovers after runtime NaN");
   auto pipeline = InferPipeline::Create({2, 2, 16});
   TEST_ASSERT(pipeline, "create non-finite recovery pipeline");
   const std::array<cv::Mat, 2> mixed{black, white};
-  auto failed = (*pipeline)->Run(**nan, mixed, .5f);
+  auto failed = (*pipeline)->Run(**nan, mixed, YOLOInferenceOptions{.5f});
   TEST_ASSERT(!failed && failed.error().image_index == 1,
               "pipeline attributes actual NaN output to failing image");
   const std::array<cv::Mat, 2> valid{black, black};
-  auto recovered = (*pipeline)->Run(**nan, valid, .5f);
+  auto recovered = (*pipeline)->Run(**nan, valid, YOLOInferenceOptions{.5f});
   TEST_ASSERT(recovered && recovered->size() == 2 &&
                   Same((*recovered)[0], *before) &&
                   Same((*recovered)[1], *before),
@@ -259,7 +296,7 @@ int InvalidYOLO26(InferContext& context, const fs::path& assets) {
     auto model = InferYOLOTask::Create(context, path(name), YOLOTask::kPose,
                                       YOLOVersion::kV26);
     TEST_ASSERT(model, "class value validation occurs on actual model output");
-    TEST_ASSERT(!(*model)->Run(square, .5f),
+    TEST_ASSERT(!(*model)->Run(square, YOLOInferenceOptions{.5f}),
                 "fractional/out-of-range e2e labels cannot silently mislabel");
   }
   TEST_ASSERT(!InferYOLOTask::Create(context, path("pose_raw"), YOLOTask::kPose,

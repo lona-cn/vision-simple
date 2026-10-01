@@ -169,12 +169,14 @@ class InferenceService {
   ServiceResult<InferenceResponse> Run(InferenceKind kind,
                                        const std::string& model,
                                        std::span<const std::string> images,
+                                       YOLOInferenceOptions options = {},
                                        ServiceControl control = {}) noexcept;
   // Borrows BGR frames (including noncontiguous ROIs) until synchronous return.
   // Call Succeed() on the returned response after consuming its payload.
   ServiceResult<InferenceResponse> RunFrames(
       InferenceKind kind, const std::string& model,
-      std::span<const cv::Mat> images, ServiceControl control = {}) noexcept;
+      std::span<const cv::Mat> images, YOLOInferenceOptions options = {},
+      ServiceControl control = {}) noexcept;
   ServiceResult<ModelCatalog> ListModels() const noexcept;
   ServiceResult<void> Unload(InferenceKind kind,
                              const std::string& model) noexcept;

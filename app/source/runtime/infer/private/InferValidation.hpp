@@ -18,10 +18,21 @@ inline VSResult<void> ValidateInferInput(const cv::Mat& image,
     return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
                       "image must be a nonempty two-dimensional CV_8UC3 Mat");
   }
-  if (!IsFinite(confidence) || confidence < 0.0f || confidence > 1.0f) {
+  if (!YOLOInferenceOptions{confidence, {}}.IsValid()) {
     return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
                       "confidence must be finite and within [0,1]");
   }
+  return {};
+}
+
+inline VSResult<void> ValidateInferInput(const cv::Mat& image,
+                                       YOLOInferenceOptions options) noexcept {
+  if (auto valid = ValidateInferInput(image, options.confidence.value_or(.125f));
+      !valid)
+    return valid;
+  if (!options.IsValid())
+    return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
+                      "nms_iou must be finite and within [0,1]");
   return {};
 }
 }  // namespace vision_simple

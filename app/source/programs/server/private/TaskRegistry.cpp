@@ -276,7 +276,8 @@ const TaskDescriptor* FindTask(std::string_view id) noexcept {
 
 ServiceResult<InferencePayload> RunRegisteredTask(
     RegisteredModel& model, InferPipeline& pipeline,
-    std::span<const cv::Mat> images, PipelineControl control) noexcept {
+    std::span<const cv::Mat> images, YOLOInferenceOptions options,
+    PipelineControl control) noexcept {
   try {
     return std::visit(
         [&](auto& typed_model) -> ServiceResult<InferencePayload> {
@@ -284,7 +285,15 @@ ServiceResult<InferencePayload> RunRegisteredTask(
             LogFacade::Error("inference", "registered model is null");
             return std::unexpected(ServiceError{ServiceFailure::kInternal, {}});
           }
-          auto batch = pipeline.Run(*typed_model, images, 0.125f, control);
+          auto batch = [&] {
+            if constexpr (std::is_same_v<
+                              std::remove_reference_t<decltype(*typed_model)>,
+                              InferOCR>) {
+              return pipeline.Run(*typed_model, images, 0.125f, control);
+            } else {
+              return pipeline.Run(*typed_model, images, options, control);
+            }
+          }();
           if (!batch) return std::unexpected(PipelineError(batch.error()));
           if constexpr (std::is_same_v<
                             std::remove_reference_t<decltype(*typed_model)>,

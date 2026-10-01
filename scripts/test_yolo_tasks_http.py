@@ -79,8 +79,8 @@ def configuration(root):
     return text, {f'{kind}:{name}' for kind, name, _, _ in entries}
 
 
-def infer_task(server, kind, model, images):
-    status, result = server.request('/v1/infer/' + kind, {'model': model, 'images': images})
+def infer_task(server, kind, model, images, **controls):
+    status, result = server.request('/v1/infer/' + kind, {'model': model, 'images': images, **controls})
     require(status == 200, f'{kind} inference failed: {status} {result}')
     return result
 
@@ -161,6 +161,36 @@ def main():
                 for raw_frame, end_frame in zip(raw26['results'], end26['results']):
                     require(len(end_frame) == 3 and close_values(end_frame[:2], raw_frame),
                             f'{kind} YOLO26 e2e lost overlapping predictions or changed extras')
+                require(close_values(infer_task(server, kind, 'v26-raw', images,
+                                                     confidence=.85, nms_iou=.45), raw26),
+                        f'{kind} .45 task NMS default or independent mask/keypoint threshold changed')
+                for mode, baseline in (('raw', raw26), ('e2e', end26)):
+                    for nms_iou in (0, 1):
+                        controls = {'confidence': .1, 'nms_iou': nms_iou}
+                        selected = infer_task(server, kind, 'v26-' + mode, images, **controls)
+                        for original, changed, all_predictions in zip(baseline['results'], selected['results'], end26['results']):
+                            if mode == 'e2e':
+                                require(close_values(changed, original), f'{kind} e2e applied second NMS')
+                            elif nms_iou == 1:
+                                require(close_values(changed, all_predictions),
+                                        f'{kind} raw IoU1 lost overlap/exact extras')
+                            else:
+                                expected = original[:1] if kind == 'obb' else original
+                                require(close_values(changed, expected), f'{kind} raw IoU0 selection/extras')
+                        status, completion = server.request('/v1/chat/completions',
+                            chat_payload(kind, 'v26-' + mode, images, **controls))
+                        require(status == 200 and close_values(
+                            json.loads(completion['choices'][0]['message']['content']), selected),
+                            f'{kind} controlled OpenAI parity')
+                        require(close_values(tool_data(session.tool('infer_' + kind, {
+                            'model': 'v26-' + mode, 'images': images, **controls})), selected),
+                            f'{kind} controlled MCP parity')
+                    empty = infer_task(server, kind, 'v26-' + mode, images, confidence=1)
+                    require(empty['results'] == [[], []], f'{kind} confidence1 must retain empty frame positions')
+                for field in ('confidence', 'nms_iou'):
+                    error_response(server.request('/v1/infer/' + kind, {
+                        'model': 'unknown', 'images': [], field: 1.0000000000000002}),
+                        400, 'invalid_request', None)
                 for mode in ('raw', 'e2e'):
                     half26 = infer_task(server, kind, f'v26-{mode}_fp16', images)
                     full26 = raw26 if mode == 'raw' else end26

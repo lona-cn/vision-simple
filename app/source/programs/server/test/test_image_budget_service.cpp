@@ -1,5 +1,7 @@
 #include <array>
+#include <bit>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -90,6 +92,92 @@ void Options() {
   auto service = Create(tiny);
   Released(*service);
 }
+void InferenceControls() {
+  auto service = Create({});
+  const std::array<std::string, 1> malformed{"not-base64"};
+  const std::array<cv::Mat, 1> frame{
+      cv::Mat(32, 32, CV_8UC3, cv::Scalar::all(0))};
+  const std::array<cv::Mat, 1> invalid_frame{cv::Mat{}};
+  const auto reject = [](const ServiceResult<InferenceResponse>& result) {
+    Check(!result && result.error().kind == ServiceFailure::kInvalidRequest &&
+              !result.error().image_index,
+          "detector controls reject before model lookup, image decode or empty return");
+  };
+  const auto reject_inputs = [&](InferenceKind kind, YOLOInferenceOptions controls) {
+    reject(service->Run(kind, "missing-model", malformed, controls));
+    reject(service->Run(kind, "budget-test", malformed, controls));
+    reject(service->Run(kind, "missing-model", {}, controls));
+    reject(service->Run(kind, "budget-test", {}, controls));
+    reject(service->RunFrames(kind, "missing-model", frame, controls));
+    reject(service->RunFrames(kind, "budget-test", invalid_frame, controls));
+    reject(service->RunFrames(kind, "missing-model", {}, controls));
+    reject(service->RunFrames(kind, "budget-test", {}, controls));
+  };
+  // Construct nonfinite/subnormal cases by bits so fast-math cannot erase them.
+  for (uint32_t bits : {0x7fc00001u, 0x7f800000u, 0xff800000u, 0xbf800000u,
+                        0x80000001u, 0x3f800001u}) {
+    const float value = std::bit_cast<float>(bits);
+    reject_inputs(InferenceKind::kYOLO, {.confidence = value});
+    reject_inputs(InferenceKind::kYOLO, {.nms_iou = value});
+  }
+  for (const auto controls : {YOLOInferenceOptions{.confidence = 0.125f},
+                              YOLOInferenceOptions{.nms_iou = 0.3f},
+                              YOLOInferenceOptions{.confidence = 0.125f,
+                                                   .nms_iou = 0.3f}})
+    reject_inputs(InferenceKind::kOCR, controls);
+  const auto guarded = service->Stats();
+  Check(guarded && guarded->models.empty() &&
+            guarded->image_budget.in_use_bytes == 0 &&
+            guarded->image_budget.active_requests == 0 &&
+            guarded->image_budget.peak_bytes == 0 &&
+            guarded->image_budget.decode_calls == 0 &&
+            guarded->image_budget.rejected_requests == 0,
+        "rejected controls never load models, decode or consume image admission");
+  const auto omitted_ocr = service->Run(InferenceKind::kOCR, "missing-model", {});
+  Check(!omitted_ocr && omitted_ocr.error().kind == ServiceFailure::kUnknownModel,
+        "omitted OCR controls retain ordinary model lookup");
+  for (uint32_t bits : {0x80000000u, 0u, 0x3f800000u}) {
+    const float value = std::bit_cast<float>(bits);
+    const YOLOInferenceOptions controls{.confidence = value, .nms_iou = value};
+    auto encoded_empty = service->Run(InferenceKind::kYOLO, "budget-test", {}, controls);
+    Check(encoded_empty &&
+              std::get<InferYOLOResponse>(encoded_empty->payload).results.empty(),
+          "valid boundary controls accept an encoded empty batch");
+    encoded_empty->Succeed();
+    auto borrowed_empty = service->RunFrames(InferenceKind::kYOLO, "budget-test", {}, controls);
+    Check(borrowed_empty &&
+              std::get<InferYOLOResponse>(borrowed_empty->payload).results.empty(),
+          "valid boundary controls accept a borrowed empty batch");
+    borrowed_empty->Succeed();
+    auto detected = service->RunFrames(InferenceKind::kYOLO, "budget-test", frame, controls);
+    Check(detected &&
+              std::get<InferYOLOResponse>(detected->payload).results.size() == 1,
+          "valid boundary controls execute real detection");
+    const auto& objects = std::get<InferYOLOResponse>(detected->payload).results[0];
+    if (bits == 0x3f800000u) {
+      Check(objects.empty(), "confidence one excludes the real 0.9 detection");
+    } else {
+      Check(objects.size() == 1 && objects[0].class_id == 0 &&
+                objects[0].confidence == 0.9f && objects[0].bbox[0] == 4 &&
+                objects[0].bbox[1] == 4 && objects[0].bbox[2] == 16 &&
+                objects[0].bbox[3] == 16,
+            "positive and negative zero retain the real detection geometry");
+    }
+    detected->Succeed();
+    Released(*service);
+  }
+  auto recovered = service->RunFrames(InferenceKind::kYOLO, "budget-test", frame);
+  Check(recovered && std::get<InferYOLOResponse>(recovered->payload).results.size() == 1,
+        "default request recovers after rejected and boundary controls");
+  const auto& objects = std::get<InferYOLOResponse>(recovered->payload).results[0];
+  Check(objects.size() == 1 && objects[0].class_id == 0 &&
+            objects[0].confidence == 0.9f && objects[0].bbox[0] == 4 &&
+            objects[0].bbox[1] == 4 && objects[0].bbox[2] == 16 &&
+            objects[0].bbox[3] == 16,
+        "per-request controls do not mutate subsequent default inference");
+  recovered->Succeed();
+  Released(*service);
+}
 void Frames() {
   InferenceServiceOptions options;
   options.pipeline.max_batches = 1;
@@ -135,11 +223,11 @@ void Frames() {
   std::stop_source stop;
   stop.request_stop();
   rejected = service->RunFrames(InferenceKind::kYOLO, "budget-test", frame,
-                               {.stop = stop.get_token()});
+                               {}, {.stop = stop.get_token()});
   Check(!rejected && rejected.error().kind == ServiceFailure::kCancelled,
         "stopped request never reserves frame bytes");
   rejected = service->RunFrames(
-      InferenceKind::kYOLO, "budget-test", frame,
+      InferenceKind::kYOLO, "budget-test", frame, {},
       {.timeout = std::chrono::milliseconds{1},
        .started = std::chrono::steady_clock::now() - std::chrono::seconds{1}});
   Check(!rejected && rejected.error().kind == ServiceFailure::kTimedOut,
@@ -193,6 +281,7 @@ int main(int argc, char** argv) {
   }
   FixtureDirectory fixtures(root);
   Options();
+  InferenceControls();
   Frames();
   GlobalBoundary();
   std::cout << "image budget service regression passed\n";

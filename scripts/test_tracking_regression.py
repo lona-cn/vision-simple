@@ -13,6 +13,7 @@ import sys
 import zlib
 
 from test_http_regression import Server, RegressionFailure, require
+from test_http_regression import model_yaml, threshold_image
 
 ROOT = "/v1/tracking/sessions"
 
@@ -185,10 +186,10 @@ def transport_bounds(server):
 
 def run(args):
     root, executable = args.project_root.resolve(strict=True), args.server.resolve(strict=True)
-    config = "yolo: []\nocr: []\n"
+    config = model_yaml(root)
     if args.yolo_model:
         require(args.yolo_image is not None, "--yolo-image required with --yolo-model")
-        config = "yolo:\n  - name: tracking-source\n    version: kV11\n    path: " + json.dumps(args.yolo_model.resolve(strict=True).as_posix()) + "\nocr: []\n"
+        config = config.replace('yolo:\n', 'yolo:\n  - name: tracking-source\n    version: kV11\n    path: ' + json.dumps(args.yolo_model.resolve(strict=True).as_posix()) + '\n', 1)
     with Server(executable, root, config) as server:
         server.wait_ready()
         owned = set()
@@ -222,6 +223,29 @@ def run(args):
             require(math.isclose(tracks[0]["confidence"], score, abs_tol=1e-6), f"Wrong observed score: {tracks}")
 
         try:
+            candidate_image = threshold_image()
+            status, low = server.request('/v1/infer/yolo', {
+                'model': 'tiny-threshold-raw', 'images': [candidate_image], 'confidence': .1})
+            require(status == 200, f'Low detector request failed: {low}')
+            candidate = next(row for row in low['results'][0] if row['class_id'] == 1)
+            require(candidate['bbox'] == [40, 40, 16, 16] and
+                    math.isclose(candidate['confidence'], .12, abs_tol=1e-6), 'Wrong low candidate')
+            session = create()
+            initial = frame(session, 0, detections=[{**candidate, 'confidence': .9}])
+            tracked = frame(session, 1, detections=[candidate])
+            require(initial[0] == tracked[0] == 200 and len(initial[1]['tracks']) == len(tracked[1]['tracks']) == 1 and
+                    initial[1]['tracks'][0]['track_id'] == tracked[1]['tracks'][0]['track_id'] and
+                    tracked[1]['tracks'][0]['class_id'] == 1 and
+                    math.isclose(tracked[1]['tracks'][0]['confidence'], .12, abs_tol=1e-6),
+                    f'External low candidate did not retain identity/score: {tracked}')
+            status, default = server.request('/v1/infer/yolo', {
+                'model': 'tiny-threshold-raw', 'images': [candidate_image]})
+            require(status == 200 and all(row['class_id'] != 1 for row in default['results'][0]),
+                    'Omitted detector threshold became sticky')
+            independent = frame(session, 2, detections=[candidate])
+            require(independent[0] == 200 and independent[1]['tracks'][0]['track_id'] ==
+                    tracked[1]['tracks'][0]['track_id'], 'Tracker unexpectedly invoked detector/default threshold')
+            delete(session)
             for algorithm in ("bytetrack", "botsort"):
                 session = create(algorithm)
                 kwargs = {"image": image} if algorithm == "botsort" else {}

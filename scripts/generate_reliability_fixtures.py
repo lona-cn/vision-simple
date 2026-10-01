@@ -272,10 +272,31 @@ def yolo_task_fixtures():
         save26(f"yolo26_detect_{name}", "detect", e2e, invalid)
 
 
+def threshold_fixtures():
+    raw = [[16, 16, 48], [16, 16, 48], [24, 24, 16],
+           [24, 24, 16], [.9, .8, 0], [0, 0, .12]]
+    e2e = [[4, 4, 28, 28, .9, 0], [4, 4, 28, 28, .8, 0],
+           [40, 40, 56, 56, .12, 1]]
+    for mode, shape, rows in (("raw", [1, 6, 3], raw), ("e2e", [1, 3, 6], e2e)):
+        save(f"reliability/yolo26_detect_threshold_{mode}.onnx",
+             [h.make_node("Identity", ["predictions"], ["output0"])],
+             [h.make_tensor_value_info("images", T.FLOAT, [1, 3, 64, 64])],
+             [h.make_tensor_value_info("output0", T.FLOAT, shape)],
+             [h.make_tensor("predictions", T.FLOAT, shape,
+                            [value for row in rows for value in row])],
+             "{0: 'first', 1: 'second'}",
+             {"task": "detect", "end2end": str(mode == "e2e"),
+              "args": str({"nms": False if mode == "e2e" else None})})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--yolo-tasks-only", action="store_true")
+    parser.add_argument("--thresholds-only", action="store_true")
     args = parser.parse_args()
+    threshold_fixtures()
+    if args.thresholds_only:
+        return
     yolo_task_fixtures()
     if args.yolo_tasks_only:
         return

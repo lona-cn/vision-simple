@@ -75,6 +75,10 @@ See [OpenAPI](doc/openapi/server.yaml) for the full API. Inference and user-job 
 
 ### HTTP v0 errors and batch semantics
 
+For `yolo`, `seg`, `pose` and `obb`, native v0/v1 requests accept optional top-level numeric `confidence` and `nms_iou` in `[0,1]`. Omitted confidence is `0.125`; omitted raw NMS IoU is `0.3` for detection and `0.45` for segmentation/pose/OBB. End-to-end exports validate `nms_iou` but do not apply it: there is no second NMS. Controls apply to each image of this request only. Confidence changes object selection, not mask binarization or keypoint confidence. OCR rejects either explicit field, even at a default value; its existing `0.125` recognition filter suppresses individual tokens, not detection pixels or whole lines.
+
+Boolean, null, string, array, object or finite out-of-range control values are invalid. Semantic validation occurs before model lookup or image decode, including empty batches: native/OpenAI return HTTP 400 `invalid_request` (ordinary JSON even with `stream:true`); MCP returns `isError:true` tool content in the negotiated text/structured format, not a new JSON-RPC error. Transport admission and cancellation/deadline/closed precedence remain unchanged; unrepresentable JSON numbers such as NaN, Infinity or overflow anywhere (including nested/unrelated fields and earlier duplicate keys) retain existing parse-error envelopes: native `invalid_request`, OpenAI `invalid_json`, MCP JSON-RPC `-32700` with `id:null`, never silent dropping or default fallback. Omission preserves existing JSON behavior.
+
 Successful fields are unchanged: YOLO returns `class_names`/`results`; OCR returns `results`. `model` must be a nonempty string and `images` an array of strings. An existing model accepts an empty array. HTTP 200 guarantees one result per input image in the original order; no detections is a successful empty item.
 
 Any image failure fails the entire batch, without partial results. Processing order is request validation, model lookup/loading, cancellation/deadline/closed checks, request-credit admission, ordered header preflight, whole-batch byte reservation, decoding all images, inference, then serialization. Model/configuration failures retain priority over image admission errors.
@@ -171,9 +175,9 @@ The shared service and native v0/v1 inference support valid-model empty batches 
 
 An optional integer `timeout_ms` (1–300000) overrides the deadline. HTTP time starts at complete-body dispatch submission and includes queue wait, loading and decoding, not serialization/network delivery or hard native preemption. Expiry returns `504 request_timeout`; admission exhaustion returns `503 service_overloaded` with `Retry-After: 1`. Control errors have null `image_index`. Cancellation precedes timeout, then close. With service credit available, ordered image validation precedes global-byte admission; with no credit, service overload precedes invalid images.
 
-C++ callers create `InferPipeline`, then call `Run(model, images, confidence, PipelineControl{stop_token, deadline})`. `Close()` rejects/cancels unfinished work; join callers before destruction. Cancellation precedes timeout, close and ordinary inference errors. `Run` drains native stages and input destruction before returning. Models and pixels must remain valid and unmodified throughout; HTTP/MCP disconnect requests cooperative cancellation, never hard native preemption.
+C++ YOLO/task callers create `InferPipeline`, then call `Run(model, images, YOLOInferenceOptions{.confidence = 0.1f}, PipelineControl{stop_token, deadline})`; OCR retains `Run(model, images, float confidence, control)`. Options are captured by value for the batch, not stored in scheduling `PipelineOptions` or model/context/cache state. `Close()` rejects/cancels unfinished work; join callers before destruction. Cancellation precedes timeout, close and ordinary inference errors. `Run` drains native stages and input destruction before returning. Models and pixels must remain valid and unmodified throughout; HTTP/MCP disconnect requests cooperative cancellation, never hard native preemption.
 
-Synchronous `InferYOLO/InferOCR::Run` signatures remain unchanged and share stage algorithms/session execution gates with the pipeline. Tasks own independent workspaces; each model retains at most two idle pipeline workspaces. Unsupported custom backends return an explicit error rather than wrapping synchronous inference as a fake pipeline.
+Synchronous `InferYOLO`, `InferYOLOTask` and `InferOCR::Run` share stage algorithms/session execution gates with the pipeline. YOLO calls now take `YOLOInferenceOptions`; OCR retains its scalar confidence signature. Tasks own independent workspaces; each model retains at most two idle pipeline workspaces. Unsupported custom backends return an explicit error rather than wrapping synchronous inference as a fake pipeline.
 
 ### Task Registry and Unified Model Configuration
 
@@ -312,6 +316,8 @@ image_path = Path("image.jpg")
 endpoint = "http://127.0.0.1:11451/v1/infer/yolo"
 payload = {
     "model": "yolo26n",
+    "confidence": 0.1,
+    "nms_iou": 0.3,
     "images": [base64.b64encode(image_path.read_bytes()).decode("ascii")],
 }
 request = Request(
@@ -328,7 +334,7 @@ with urlopen(request, timeout=120) as response:
 
 Use existing `POST /v1/infer/{task}` routes; detection also supports `/v0/infer/yolo`. Responses, caching, ordered batches and whole-batch failure semantics are unchanged. C++ detection uses `InferYOLO::Create(context, path, YOLOVersion::kV26)`. Other tasks now take an explicit version, for example `InferYOLOTask::Create(context, path, YOLOTask::kPose, YOLOVersion::kV26)`. Existing task callers must insert `YOLOVersion::kV11` after `task`, before the optional device ID.
 
-Postprocessing keeps this library's contract: YOLO11/YOLO26 raw detection filters with strict `score > confidence`, runs class-aware NMS on unclipped, unrounded floating-point model-space boxes (IoU threshold 0.3), then maps, clips and rounds survivors to the original image. Degenerate boxes and empty output boxes are discarded. With fixed model output, NMS candidate selection does not depend on original-image size; the public integer `bbox:[x,y,width,height]` format is unchanged. Other raw tasks use NMS IoU 0.45. OBB uses polygon IoU, **not Ultralytics' probabilistic IoU**. YOLO10/YOLO26 end-to-end (NMS-free) outputs never undergo another suppression pass and retain `score >= confidence` semantics. Letterbox uses black padding, keypoints retain out-of-frame coordinates, and masks interpolate logits before thresholding and cropping to integer bounding boxes. Comparisons against Ultralytics must align preprocessing and account for these documented differences.
+Postprocessing keeps this library's contract: YOLO11/YOLO26 raw detection uses strict `score > confidence`; end-to-end detection and segmentation/pose/OBB use inclusive `score >= confidence`. Raw detection runs class-aware NMS on unclipped, unrounded floating-point model-space boxes (omitted IoU `0.3`), then maps, clips and rounds survivors to the original image. Degenerate boxes and empty output boxes are discarded. With fixed model output, NMS candidate selection does not depend on original-image size; integer `bbox:[x,y,width,height]` is unchanged. Other raw tasks default to NMS IoU `0.45`. OBB uses polygon IoU, **not Ultralytics' probabilistic IoU**. Explicit `nms_iou` overrides raw suppression only; YOLO10/YOLO26 end-to-end (NMS-free) never undergo another suppression pass. Letterbox remains black; keypoints retain out-of-image coordinates, and masks interpolate logits before binarization/cropping. These differences preclude assuming identical Ultralytics results.
 
 #### Verified compatibility and limitations
 
@@ -363,6 +369,8 @@ Tracking is a separate stateful `TrackingService`, not an inference task or an a
 ```
 
 Tracks created on the session's first frame are immediately confirmed; tracks created later must meet `min_hits`. An empty `tracks` array can still be successful, for example when there are no detections or a new target is not yet confirmed.
+
+Tracking `Step` consumes caller-supplied detections independently; there is no fused detector/tracker route. When manually chaining inference into tracking, choose detector `confidence` at or below the tracker's `low_threshold` (strict raw detection excludes the exact boundary; choose below it to retain equality) and forward the resulting low-score candidates. For example, `confidence:0.1` retains candidates between `0.1` and the default detector `0.125`. This is a client strategy, not a claim that all tracking inputs are truncated.
 
 - `timestamp` is finite, nonnegative seconds; `frame_index` is an integer in 0–9007199254740991. Both must strictly increase within a session. Elapsed seconds control motion prediction; index gaps count toward expiration. Rejected frames do not advance state. Reset starts a fresh sequence, including IDs and timing. Step returns `frame_index`, `timestamp`, and `tracks:[{track_id,class_id,confidence,bbox}]`; only confirmed tracks observed this frame are emitted, not lost predictions. Status contains nullable `last_frame_index`/`last_timestamp` and `active_tracks`/`lost_tracks`.
 - Algorithms: `"bytetrack"` or `"botsort"`. Defaults: `high_threshold:0.5`, `low_threshold:0.1`, `new_track_threshold:0.6`, `match_threshold:0.8`, `max_lost_frames:30`, `min_hits:2`, `max_tracks:256`, `max_detections:256`, `camera_motion:true`, `appearance:false`, `proximity_threshold:0.5`, `appearance_threshold:0.25`. Thresholds are in [0,1], with low < high ≤ new; matching thresholds are maximum costs, not minimum IoU. `min_hits` is 1–10000, `max_lost_frames` 0–10000, and both capacity options 1–256.
@@ -474,6 +482,7 @@ v0, native v1, OpenAI-like and MCP call one `InferenceService`, sharing model lo
 
 - `GET /v1/models?limit=100` returns `object:"list"` and `data`. IDs are `<task>:<raw-name>` for `yolo`, `ocr`, `seg`, `pose`, `obb`; `task` identifies the operation. Limit is 1–200. When `has_more` is true, pass the returned `next_cursor` unchanged as query parameter `after`.
 - `POST /v1/chat/completions` accepts `model`, `messages`, optional `stream`, `timeout_ms`, `n:1` and `response_format:{"type":"json_object"}` (or `"text"`). User `image_url.url` parts must contain inline base64 PNG/JPEG/WebP/BMP data URLs. Only omitted/`"auto"` detail is supported; remote URLs are never fetched.
+- YOLO-family model IDs accept the same top-level `confidence`/`nms_iou` fields and omission defaults; OCR IDs reject them. With an OpenAI Python SDK pass `extra_body={"confidence":0.1,"nms_iou":0.3}` to `chat.completions.create`: the SDK merges these into the top-level HTTP body; a literal wire `extra_body` object is not supported.
 - At least one image is required. Images retain message/content order. Text does not alter detection/OCR: these are not language models. Other generation controls, tool calls, JSON Schema output and the Responses API are unsupported; unsupported parameters return 400 rather than silently doing nothing.
 - `choices[0].message.content` is the full task result encoded as JSON: YOLO/new tasks include `class_names/results`, OCR includes `results`. Geometry follows the task contracts above; token usage is not fabricated.
 - `stream:true` sends `chat.completion.chunk` SSE events (role, complete JSON content, finish reason), then `[DONE]`. This is neither token nor per-image streaming. Headers commit only after whole-batch success; earlier failures remain HTTP JSON errors.
@@ -487,6 +496,7 @@ Initialization `params` must include `protocolVersion`, an object `capabilities`
 
 - `list_models`: optional `limit` (1–200) and opaque `cursor`; returns `data:[{id,kind,name}]` and optional `next_cursor`.
 - Generated `infer_yolo` / `infer_ocr` / `infer_seg` / `infer_pose` / `infer_obb`: `{"model":"raw configured name","images":["raw base64"],"timeout_ms":60000}`. Do not pass prefixed catalog IDs or data URLs. Discovery includes input JSON Schemas.
+- Only `infer_yolo`, `infer_seg`, `infer_pose` and `infer_obb` advertise/accept optional numeric `confidence` and `nms_iou`; for example add `"confidence":0.1,"nms_iou":0.3` to YOLO arguments. `infer_ocr` advertises neither and rejects explicit detector controls.
 - Modern results contain `structuredContent` and equivalent JSON text; legacy versions retain the full structure in text. Execution errors use `isError:true` with stable `error.code`, `image_index` and recovery advice. Protocol failures use JSON-RPC errors and preserve string versus integer IDs.
 - `notifications/cancelled` cancels its session's `requestId`; disconnect cancels all that session's work. Native stages drain before cancellation/timeout returns; ORT is not forcibly interrupted and another session's equal ID is unaffected.
 - Bounds: 32 sessions, 2 execution workers, 16 queued jobs, 8 active tool calls/session, 64 MiB POST body, 8 MiB queued output/socket buffers. Heartbeats occur every15s; sustained buffered writes close after about30s, and sessions with no active work expire after5min without messages (checked on heartbeat ticks). Oversized output closes the session; reconnect with a smaller batch.
@@ -514,7 +524,7 @@ OpenAI SDK `api_key` is not authentication here: use a trusted network or extern
 
 ### C++ migration
 
-- `InferYOLO/InferOCR::Create/Run` signatures are unchanged. Run requires a nonempty two-dimensional `CV_8UC3` image and supports non-contiguous ROIs. Grayscale, BGRA, floating-point images and non-finite/out-of-range `[0,1]` confidence return parameter errors.
+- Rebuild the C++ SDK and every consumer: `InferYOLO::Run(image, YOLOInferenceOptions)` and `InferYOLOTask::Run(image, YOLOInferenceOptions)` replace scalar YOLO confidence arguments, with no compatibility overload. `YOLOInferenceOptions` is a public aggregate containing `std::optional<float> confidence` and `std::optional<float> nms_iou`; `{}` preserves omitted defaults. It owns its values, not borrowed option storage. These controls do not change `Create` signatures; `InferOCR::Run(image, float confidence)` is unchanged. Run requires a nonempty two-dimensional `CV_8UC3` image and supports non-contiguous ROIs. Grayscale, BGRA, floating-point images and supplied non-finite/out-of-range `[0,1]` controls return parameter errors.
 - YOLO11/YOLO26 raw detection runs class-aware NMS in floating-point model space before clipping/rounding. v10 accepts only end-to-end `[1,N,6]` output; v10/v26 end-to-end never repeat NMS. Confidence threshold semantics, black Letterbox padding and OCR detection normalization are unchanged.
 - YOLO26 detection uses `YOLOVersion::kV26`. Both path and memory overloads of `InferYOLOTask::Create` require an explicit version after `task`: use `YOLOVersion::kV11` for existing segmentation/pose/OBB callers and `YOLOVersion::kV26` for YOLO26. The optional `device_id` follows the version.
 - PP-OCR CTC file-based Create follows the Paddle dictionary convention: the file excludes blank and the trailing space class; the loader appends space. Map-based callers supply every nonblank class with key `class_id - 1`. SAR follows its separate dictionary contract above.
@@ -830,7 +840,7 @@ int main() {
     auto model = InferYOLO::Create(**ctx, "assets/hd2-yolo11n-fp32.onnx", YOLOVersion::kV11);
     if (!model) return 1;
     auto image = cv::imread("assets/hd2.png");
-    auto result = (*model)->Run(image, 0.625f);
+    auto result = (*model)->Run(image, YOLOInferenceOptions{.confidence = 0.625f});
     return result ? 0 : 1;
 }
 ```

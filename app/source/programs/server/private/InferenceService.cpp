@@ -203,12 +203,14 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
   ServiceResult<InferenceResponse> Run(InferenceKind kind,
                                        const std::string& model,
                                        std::span<const Image> input,
+                                       YOLOInferenceOptions inference_options,
                                        ServiceControl control) noexcept {
     ServiceError stage{ServiceFailure::kInvalidRequest, {}};
     try {
       const auto* task = FindTask(kind);
       const auto timeout = control.timeout.value_or(options.request_timeout);
-      if (!task || model.empty() ||
+      if (!task || model.empty() || !inference_options.IsValid() ||
+          (kind == InferenceKind::kOCR && inference_options.HasControls()) ||
           input.size() > options.pipeline.max_batch_images ||
           timeout.count() <= 0 || timeout.count() > 300000)
         return std::unexpected(stage);
@@ -238,7 +240,8 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
       if (input.empty()) {
         stage = {ServiceFailure::kInference, {}};
         auto batch = RunRegisteredTask(lease->get(), *pipeline_,
-                                      std::span<const cv::Mat>{}, pipeline_control);
+                                      std::span<const cv::Mat>{}, inference_options,
+                                      pipeline_control);
         if (!batch) return std::unexpected(std::move(batch.error()));
         return InferenceResponse{std::move(*batch), std::move(lease)};
       }
@@ -300,7 +303,7 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
       }
       stage = {ServiceFailure::kInference, {}};
       auto batch = RunRegisteredTask(lease->get(), *pipeline_, images,
-                                     pipeline_control);
+                                     inference_options, pipeline_control);
       if (!batch) return std::unexpected(std::move(batch.error()));
       stage.kind = ServiceFailure::kInternal;
       return InferenceResponse{std::move(*batch), std::move(lease)};
@@ -405,13 +408,15 @@ VSResult<std::shared_ptr<InferenceService>> InferenceService::Create(
 }
 ServiceResult<InferenceResponse> InferenceService::Run(
     InferenceKind kind, const std::string& model,
-    std::span<const std::string> encoded, ServiceControl control) noexcept {
-  return impl_->Run(kind, model, encoded, control);
+    std::span<const std::string> encoded, YOLOInferenceOptions options,
+    ServiceControl control) noexcept {
+  return impl_->Run(kind, model, encoded, options, control);
 }
 ServiceResult<InferenceResponse> InferenceService::RunFrames(
     InferenceKind kind, const std::string& model,
-    std::span<const cv::Mat> images, ServiceControl control) noexcept {
-  return impl_->Run(kind, model, images, control);
+    std::span<const cv::Mat> images, YOLOInferenceOptions options,
+    ServiceControl control) noexcept {
+  return impl_->Run(kind, model, images, options, control);
 }
 ServiceResult<ModelCatalog> InferenceService::ListModels() const noexcept {
   ServiceError stage{ServiceFailure::kModelConfig, {}};

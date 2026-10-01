@@ -100,6 +100,8 @@ paths:
               $ref: '#/components/schemas/InferYOLORequest'
             example:
               model: hd2-fp16
+              confidence: 0.1
+              nms_iou: 0.3
               images:
                 - >-
                   /9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAsICAoIBwsKCQoNDAsNERwSEQ8PESIZGhQcKSQrKigkJyctMkA3LTA9MCcnOEw5PUNFSElIKzZPVU5GVEBHSEX/2wBDAQwNDREPESESEiFFLicuRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUX/wAARCAAoAGADASIAAhEBAxEB/8QAGgAAAgMBAQAAAAAAAAAAAAAAAgMAAQQFBv/EACwQAAEEAQIGAQIHAQAAAAAAAAEAAgMREiExBBMiQVFhcVKBBRQyYpGh0eH/xAAYAQADAQEAAAAAAAAAAAAAAAABAgMABP/EABwRAAIDAAMBAAAAAAAAAAAAAAABAhESAyFBMf/aAAwDAQACEQMRAD8A8PPG2JjSY5Wv1Lsh0+qWeMl4dr9kXF8TLxk3NmNuqkkNr/i6crwTb9NfAkRcYx/0ua7+0/j+Wzj+IxcMea7H4srmkE6pkkhldk79R3VYulRN9ux3Oj2yRBzTVFp9LKwNEgMjXOZ3DTR/ldDhYvw+XMuZMKOlygGtPXys519RqsXZb1ADS+y5JJvI7ld6f8pHG0ASuJPUBILrXbT4XEk5ZcXRWGk9IcbNezop8jUqofj6FOcXekcbsLBY11+Qh0VjZRorbNZuIZGFtfuaaVt4lrxRjYL7gLLvpaq8HXd0UuRtWa8R5R4haYuEZI1rsn6/S0f6s4pXUyDhQOAVhjUYQuc1u+p8BNo2RUjmxgkkBG17HNBBB9oJ4hJGTWoFoOHEgZ0iOj3tLsOB75MYyQNSsZb3A0WwVjjIAfKrCMGg1JLkTGUKMYaO5ARtZG40XFPMbcj0BJMnLB6BfcjZJoeg2wtBurHhOc5sg5bImsBvZIZISLO24KqOV2d1iOx2KVhpGmPiIixgfJjjv0XfxpoliaASOLs5ARQOWNnsdlFEUgNizJJuHD0KTDiWBrzr5GiiizbMkRr9mgdO2iprGNJxfVDuookk2EGQ8t2rhteiMSaChoVFFmFFOfXj7pbqG1AbaKKIBAElkijp3T44nSxPLcbaLonU/A7qKJvQI//Z
@@ -486,6 +488,8 @@ paths:
         使用未限定的 model 名称；task 决定任务类型。整批原子成功，results 与 images 等长同序，
         无目标为该图的空数组；空批次允许。响应由 task 决定；空 results 可能匹配多个结构，
         因此使用 anyOf。所选任务下未配置的模型返回 404 unknown_model，空批次也如此。
+        confidence/nms_iou 仅适用于 yolo/seg/pose/obb；ocr 使用 InferOCRRequest，显式任一控制返回
+        400 invalid_request。控制校验先于模型查找/图片解码（含空批次），不改变 transport/取消/截止时间/关闭优先级。
         v0 的 yolo/ocr 路由及结果不变（unknown_model 仍为 400），不新增 v0 seg/pose/obb 路由。
         正文上限 64 MiB（包括分块传输），要求 application/json。
         Expect 仅接受 100-continue，其他期望返回 417。
@@ -1526,12 +1530,30 @@ components:
     VisualChatRequest:
       type: object
       additionalProperties: false
+      description: YOLO 系列模型支持顶层 confidence/nms_iou；ocr 模型拒绝任一显式控制。SDK extra_body 合并到顶层，不是 wire 字段。
       required: [model, messages]
       properties:
         model: {type: string, pattern: '^(yolo|ocr|seg|pose|obb):.+$', description: 从 /v1/models 获取任务限定的模型ID}
         stream: {type: boolean, default: false}
         n: {type: integer, enum: [1]}
         timeout_ms: {type: integer, minimum: 1, maximum: 300000}
+        confidence: &yolo_confidence
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.125
+          description: >-
+            可选目标置信度，仅用于 yolo/seg/pose/obb。raw 检测使用 score > confidence，
+            end-to-end 检测及分割/姿态/OBB 使用 score >= confidence；不改变 mask/关键点阈值。
+            OCR 显式提供此字段会被拒绝，哪怕等于默认值。仅影响本请求。
+        nms_iou: &yolo_nms_iou
+          type: number
+          minimum: 0
+          maximum: 1
+          description: >-
+            可选 raw NMS IoU，仅用于 yolo/seg/pose/obb。省略时 raw 检测为 0.3，
+            raw 分割/姿态/OBB 为 0.45；OBB 使用多边形 IoU。end-to-end 导出校验但不应用此值，
+            不执行第二次 NMS。OCR 显式提供此字段会被拒绝。仅影响本请求。
         response_format:
           type: object
           additionalProperties: false
@@ -1708,7 +1730,7 @@ components:
       required:
         - yolo
         - ocr
-    InferYOLORequest: &ref_0
+    InferImageRequest:
       type: object
       properties:
         timeout_ms:
@@ -1731,7 +1753,21 @@ components:
       required:
         - model
         - images
-    InferOCRRequest: *ref_0
+    InferYOLORequest:
+      allOf:
+        - {$ref: '#/components/schemas/InferImageRequest'}
+        - type: object
+          properties:
+            confidence: *yolo_confidence
+            nms_iou: *yolo_nms_iou
+    InferOCRRequest:
+      description: 不接受 confidence/nms_iou；现有 0.125 recognition 阈值抑制逐个 token，不是像素或整行阈值。
+      allOf:
+        - {$ref: '#/components/schemas/InferImageRequest'}
+        - not:
+            anyOf:
+              - required: [confidence]
+              - required: [nms_iou]
     InferOCRResponse:
       type: object
       properties:

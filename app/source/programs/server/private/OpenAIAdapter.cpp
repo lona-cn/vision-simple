@@ -8,6 +8,7 @@
 #include "HTTPExpectation.h"
 #include "HttpDispatch.h"
 #include "InferenceProtocol.h"
+#include "InferenceRequestOptions.h"
 #include "LogFacade.h"
 
 namespace vision_simple {
@@ -71,6 +72,7 @@ struct ChatRequest {
   std::vector<std::string> images;
   bool stream = false;
   std::optional<std::chrono::milliseconds> timeout;
+  YOLOInferenceOptions options;
 };
 std::expected<ChatRequest, AdapterError> ParseChat(const Json& json,
                                                    size_t max_images) {
@@ -82,7 +84,8 @@ std::expected<ChatRequest, AdapterError> ParseChat(const Json& json,
   for (auto it = json.begin(); it != json.end(); ++it) {
     const auto& key = it.key();
     if (key != "model" && key != "messages" && key != "stream" &&
-        key != "timeout_ms" && key != "response_format" && key != "n")
+        key != "timeout_ms" && key != "response_format" && key != "n" &&
+        key != "confidence" && key != "nms_iou")
       return invalid(key,
                      "This parameter is not supported by the vision adapter");
   }
@@ -102,6 +105,10 @@ std::expected<ChatRequest, AdapterError> ParseChat(const Json& json,
                    "available IDs with /v1/models");
   request.kind = task->kind;
   request.model = request.id.substr(colon + 1);
+  const auto options = ParseInferenceOptions(json, request.kind);
+  if (!options)
+    return invalid(options.error().parameter, options.error().message);
+  request.options = *options;
   if (const auto stream = json.find("stream"); stream != json.end()) {
     if (!stream->is_boolean())
       return invalid("stream", "stream must be a boolean");
@@ -232,14 +239,14 @@ HttpDispatch::Reply ListModels(std::optional<std::string> limit_text, std::strin
 HttpDispatch::Reply Chat(std::string body, InferenceService& service,
                          std::stop_token stop, HttpDispatch::Clock::time_point started) {
   try {
-    const auto json = Json::parse(body, nullptr, false);
+    const auto json = ParseInferenceJson(body);
     if (json.is_discarded())
       return ErrorReply(AdapterError{
           400, "invalid_json", "Request body must be valid JSON", {}, {}});
     auto request = ParseChat(json, service.options().pipeline.max_batch_images);
     if (!request) return ErrorReply(request.error());
     auto result = service.Run(
-        request->kind, request->model, request->images,
+        request->kind, request->model, request->images, request->options,
         ServiceControl{.stop = stop, .timeout = request->timeout, .started = started});
     if (!result) return ErrorReply(result.error());
     auto content = SerializeInference(*result);

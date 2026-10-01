@@ -1,4 +1,6 @@
+#include <bit>
 #include <array>
+#include <type_traits>
 #include <atomic>
 #include <barrier>
 #include <filesystem>
@@ -33,17 +35,23 @@ bool Same(const OCRFrameResult& a, const OCRFrameResult& b) {
   return true;
 }
 template <typename Model>
+auto Confidence(float value) {
+  if constexpr (std::is_same_v<Model, InferOCR>) return value;
+  else return YOLOInferenceOptions{value};
+}
+
+template <typename Model>
 int Ordered(InferPipeline& pipeline, Model& model) {
   std::vector<cv::Mat> images;
   // The tiny detector has a fixed 32x32 input; vary unpadded image height
   // within that extent to exercise ordering and different recognition widths.
   for (int height : {32, 24, 16, 8, 30, 20, 28, 32})
     images.emplace_back(height, 32, CV_8UC3, cv::Scalar::all(0));
-  auto result = pipeline.Run(model, images, .5f);
+  auto result = pipeline.Run(model, images, Confidence<Model>(.5f));
   if (!result) std::cerr << "Pipeline failure: " << result.error().cause.message << '\n';
   TEST_ASSERT(result && result->size() == images.size(), "every input has a result");
   for (size_t i = 0; i < images.size(); ++i) {
-    const auto direct = model.Run(images[i], .5f);
+    const auto direct = model.Run(images[i], Confidence<Model>(.5f));
     TEST_ASSERT(direct && Same(*direct, (*result)[i]),
                 "pipeline preserves input ordering and native output");
   }
@@ -63,13 +71,13 @@ int Interrupted(InferYOLO& model, bool close) {
   std::jthread caller([&] {
     // A competing probe can win admission; retry that controlled rejection.
     do {
-      result.emplace(pipeline.Run(model, images, .5f, {stop.get_token()}));
+      result.emplace(pipeline.Run(model, images, YOLOInferenceOptions{.5f}, {stop.get_token()}));
     } while (!*result && result->error().kind == PipelineFailureKind::kBusy);
     done.store(true, std::memory_order_release);
   });
   bool observed_busy = false;
   while (!done.load(std::memory_order_acquire)) {
-    auto attempt = pipeline.Run(model, probe, .5f);
+    auto attempt = pipeline.Run(model, probe, YOLOInferenceOptions{.5f});
     if (!attempt && attempt.error().kind == PipelineFailureKind::kBusy) {
       observed_busy = true;
       if (close) pipeline.Close();
@@ -84,12 +92,12 @@ int Interrupted(InferYOLO& model, bool close) {
                   (close ? PipelineFailureKind::kClosed : PipelineFailureKind::kCancelled),
               "admitted backpressured batch drains on cancellation or close");
   if (!close) {
-    const auto recovery = pipeline.Run(model, probe, .5f);
+    const auto recovery = pipeline.Run(model, probe, YOLOInferenceOptions{.5f});
     TEST_ASSERT(recovery && recovery->size() == 1 &&
                     (*recovery)[0].results.size() == 1,
                 "cancelled batch releases its capacity and model workspace");
   } else {
-    const auto rejected = pipeline.Run(model, probe, .5f);
+    const auto rejected = pipeline.Run(model, probe, YOLOInferenceOptions{.5f});
     TEST_ASSERT(!rejected && rejected.error().kind == PipelineFailureKind::kClosed,
                 "close permanently rejects new work");
   }
@@ -111,6 +119,48 @@ int main(int argc, char** argv) {
   const auto assets = root / "app/assets/test";
   auto context = InferContext::Create(InferFramework::kONNXRUNTIME, InferEP::kCPU);
   TEST_ASSERT(context, "create CPU context");
+  for (const bool e2e : {false, true}) {
+    auto model = InferYOLO::Create(**context,
+        (assets / "reliability" / (e2e ? "yolo26_detect_threshold_e2e.onnx"
+                                     : "yolo26_detect_threshold_raw.onnx")).string(), YOLOVersion::kV26);
+    TEST_ASSERT(model, "load staged control fixture");
+    auto pipeline = InferPipeline::Create({2, 4, 16});
+    TEST_ASSERT(pipeline, "create mixed-control pipeline");
+    std::vector<cv::Mat> frames;
+    for (const auto size : {cv::Size(64,64), cv::Size(128,64), cv::Size(101,57), cv::Size(32,96)})
+      frames.emplace_back(size, CV_8UC3, cv::Scalar::all(0));
+    const std::array<YOLOInferenceOptions, 3> controls{YOLOInferenceOptions{}, YOLOInferenceOptions{.1f}, YOLOInferenceOptions{.1f,1.f}};
+    std::atomic<bool> correct{true};
+    std::barrier start(3);
+    std::vector<std::jthread> callers;
+    for (size_t index = 0; index < controls.size(); ++index) {
+      callers.emplace_back([&, index] {
+        start.arrive_and_wait();
+        for (int repeat = 0; repeat < 8; ++repeat) {
+          const auto batch = (*pipeline)->Run(**model, frames, controls[index]);
+          if (!batch || batch->size() != frames.size()) { correct.store(false); continue; }
+          for (size_t i = 0; i < frames.size(); ++i) {
+            const auto direct = (*model)->Run(frames[i], controls[index]);
+            const size_t expected = index == 2 ? 3 : index == 1 ? (e2e ? 3 : 2) : (e2e ? 2 : 1);
+            if (!direct || (*batch)[i].results.size() != expected || !Same(*direct, (*batch)[i])) correct.store(false);
+          }
+        }
+      });
+    }
+    callers.clear();
+    TEST_ASSERT(correct.load(), "mixed batches capture their controls and preserve exact per-frame geometry");
+    for (uint32_t bits : {0x7fc00001u, 0xffc00001u, 0x7f800000u, 0xff800000u, 0x80000001u, 0xbf000000u, 0x3f800001u}) {
+      for (bool nms : {false, true}) {
+        YOLOInferenceOptions invalid;
+        (nms ? invalid.nms_iou : invalid.confidence) = std::bit_cast<float>(bits);
+        const auto rejected = (*pipeline)->Run(**model, {}, invalid);
+        TEST_ASSERT(!rejected && rejected.error().kind == PipelineFailureKind::kInvalidRequest,
+                    "invalid controls fail even for an empty staged batch");
+      }
+    }
+    const auto recovered = (*pipeline)->Run(**model, frames, {});
+    TEST_ASSERT(recovered && (*recovered)[0].results.size() == (e2e ? 2 : 1), "control rejection returns all staged capacity");
+  }
   auto yolo = InferYOLO::Create(**context,
       (assets / "yolo_runtime_failure.onnx").string(), YOLOVersion::kV10);
   TEST_ASSERT(yolo, "create tiny real YOLO session");
@@ -131,7 +181,7 @@ int main(int argc, char** argv) {
     auto pipeline = InferPipeline::Create({capacity, 4, 128});
     TEST_ASSERT(pipeline, "create bounded pipeline");
     const cv::Mat direct_image(32, 32, CV_8UC3, cv::Scalar::all(0));
-    const auto yolo_reference = (*yolo)->Run(direct_image, .5f);
+    const auto yolo_reference = (*yolo)->Run(direct_image, YOLOInferenceOptions{.5f});
     const auto ocr_reference = (*ocr)->Run(direct_image, .5f);
     TEST_ASSERT(yolo_reference && ocr_reference, "direct inference baselines succeed");
     bool direct_correct = true;
@@ -143,7 +193,7 @@ int main(int argc, char** argv) {
     std::jthread direct_call([&] {
       start.arrive_and_wait();
       for (int iteration = 0; iteration < 16; ++iteration) {
-        const auto direct_yolo = (*yolo)->Run(direct_image, .5f);
+        const auto direct_yolo = (*yolo)->Run(direct_image, YOLOInferenceOptions{.5f});
         const auto direct_ocr = (*ocr)->Run(direct_image, .5f);
         if (!direct_yolo || !direct_ocr ||
             !Same(*direct_yolo, *yolo_reference) ||
@@ -161,24 +211,24 @@ int main(int argc, char** argv) {
     const cv::Mat black(32, 32, CV_8UC3, cv::Scalar::all(0));
     const cv::Mat white(32, 32, CV_8UC3, cv::Scalar::all(255));
     const std::vector<cv::Mat> failing{black, white, cv::Mat{}, white};
-    auto failed = (*pipeline)->Run(**yolo, failing, .5f);
+    auto failed = (*pipeline)->Run(**yolo, failing, YOLOInferenceOptions{.5f});
     TEST_ASSERT(!failed && failed.error().kind == PipelineFailureKind::kInference &&
                     failed.error().image_index == 1 &&
                     failed.error().cause.code == VisionSimpleErrorCode::kRuntimeError,
                 "earlier native error wins over later preprocessing failure");
     const std::vector<cv::Mat> excessive(129, black);
-    auto oversized = (*pipeline)->Run(**yolo, excessive, .5f);
+    auto oversized = (*pipeline)->Run(**yolo, excessive, YOLOInferenceOptions{.5f});
     TEST_ASSERT(!oversized && oversized.error().kind == PipelineFailureKind::kInvalidRequest,
                 "batch storage limit rejects oversized input");
-    auto empty = (*pipeline)->Run(**yolo, {}, .5f);
+    auto empty = (*pipeline)->Run(**yolo, {}, YOLOInferenceOptions{.5f});
     TEST_ASSERT(empty && empty->empty(), "empty input produces empty output");
     std::stop_source stop;
     stop.request_stop();
-    auto stopped = (*pipeline)->Run(**yolo, {}, .5f,
+    auto stopped = (*pipeline)->Run(**yolo, {}, YOLOInferenceOptions{.5f},
         {stop.get_token(), std::chrono::steady_clock::now()});
     TEST_ASSERT(!stopped && stopped.error().kind == PipelineFailureKind::kCancelled,
                 "cancellation precedes deadline even for empty input");
-    auto expired = (*pipeline)->Run(**yolo, failing, .5f,
+    auto expired = (*pipeline)->Run(**yolo, failing, YOLOInferenceOptions{.5f},
         {{}, std::chrono::steady_clock::now()});
     TEST_ASSERT(!expired && expired.error().kind == PipelineFailureKind::kTimedOut,
                 "deadline precedes native inference errors");
@@ -187,12 +237,12 @@ int main(int argc, char** argv) {
   TEST_ASSERT(timed_pipeline, "create deadline pipeline");
   const std::vector<cv::Mat> long_batch(
       4096, cv::Mat(32, 32, CV_8UC3, cv::Scalar::all(0)));
-  const auto timed = (*timed_pipeline)->Run(**yolo, long_batch, .5f,
+  const auto timed = (*timed_pipeline)->Run(**yolo, long_batch, YOLOInferenceOptions{.5f},
       {{}, std::chrono::steady_clock::now() + std::chrono::milliseconds(1)});
   TEST_ASSERT(!timed && timed.error().kind == PipelineFailureKind::kTimedOut,
               "deadline wakes capacity waits and drains admitted stages");
   const std::span<const cv::Mat> single(long_batch.data(), 1);
-  const auto after_timeout = (*timed_pipeline)->Run(**yolo, single, .5f);
+  const auto after_timeout = (*timed_pipeline)->Run(**yolo, single, YOLOInferenceOptions{.5f});
   TEST_ASSERT(after_timeout && (*after_timeout)[0].results.size() == 1,
               "timed-out run returns all credits before returning");
   TEST_ASSERT(Interrupted(**yolo, false) == 0, "backpressure cancellation and recovery");

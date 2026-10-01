@@ -28,7 +28,7 @@ class YOLOFilter {
   YOLOVersion version() const noexcept;
 
   FilterResult DecodeRaw(std::span<const float> infer_output,
-                   float confidence_threshold,
+                   float confidence_threshold, float nms_iou,
                    const LetterboxTransform& transform) const;
 
   FilterResult DecodeEndToEnd(std::span<const float> infer_output,
@@ -36,7 +36,7 @@ class YOLOFilter {
                    const LetterboxTransform& transform) const;
 
   FilterResult operator()(std::span<const float> infer_output,
-                          float confidence_threshold,
+                          YOLOInferenceOptions options,
                           const LetterboxTransform& transform) const;
 };
 
@@ -62,13 +62,13 @@ class InferYOLOOrtImpl : public InferYOLO {
   std::unique_ptr<Workspace> AcquireWorkspace();
   void ReleaseWorkspace(std::unique_ptr<Workspace> workspace) noexcept;
   VSResult<void> PreProcess(Workspace& workspace, const cv::Mat& image,
-                            float confidence_threshold);
+                            YOLOInferenceOptions options);
   void Execute(Workspace& workspace);
-  RunResult PostProcess(Workspace& workspace, float confidence_threshold);
+  RunResult PostProcess(Workspace& workspace, YOLOInferenceOptions options);
 
   friend VSResult<std::unique_ptr<detail::FrameTask>> detail::MakeFrameTask(
       InferYOLO& model, const cv::Mat& image,
-      float confidence_threshold) noexcept;
+      YOLOInferenceOptions options) noexcept;
 
  public:
   InferYOLOOrtImpl(InferContextORT& ort_ctx,
@@ -83,6 +83,6 @@ class InferYOLOOrtImpl : public InferYOLO {
   const std::vector<std::string>& class_names() const noexcept override;
 
   RunResult Run(const cv::Mat& image,
-                float confidence_threshold) noexcept override;
+                YOLOInferenceOptions options) noexcept override;
 };
 }  // namespace vision_simple

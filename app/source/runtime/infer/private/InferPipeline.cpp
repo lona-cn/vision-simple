@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 
 #include "InferTask.h"
 
@@ -135,9 +136,9 @@ struct InferPipeline::Impl {
     }
   }
 
-  template <typename Result, typename Model>
+  template <typename Result, typename Model, typename Options>
   PipelineResult<Result> Run(Model& model, std::span<const cv::Mat> images,
-                             float threshold,
+                             Options inference_options,
                              PipelineControl control) noexcept {
     Batch batch;
     batch.control = control;
@@ -148,6 +149,11 @@ struct InferPipeline::Impl {
     if (images.size() > options.max_batch_images)
       return std::unexpected(
           Failure(PipelineFailureKind::kInvalidRequest, "Batch too large"));
+    if constexpr (std::is_same_v<Options, YOLOInferenceOptions>) {
+      if (!inference_options.IsValid())
+        return std::unexpected(Failure(PipelineFailureKind::kInvalidRequest,
+                                       "Invalid detector controls"));
+    }
     if (images.empty()) return std::vector<Result>{};
     if (batches == options.max_batches)
       return std::unexpected(
@@ -171,7 +177,7 @@ struct InferPipeline::Impl {
         ++resident;
         ++batch.active;
         lock.unlock();
-        auto task = detail::MakeFrameTask(model, images[index], threshold);
+        auto task = detail::MakeFrameTask(model, images[index], inference_options);
         lock.lock();
         if (!task) {
           Record(batch, index, std::move(task.error()));
@@ -249,9 +255,9 @@ InferPipeline::CreateResult InferPipeline::Create(
 }
 void InferPipeline::Close() noexcept { impl_->Close(); }
 PipelineResult<YOLOFrameResult> InferPipeline::Run(
-    InferYOLO& model, std::span<const cv::Mat> images, float threshold,
+    InferYOLO& model, std::span<const cv::Mat> images, YOLOInferenceOptions options,
     PipelineControl control) noexcept {
-  return impl_->Run<YOLOFrameResult>(model, images, threshold, control);
+  return impl_->Run<YOLOFrameResult>(model, images, options, control);
 }
 PipelineResult<OCRFrameResult> InferPipeline::Run(
     InferOCR& model, std::span<const cv::Mat> images, float threshold,
@@ -259,8 +265,8 @@ PipelineResult<OCRFrameResult> InferPipeline::Run(
   return impl_->Run<OCRFrameResult>(model, images, threshold, control);
 }
 PipelineResult<YOLOTaskFrameResult> InferPipeline::Run(
-    InferYOLOTask& model, std::span<const cv::Mat> images, float threshold,
+    InferYOLOTask& model, std::span<const cv::Mat> images, YOLOInferenceOptions options,
     PipelineControl control) noexcept {
-  return impl_->Run<YOLOTaskFrameResult>(model, images, threshold, control);
+  return impl_->Run<YOLOTaskFrameResult>(model, images, options, control);
 }
 }  // namespace vision_simple

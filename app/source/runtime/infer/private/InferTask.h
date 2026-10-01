@@ -22,11 +22,11 @@ class FrameTask {
 
 VSResult<std::unique_ptr<FrameTask>> MakeFrameTask(
     InferYOLO& model, const cv::Mat& image,
-    float confidence_threshold) noexcept;
+    YOLOInferenceOptions options) noexcept;
 VSResult<std::unique_ptr<FrameTask>> MakeFrameTask(
     InferOCR& model, const cv::Mat& image, float confidence_threshold) noexcept;
 VSResult<std::unique_ptr<FrameTask>> MakeFrameTask(
     InferYOLOTask& model, const cv::Mat& image,
-    float confidence_threshold) noexcept;
+    YOLOInferenceOptions options) noexcept;
 
 }  // namespace vision_simple::detail

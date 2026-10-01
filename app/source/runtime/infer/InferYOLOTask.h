@@ -61,7 +61,7 @@ class VISION_SIMPLE_API InferYOLOTask {
   virtual YOLOTask task() const noexcept = 0;
   virtual const std::vector<std::string>& class_names() const noexcept = 0;
   virtual RunResult Run(const cv::Mat& image,
-                        float confidence_threshold) noexcept = 0;
+                        YOLOInferenceOptions options) noexcept = 0;
   static CreateResult Create(InferContext& context, std::span<uint8_t> data,
                              YOLOTask task, YOLOVersion version,
                              size_t device_id = 0) noexcept;

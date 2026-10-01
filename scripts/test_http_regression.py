@@ -309,6 +309,8 @@ def model_yaml(root):
     quote = lambda path: json.dumps(path.as_posix())
     return (
         "yolo:\n"
+        f"  - name: tiny-threshold-raw\n    version: kV26\n    path: {quote(assets / 'reliability/yolo26_detect_threshold_raw.onnx')}\n"
+        f"  - name: tiny-threshold-e2e\n    version: kV26\n    path: {quote(assets / 'reliability/yolo26_detect_threshold_e2e.onnx')}\n"
         f"  - name: hd2-fp32\n    version: kV11\n    path: {quote(assets / 'hd2-yolo11n-fp32.onnx')}\n"
         f"  - name: hd2-fp16\n    version: kV11\n    path: {quote(assets / 'hd2-yolo11n-fp16.onnx')}\n"
         f"  - name: missing-yolo\n    version: kV11\n    path: {quote(assets / 'does-not-exist.onnx')}\n"
@@ -576,6 +578,83 @@ def pipeline_backpressure_matrix(executable, root, config, images):
     print("PASS bounded pipeline rejects excess admission and recovers", flush=True)
 
 
+def threshold_image(width=64, height=64):
+    return base64.b64encode(f"P6\n{width} {height}\n255\n".encode() +
+                            bytes(width * height * 3)).decode("ascii")
+
+
+THRESHOLD_INVALID = (-1, 2, True, None, "0.1", [], {}, 1.0000000000000002, -1e-300)
+
+
+def threshold_expected(mode, controls, images):
+    # Independent fixture oracle: coincident class-0 A/B, separate low class-1 C.
+    selected = [] if controls.get("confidence") == 1 else [0, 1] if mode == "e2e" else [0]
+    if controls.get("confidence", .125) < .12 and selected:
+        selected.append(2)
+    if mode == "raw" and controls.get("nms_iou") == 1 and selected:
+        selected = [0, 1] + ([2] if controls.get("confidence", .125) < .12 else [])
+    frames = []
+    for width, height in images:
+        gain = 64 / max(width, height)
+        px, py = (64 - width * gain) / 2, (64 - height * gain) / 2
+        frames.append([{"class_id": (0, 0, 1)[i], "confidence": (.9, .8, .12)[i],
+                        "bbox": [round((x - px) / gain), round((y - py) / gain),
+                                 round(w / gain), round(h / gain)]}
+                       for i in selected for x, y, w, h in
+                       ([4, 4, 24, 24] if i < 2 else [40, 40, 16, 16],)])
+    return {"class_names": ["first", "second"], "results": frames}
+
+
+def native_threshold_matrix(server):
+    shapes = [(64, 64), (128, 128)]
+    images = [threshold_image(*shape) for shape in shapes]
+    for version in ("v0", "v1"):
+        route = f"/{version}/infer/yolo"
+        for mode in ("raw", "e2e"):
+            model = "tiny-threshold-" + mode
+            for controls in ({}, {"confidence": .1}, {"confidence": .1, "nms_iou": 0},
+                             {"confidence": .1, "nms_iou": 1}, {"confidence": 1},
+                             {"confidence": -0.0}, {"confidence": 0}, {"nms_iou": 1}):
+                status, body = server.request(route, {"model": model, "images": images, **controls})
+                require(status == 200 and close_values(body, threshold_expected(mode, controls, shapes)),
+                        f"{version}/{mode} threshold result: {status} {body}, controls={controls}")
+        for field in ("confidence", "nms_iou"):
+            for value in THRESHOLD_INVALID:
+                for batch in ([], ["%%%"]):
+                    error_response(server.request(route, {"model": "unknown", "images": batch,
+                                                          field: value}), 400, "invalid_request", None)
+            for value in (0, -0.0, 1):
+                status, body = server.request(route, {"model": "tiny-threshold-raw", "images": [], field: value})
+                require(status == 200 and body["results"] == [], f"Boundary empty batch: {status} {body}")
+            error_response(server.request(f"/{version}/infer/ocr", {
+                "model": "unknown", "images": [], field: .125 if field == "confidence" else .3}), 400, "invalid_request", None)
+        for field in ("confidence", "nms_iou"):
+            for literal in ("NaN", "Infinity", "1e400", "-1e400"):
+                error_response(server.request(route, raw='{"model":"unknown","images":[],"' +
+                                              field + '":' + literal + '}'), 400, "invalid_request", None)
+        valid = {"model": "tiny-threshold-raw", "images": images, "confidence": .1}
+        prefix = json.dumps(valid)[:-1]
+        for raw in (prefix + ',"extension":{"nested":[1e400]}}',
+                    prefix + ',"confidence":1e400,"confidence":0.1}'):
+            error_response(server.request(route, raw=raw), 400, "invalid_request", None)
+        status, recovered = server.request(route, {**valid, "extension": ["NaN", "Infinity", "1e400"]})
+        require(status == 200 and close_values(recovered, threshold_expected("raw", {"confidence": .1}, shapes)),
+                f"Numeric-looking strings or parser failure changed valid recovery: {status} {recovered}")
+    # Real concurrent HTTP callers use one cached model; no lease overlap assumption.
+    controls_list = [{"confidence": .1, "nms_iou": 0}, {"confidence": .125, "nms_iou": 1}, {},
+                     {"confidence": .1, "nms_iou": 1}]
+    def call(controls):
+        status, body = server.request("/v1/infer/yolo", {
+            "model": "tiny-threshold-raw", "images": images * 16, **controls})
+        expected = threshold_expected("raw", controls, shapes * 16)
+        require(status == 200 and close_values(body, expected), f"Concurrent options leaked: {status} {body}")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(call, controls_list))
+    call({})
+    print("PASS native per-request confidence/NMS, exact raw/e2e frames, validation and concurrent recovery")
+
+
+
 def run(args):
     root = args.project_root.resolve(strict=True)
     executable = args.server.resolve(strict=True)
@@ -602,6 +681,7 @@ def run(args):
     config = model_yaml(root)
     with Server(executable, root, config, options=REPEATED_WORKLOAD_OPTIONS) as server:
         server.wait_ready()
+        native_threshold_matrix(server)
         status, models = server.request("/v0/infer/models", method="GET")
         require(status == 200 and "error" not in models, f"Models endpoint failed: {models}")
         for model in ("hd2-fp32", "hd2-fp16"):

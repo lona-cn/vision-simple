@@ -11,6 +11,8 @@ from test_http_regression import RegressionFailure, fixture
 # Explicit consumer manifests, including models intentionally rejected by the
 # runtime. Missing negative fixtures must not masquerade as rejected model loads.
 NATIVE_FIXTURES = (
+    "app/assets/test/reliability/yolo26_detect_threshold_raw.onnx",
+    "app/assets/test/reliability/yolo26_detect_threshold_e2e.onnx",
     "app/assets/test/hd2-yolo11n-fp32.onnx",
     "app/assets/test/ppocr_det.onnx",
     "app/assets/test/ppocr_rec.onnx",
@@ -81,6 +83,8 @@ NATIVE_FIXTURES = (
 )
 
 HTTP_FIXTURES = (
+    "app/assets/test/reliability/yolo26_detect_threshold_raw.onnx",
+    "app/assets/test/reliability/yolo26_detect_threshold_e2e.onnx",
     "app/assets/test/hd2-yolo11n-fp32.onnx",
     "app/assets/test/hd2-yolo11n-fp16.onnx",
     "app/assets/test/ppocr_det.onnx",

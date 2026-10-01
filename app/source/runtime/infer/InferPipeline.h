@@ -53,7 +53,7 @@ class VISION_SIMPLE_API InferPipeline {
 
   PipelineResult<YOLOFrameResult> Run(InferYOLO& model,
                                       std::span<const cv::Mat> images,
-                                      float confidence_threshold,
+                                      YOLOInferenceOptions options,
                                       PipelineControl control = {}) noexcept;
   PipelineResult<OCRFrameResult> Run(InferOCR& model,
                                      std::span<const cv::Mat> images,
@@ -61,7 +61,7 @@ class VISION_SIMPLE_API InferPipeline {
                                      PipelineControl control = {}) noexcept;
   PipelineResult<YOLOTaskFrameResult> Run(
       InferYOLOTask& model, std::span<const cv::Mat> images,
-      float confidence_threshold, PipelineControl control = {}) noexcept;
+      YOLOInferenceOptions options, PipelineControl control = {}) noexcept;
 
   // Reject new batches and cooperatively cancel admitted work; thread-safe.
   // The owner must join callers before destroying this object.

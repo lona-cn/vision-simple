@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <thread>
+#include <type_traits>
 
 #include "Infer.h"
 #include "Util.hpp"
@@ -38,24 +39,30 @@ bool Same(const OCRFrameResult& a, const OCRFrameResult& b) {
 }
 
 template <typename Model>
+auto Confidence(float value) {
+  if constexpr (std::is_same_v<Model, InferOCR>) return value;
+  else return YOLOInferenceOptions{value};
+}
+
+template <typename Model>
 int CheckInputs(Model& model) {
   cv::Mat storage(96, 192, CV_8UC3, cv::Scalar::all(0));
   cv::putText(storage, "TEST", {12, 62}, cv::FONT_HERSHEY_SIMPLEX, 1.2,
               cv::Scalar::all(255), 2);
   const auto roi = storage(cv::Rect{8, 8, 160, 80});
   TEST_ASSERT(!roi.isContinuous(), "fixture must exercise a strided ROI");
-  const auto reference = model.Run(roi.clone(), .5f);
+  const auto reference = model.Run(roi.clone(), Confidence<Model>(.5f));
   TEST_ASSERT(reference, "valid CPU inference succeeds");
   const int dimensions[] = {2, 3, 4};
   const std::vector<cv::Mat> bad_images{
       cv::Mat{}, cv::Mat(32, 32, CV_8UC1), cv::Mat(32, 32, CV_8UC4),
       cv::Mat(32, 32, CV_32FC3), cv::Mat(3, dimensions, CV_8UC3)};
   for (const auto& image : bad_images) {
-    const auto rejected = model.Run(image, .5f);
+    const auto rejected = model.Run(image, Confidence<Model>(.5f));
     TEST_ASSERT(!rejected && rejected.error().code ==
                                  VisionSimpleErrorCode::kParameterError,
                 "unsupported image returns parameter error");
-    const auto recovered = model.Run(roi, .5f);
+    const auto recovered = model.Run(roi, Confidence<Model>(.5f));
     TEST_ASSERT(
         recovered && Same(*reference, *recovered),
         "same instance recovers with strided ROI matching contiguous pixels");
@@ -64,17 +71,17 @@ int CheckInputs(Model& model) {
                                std::bit_cast<float>(0x7f800000u),
                                std::bit_cast<float>(0xff800000u)};
   for (const auto threshold : bad_confidence) {
-    const auto rejected = model.Run(roi, threshold);
+    const auto rejected = model.Run(roi, Confidence<Model>(threshold));
     TEST_ASSERT(!rejected && rejected.error().code ==
                                  VisionSimpleErrorCode::kParameterError,
                 "non-finite or out-of-range confidence rejected under release "
                 "fast-math");
-    const auto recovered = model.Run(roi, .5f);
+    const auto recovered = model.Run(roi, Confidence<Model>(.5f));
     TEST_ASSERT(recovered && Same(*reference, *recovered),
                 "confidence error leaves instance reusable");
   }
-  TEST_ASSERT(model.Run(roi, 0.f), "zero confidence is accepted");
-  TEST_ASSERT(model.Run(roi, 1.f), "unit confidence is accepted");
+  TEST_ASSERT(model.Run(roi, Confidence<Model>(0.f)), "zero confidence is accepted");
+  TEST_ASSERT(model.Run(roi, Confidence<Model>(1.f)), "unit confidence is accepted");
   return 0;
 }
 
@@ -82,7 +89,7 @@ template <typename Model>
 int CheckConcurrentRecovery(Model& model) {
   const cv::Mat black(32, 32, CV_8UC3, cv::Scalar::all(0));
   const cv::Mat white(32, 32, CV_8UC3, cv::Scalar::all(255));
-  const auto reference = model.Run(black, .5f);
+  const auto reference = model.Run(black, Confidence<Model>(.5f));
   TEST_ASSERT(reference, "concurrent recovery baseline succeeds");
   std::atomic<bool> correct{true};
   std::barrier ready(4);
@@ -92,7 +99,7 @@ int CheckConcurrentRecovery(Model& model) {
       ready.arrive_and_wait();
       for (int iteration = 0; iteration < 8; ++iteration) {
         const bool fail = (iteration + worker) % 2 == 0;
-        const auto result = model.Run(fail ? white : black, .5f);
+        const auto result = model.Run(fail ? white : black, Confidence<Model>(.5f));
         if (fail ? (result ||
                     result.error().code != VisionSimpleErrorCode::kRuntimeError)
                  : (!result || !Same(*reference, *result))) {
@@ -116,20 +123,20 @@ int CheckRuntimeRecovery(InferContext& context, const fs::path& assets) {
   cv::Mat black(32, 32, CV_8UC3, cv::Scalar::all(0));
   cv::Mat white(32, 32, CV_8UC3, cv::Scalar::all(255));
   for (int repeat = 0; repeat < 2; ++repeat) {
-    const auto failed = (*yolo)->Run(white, .5f);
+    const auto failed = (*yolo)->Run(white, YOLOInferenceOptions{.5f});
     TEST_ASSERT(
         !failed && failed.error().code == VisionSimpleErrorCode::kRuntimeError,
         "input-dependent Gather raises a recoverable ORT Run error");
-    const auto recovered = (*yolo)->Run(black, .5f);
+    const auto recovered = (*yolo)->Run(black, YOLOInferenceOptions{.5f});
     TEST_ASSERT(recovered && recovered->results.size() == 1 &&
                     recovered->results[0].bbox == cv::Rect(4, 4, 16, 16),
                 "YOLO same-session binding recovers after ORT Run error");
   }
-  const auto extreme = (*yolo)->Run(cv::Mat(1, 10000, CV_8UC3), .5f);
+  const auto extreme = (*yolo)->Run(cv::Mat(1, 10000, CV_8UC3), YOLOInferenceOptions{.5f});
   TEST_ASSERT(!extreme && extreme.error().code ==
                               VisionSimpleErrorCode::kParameterError,
               "rounded-zero Letterbox dimension is a recoverable input error");
-  TEST_ASSERT((*yolo)->Run(black, .5f),
+  TEST_ASSERT((*yolo)->Run(black, YOLOInferenceOptions{.5f}),
               "Letterbox error leaves session reusable");
   TEST_ASSERT(CheckConcurrentRecovery(**yolo) == 0,
               "YOLO serializes full Run for direct clients");
@@ -199,8 +206,8 @@ int CheckDeviceIds(InferContext& cpu, const fs::path& assets) {
   auto zero = InferYOLO::Create(cpu, path, YOLOVersion::kV11, 0);
   TEST_ASSERT(ignored && zero, "CPU ignores even the maximum device ID");
   const cv::Mat image(96, 192, CV_8UC3, cv::Scalar::all(0));
-  const auto expected = (*zero)->Run(image, .5f);
-  const auto actual = (*ignored)->Run(image, .5f);
+  const auto expected = (*zero)->Run(image, YOLOInferenceOptions{.5f});
+  const auto actual = (*ignored)->Run(image, YOLOInferenceOptions{.5f});
   TEST_ASSERT(expected && actual && Same(*expected, *actual),
               "CPU inference is unchanged by the ignored device ID");
   return 0;
@@ -223,7 +230,7 @@ int CheckYOLO26(InferContext& context, const fs::path& assets) {
                                      YOLOVersion::kV26);
       TEST_ASSERT(model && (*model)->version() == YOLOVersion::kV26,
                   "load explicit YOLO26 mode without masquerading as an old version");
-      auto result = (*model)->Run(cv::Mat(64, 64, CV_8UC3, cv::Scalar::all(0)), .5f);
+      auto result = (*model)->Run(cv::Mat(64, 64, CV_8UC3, cv::Scalar::all(0)), YOLOInferenceOptions{.5f});
       const size_t count = std::string_view(mode) == "raw" ? 1 : 2;
       TEST_ASSERT(result && result->results.size() == count,
                   "metadata disambiguates identical [1,6,6] shapes and controls NMS");
@@ -231,9 +238,75 @@ int CheckYOLO26(InferContext& context, const fs::path& assets) {
         TEST_ASSERT(detection.class_id == 0 && detection.bbox == cv::Rect(4, 4, 24, 24),
                     "explicit layout preserves box coordinate semantics");
       }
-      auto empty = (*model)->Run(cv::Mat(64, 64, CV_8UC3, cv::Scalar::all(0)), 1.f);
+      auto empty = (*model)->Run(cv::Mat(64, 64, CV_8UC3, cv::Scalar::all(0)), YOLOInferenceOptions{1.f});
       TEST_ASSERT(empty && empty->results.empty(), "empty YOLO26 detections are successful");
     }
+  }
+  const cv::Mat image(64, 64, CV_8UC3, cv::Scalar::all(0));
+  for (const bool e2e : {false, true}) {
+    auto model = InferYOLO::Create(context,
+        (assets / "reliability" / (e2e ? "yolo26_detect_threshold_e2e.onnx"
+                                     : "yolo26_detect_threshold_raw.onnx")).string(),
+        YOLOVersion::kV26);
+    TEST_ASSERT(model, "load threshold candidates in a real ORT session");
+    const auto baseline = (*model)->Run(image, {});
+    const auto low = (*model)->Run(image, YOLOInferenceOptions{.1f});
+    const auto all = (*model)->Run(image, YOLOInferenceOptions{.1f, 1.f});
+    TEST_ASSERT(baseline && low && all, "execute confidence and IoU controls");
+    TEST_ASSERT(baseline->results.size() == (e2e ? 2 : 1) &&
+                    low->results.size() == (e2e ? 3 : 2) && all->results.size() == 3,
+                "omitted confidence excludes C; lower confidence admits C; raw IoU1 retains B");
+    TEST_ASSERT(all->results[0].class_id == 0 && all->results[0].confidence == .9f &&
+                    all->results[0].bbox == cv::Rect(4, 4, 24, 24) &&
+                    all->results[1].class_id == 0 && all->results[1].confidence == .8f &&
+                    all->results[1].bbox == cv::Rect(4, 4, 24, 24) &&
+                    all->results[2].class_id == 1 && all->results[2].confidence == .12f &&
+                    all->results[2].bbox == cv::Rect(40, 40, 16, 16),
+                "controls preserve exact scores, classes and coordinates");
+    const auto nms_only = (*model)->Run(image, YOLOInferenceOptions{std::nullopt, 1.f});
+    TEST_ASSERT(nms_only && nms_only->results.size() == 2 &&
+                    nms_only->results[0].confidence == .9f && nms_only->results[1].confidence == .8f,
+                "NMS-only options retain omitted confidence default and both overlapping rows");
+    if (e2e) {
+      const auto zero_iou = (*model)->Run(image, YOLOInferenceOptions{.1f, 0.f});
+      TEST_ASSERT(zero_iou && Same(*zero_iou, *all), "end-to-end detection ignores valid IoU without a second NMS");
+    }
+    const auto equal = (*model)->Run(image, YOLOInferenceOptions{.12f, 1.f});
+    TEST_ASSERT(equal && equal->results.size() == (e2e ? 3 : 2),
+                "raw strict and end-to-end inclusive score equality remain distinct");
+    for (uint32_t bits : {0x7fc00001u, 0xffc00001u, 0x7f800000u, 0xff800000u,
+                          0x80000001u, 0xbf000000u, 0x3f800001u}) {
+      for (bool nms : {false, true}) {
+        YOLOInferenceOptions options;
+        (nms ? options.nms_iou : options.confidence) = std::bit_cast<float>(bits);
+        const auto invalid = (*model)->Run(image, options);
+        TEST_ASSERT(!invalid && invalid.error().code == VisionSimpleErrorCode::kParameterError,
+                    "each optional control rejects invalid bits even with fast-math");
+        const auto recovered = (*model)->Run(image, {});
+        TEST_ASSERT(recovered && Same(*recovered, *baseline), "invalid control leaves session reusable");
+      }
+    }
+    for (float edge : {std::bit_cast<float>(0x80000000u), 0.f, 1.f}) {
+      const auto confidence = (*model)->Run(image, YOLOInferenceOptions{edge, 1.f});
+      const auto nms = (*model)->Run(image, YOLOInferenceOptions{.1f, edge});
+      TEST_ASSERT(confidence && confidence->results.size() == (edge == 1.f ? 0 : 3) &&
+                      nms && nms->results.size() == (e2e || edge == 1.f ? 3 : 2),
+                  "negative zero, zero and unit controls have valid boundary behavior");
+    }
+    std::atomic<bool> correct{true};
+    std::barrier ready(4);
+    std::vector<std::jthread> callers;
+    for (int worker = 0; worker < 4; ++worker) {
+      callers.emplace_back([&, worker] {
+        ready.arrive_and_wait();
+        for (int repeat = 0; repeat < 12; ++repeat) {
+          const auto result = (*model)->Run(image, worker % 2 ? YOLOInferenceOptions{} : YOLOInferenceOptions{.1f, 1.f});
+          if (!result || !Same(*result, worker % 2 ? *baseline : *all)) correct.store(false);
+        }
+      });
+    }
+    callers.clear();
+    TEST_ASSERT(correct.load(), "same-session concurrent controls cannot leak between calls");
   }
   return 0;
 }
