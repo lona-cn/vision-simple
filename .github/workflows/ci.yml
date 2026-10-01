@@ -1,5 +1,5 @@
 name: CI
-run-name: ASan evidence / ${{ github.ref_name }} / ${{ github.run_id }}
+run-name: ASan scalar portability verification / ${{ github.ref_name }} / ${{ github.run_id }}
 
 on:
   workflow_dispatch:
@@ -8,12 +8,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: asan-evidence-b42dc07-${{ github.run_id }}-${{ github.run_attempt }}
+  group: asan-fixed-scalar-b42dc07-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: false
 
 jobs:
-  asan-diagnostic:
-    name: Linux x86_64 / GCC 14 / ASan + UBSan evidence
+  asan-fixed-scalar:
+    name: Linux x86_64 / GCC 14 / ASan + UBSan / natural native verification
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/release-asan-b42dc07'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -41,162 +41,18 @@ jobs:
           submodules: recursive
           lfs: ${{ matrix.build_tests }}
 
-      - name: Prepare diagnostic controllers
+      - name: Prepare evidence directory and selected-package query
         run: |
           mkdir -p asan-diagnostic/native-elf
-          cat > asan-diagnostic/gdb-controller.py <<'PY'
-          import gdb, os, json, shlex, signal, traceback
-          from pathlib import Path
-          out = Path(os.environ['DIAG_TARGET_DIR'])
-          state = {'target': os.environ['DIAG_TARGET'], 'main_reached': False, 'exit_code': None, 'fatal_signal': None, 'controller_error': None}
-          def capture(label):
-              print('DIAGNOSTIC_STOP=' + label, flush=True)
-              for command in ['thread apply all bt full', 'info registers', 'x/i $pc', 'x/16bx $pc', 'x/16i $pc', 'x/16i $pc-16', 'info proc mappings', 'info sharedlibrary']:
-                  try:
-                      print(gdb.execute(command, to_string=True), flush=True)
-                  except gdb.error as error:
-                      print(command + ': ' + str(error), flush=True)
-              try:
-                  pid = gdb.selected_inferior().pid
-                  if pid:
-                      (out / (label + '-proc-maps.txt')).write_text(Path('/proc/%d/maps' % pid).read_text())
-              except Exception as error:
-                  print('proc maps capture: ' + str(error), flush=True)
-          class MainMarker(gdb.Breakpoint):
-              def stop(self):
-                  state['main_reached'] = True
-                  print('DIAG_ENTER_MAIN', flush=True)
-                  capture('MAIN_REACHED')
-                  state['marker_stop'] = True
-                  return True
-          class LibcStartMarker(gdb.Breakpoint):
-              def stop(self):
-                  try:
-                      # Ubuntu x86_64 SysV: __libc_start_main receives main in RDI.
-                      address = int(gdb.parse_and_eval('$rdi'))
-                      print('MAIN_RESOLVED_VIA_LIBC_START_MAIN_RDI=0x%x' % address, flush=True)
-                      MainMarker('*0x%x' % address)
-                  except Exception as error:
-                      print('MAIN_ADDRESS_UNAVAILABLE: ' + str(error), flush=True)
-                  self.enabled = False
-                  return False
-          def exited(event):
-              state['exit_code'] = getattr(event, 'exit_code', None)
-          gdb.events.exited.connect(exited)
-          def stopped(event):
-              if isinstance(event, gdb.SignalEvent):
-                  print('FIRST_CHANCE_SIGNAL=' + event.stop_signal, flush=True)
-                  if event.stop_signal in ['SIGSEGV', 'SIGILL', 'SIGABRT', 'SIGBUS']:
-                      state['fatal_signal'] = event.stop_signal
-                      capture(event.stop_signal)
-          gdb.events.stop.connect(stopped)
-          status = 125
-          try:
-              gdb.execute('set pagination off')
-              gdb.execute('set confirm off')
-              gdb.execute('set disable-randomization off')
-              gdb.execute('show disable-randomization')
-              gdb.execute('handle SIGSEGV SIGILL SIGABRT SIGBUS stop print pass')
-              try:
-                  symbol = gdb.parse_and_eval('&main')
-                  if symbol is not None:
-                      MainMarker('main')
-                      print('MAIN_BREAKPOINT_AVAILABLE', flush=True)
-                  else:
-                      print('MAIN_BREAKPOINT_UNAVAILABLE: original release symbols stripped; compile flags unchanged', flush=True)
-              except gdb.error as error:
-                  print('MAIN_SYMBOL_UNAVAILABLE: ' + str(error), flush=True)
-                  gdb.execute('set breakpoint pending on')
-                  LibcStartMarker('__libc_start_main')
-                  print('MAIN_FALLBACK_PENDING: Linux x86_64 SysV __libc_start_main RDI; no compile flags changed', flush=True)
-              arguments = json.loads(os.environ['DIAG_ARGUMENTS'])
-              gdb.execute('set args ' + shlex.join(arguments) + ' > ' + shlex.quote(str(out / 'app.stdout')) + ' 2> ' + shlex.quote(str(out / 'app.stderr')))
-              gdb.execute('run')
-              while state.pop('marker_stop', False) and state['exit_code'] is None and not state['fatal_signal']:
-                  gdb.execute('continue')
-              if state['fatal_signal']:
-                  status = 128 + int(getattr(signal, state['fatal_signal']))
-                  gdb.execute('kill')
-              elif state['exit_code'] is not None:
-                  status = int(state['exit_code'])
-              else:
-                  state['controller_error'] = 'inferior stopped without a recorded normal exit or requested fatal signal'
-                  capture('UNEXPECTED_STOP')
-                  gdb.execute('kill')
-          except Exception:
-              state['controller_error'] = traceback.format_exc()
-              print(state['controller_error'], flush=True)
-              try:
-                  gdb.execute('kill')
-              except gdb.error:
-                  pass
-          state['propagated_status'] = status
-          (out / 'result.json').write_text(json.dumps(state, indent=2) + '\n')
-          print('INFERIOR_RESULT=' + json.dumps(state), flush=True)
-          gdb.execute('quit %d' % status)
-          PY
-          cat > asan-diagnostic/run-native.py <<'PY'
-          import json, os, subprocess, signal
-          from pathlib import Path
-          root = Path(os.environ['GITHUB_WORKSPACE'])
-          diag = root / 'asan-diagnostic'
-          targets = ["test_vision_helper","test_cvt","test_common","test_trace_id","test_yolo_postprocess","test_ocr_decode","test_infer_inputs","test_config_load","test_tracker","test_pipeline","test_yolo_tasks","test_ocr_batch","test_ocr_morphology","test_ocr_morphology_dataset","test_subtitle_timeline","test_image_codec","test_image_budget_service"]
-          fixtures = set(["test_infer_inputs","test_pipeline","test_yolo_tasks","test_ocr_batch","test_ocr_morphology","test_ocr_morphology_dataset","test_image_budget_service"])
-          rows = []
-          for target in targets:
-              out = diag / target
-              out.mkdir(exist_ok=True)
-              env = os.environ.copy()
-              env.update(DIAG_TARGET=target, DIAG_TARGET_DIR=str(out), DIAG_ARGUMENTS=json.dumps(['--project-root', str(root)] if target in fixtures else []))
-              with (out / 'gdb.log').open('w') as log:
-                  try:
-                      process = subprocess.Popen(['xmake', 'lua', str(diag / 'run-gdb.lua'), target, str(diag / 'gdb-controller.py')], cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-                      wrapper_status = process.wait(timeout=600)
-                  except subprocess.TimeoutExpired:
-                      os.killpg(process.pid, signal.SIGKILL)
-                      process.wait()
-                      wrapper_status = 124
-                      log.write('CONTROLLER_TIMEOUT: one attempt consumed; no retry\n')
-              result_path = out / 'result.json'
-              result = json.loads(result_path.read_text()) if result_path.exists() else {'controller_error': 'no inferior result recorded', 'propagated_status': 125}
-              result['wrapper_status'] = wrapper_status
-              result['target'] = target
-              result['passed'] = wrapper_status == 0 and result.get('exit_code') == 0 and result.get('propagated_status') == 0 and not result.get('fatal_signal') and not result.get('controller_error')
-              rows.append(result)
-              print(json.dumps(result), flush=True)
-              for stream in ['app.stdout', 'app.stderr']:
-                  path = out / stream
-                  print('=== ' + target + ' ' + stream + ' ===', flush=True)
-                  if path.exists():
-                      print(path.read_text(errors='replace'), flush=True)
-          codec = next(row for row in rows if row['target'] == 'test_image_codec')
-          interpretation = 'INCONCLUSIVE: codec passed on this runner under debugger; this does not fix or disprove the original failure.' if codec['passed'] else 'Codec failed: inspect first-chance signal, stack, instructions, mappings and application streams; no fix applied.'
-          print(interpretation, flush=True)
-          (diag / 'summary.json').write_text(json.dumps({'interpretation': interpretation, 'targets': rows}, indent=2) + '\n')
-          raise SystemExit(0 if all(row['passed'] for row in rows) else 1)
-          PY
-          cat > asan-diagnostic/run-gdb.lua <<'LUA'
+          cat > asan-diagnostic/selected-package.lua <<'LUA'
           import("core.project.config")
           import("core.project.project")
-          import("private.action.run.runenvs")
-          function main(name, commands)
+          function main()
               config.load()
               project.load_targets()
-              local target = assert(project.target(name), "missing target: " .. name)
-              local targetfile = path.absolute(target:targetfile())
-              local function add_packages(t, seen)
-                  if seen[t:name()] then return end
-                  seen[t:name()] = true
-                  os.addenvs(t:pkgenvs())
-                  for _, dep in ipairs(t:orderdeps()) do add_packages(dep, seen) end
-              end
-              add_packages(target, {})
-              local addenvs, setenvs = runenvs.make(target)
-              print("DIAGNOSTIC_TARGETFILE=" .. targetfile)
-              print("DIAGNOSTIC_RUNDIR=" .. path.absolute(target:rundir()))
-              for key, value in pairs(addenvs or {}) do print("DIAGNOSTIC_ADDENV " .. key .. "=" .. table.concat(table.wrap(value), ":")) end
-              for key, value in pairs(setenvs or {}) do print("DIAGNOSTIC_SETENV " .. key .. "=" .. table.concat(table.wrap(value), ":")) end
-              os.execv("gdb", {"--batch", "-nx", "-q", "-x", commands, "--args", targetfile}, {curdir = target:rundir(), addenvs = addenvs, setenvs = setenvs})
+              local target = assert(project.target("test_image_codec"), "missing codec target")
+              local pkg = assert(target:pkg("turbobase64"), "codec lacks turbobase64 package")
+              io.write(assert(pkg:installdir(), "missing selected package installdir"))
           end
           LUA
 
@@ -204,7 +60,7 @@ jobs:
         uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a # v1
         with:
           xmake-version: ${{ matrix.xmake_version || '2.9.7' }}
-          # Omit actions-cache-folder/key: this action otherwise saves its tool cache in post.
+          # Omit tool-cache inputs: the pinned action otherwise saves its cache in post.
 
       - name: Resolve xmake package path
         id: package-path
@@ -213,7 +69,7 @@ jobs:
           printf 'path=%s\n' "$package_path" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$package_path" > asan-diagnostic/package-path.txt
 
-      - name: Restore package cache
+      - name: Restore existing package cache (old install retained for comparison)
         id: package-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -222,7 +78,7 @@ jobs:
           restore-keys: |
             xmake-package-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package_key }}-xmake-${{ matrix.xmake_version || '2.9.7' }}--
 
-      - name: Restore compiler cache
+      - name: Restore existing compiler cache
         id: compiler-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -231,12 +87,31 @@ jobs:
           restore-keys: |
             xmake-build-v2-${{ matrix.cache_key }}--
 
-      - name: Install Linux system dependencies and debugger
+      - name: Record old restored TurboBase64 archives before configure
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          diag = Path(os.environ['GITHUB_WORKSPACE']) / 'asan-diagnostic'
+          package_root = Path((diag / 'package-path.txt').read_text().strip())
+          rows = []
+          for archive in sorted((package_root / 't/turbobase64/2022.02.21').rglob('*.a')):
+              relative = archive.relative_to(package_root / 't/turbobase64/2022.02.21')
+              install = package_root / 't/turbobase64/2022.02.21' / relative.parts[0]
+              row = {'archive': str(archive), 'install_dir': str(install), 'sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}
+              rows.append(row)
+              print('RESTORED_OLD_TURBOBASE64=' + json.dumps(row))
+          (diag / 'restored-old-packages.json').write_text(json.dumps(rows, indent=2) + '\n')
+          if not rows:
+              print('RESTORED_OLD_TURBOBASE64_NOT_PRESENT: record cache matched key; no claim that old archive was exercised')
+          PY
+
+      - name: Install original system dependencies and ELF audit tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ${{ matrix.apt_packages }} gdb binutils file
+          sudo apt-get install --no-install-recommends -y ${{ matrix.apt_packages }} binutils file
 
-      - name: Capture original runner and toolchain state (read-only)
+      - name: Capture runner CPU, ASLR, toolchain and cache identity (read-only)
         if: always()
         run: |
           {
@@ -254,20 +129,22 @@ jobs:
             gcc-14 --version
             g++-14 --version
             xmake --version
-            gdb --version
             dpkg-query -W -f='${Package} ${Version}\n' 'libasan*' 'libubsan*' 'libc6*' 'gcc-14*' 'libgcc*' || true
           } 2>&1 | tee asan-diagnostic/runner-state.log
           printf 'package-cache-match=%s\ncompiler-cache-match=%s\n' '${{ steps.package-cache.outputs.cache-matched-key }}' '${{ steps.compiler-cache.outputs.cache-matched-key }}' > asan-diagnostic/cache-restores.txt
 
-      - name: Configure unchanged sanitizer slice
+      - name: Configure same sanitizer slice and capture actual package compile flags
         id: configure
-        run: xmake f ${{ matrix.configure }} --policies=${{ matrix.policy }} -y 2>&1 | tee asan-diagnostic/configure.log
+        run: |
+          xmake f -vD ${{ matrix.configure }} --policies=${{ matrix.policy }} -y 2>&1 | tee asan-diagnostic/configure.log
+          xmake lua asan-diagnostic/selected-package.lua > asan-diagnostic/selected-package-path.txt
+          printf 'SELECTED_TURBOBASE64_INSTALL=%s\n' "$(cat asan-diagnostic/selected-package-path.txt)"
 
       - name: Preflight actual native CPU fixtures
         id: fixtures
         run: python scripts/check_ci_fixtures.py --project-root "$GITHUB_WORKSPACE" --layer native 2>&1 | tee asan-diagnostic/fixture-preflight.log
 
-      - name: Build real server and same seventeen native targets (one build each)
+      - name: Build real server and original seventeen native targets (one build each)
         id: build
         continue-on-error: true
         run: |
@@ -279,7 +156,7 @@ jobs:
           done
           exit "$failed"
 
-      - name: Capture native ELF and unchanged xmake configuration
+      - name: Capture server/native ELF and xmake configuration
         if: always()
         run: |
           python3 - <<'PY'
@@ -288,63 +165,158 @@ jobs:
           root = Path(os.environ['GITHUB_WORKSPACE'])
           diag = root / 'asan-diagnostic'
           binary_dir = root / 'build/linux/x86_64/release'
-          targets = ['server'] + ["test_vision_helper","test_cvt","test_common","test_trace_id","test_yolo_postprocess","test_ocr_decode","test_infer_inputs","test_config_load","test_tracker","test_pipeline","test_yolo_tasks","test_ocr_batch","test_ocr_morphology","test_ocr_morphology_dataset","test_subtitle_timeline","test_image_codec","test_image_budget_service"]
           with (diag / 'elf-inspection.log').open('w') as log:
-              for target in targets:
+              for target in ['server'] + ["test_vision_helper","test_cvt","test_common","test_trace_id","test_yolo_postprocess","test_ocr_decode","test_infer_inputs","test_config_load","test_tracker","test_pipeline","test_yolo_tasks","test_ocr_batch","test_ocr_morphology","test_ocr_morphology_dataset","test_subtitle_timeline","test_image_codec","test_image_budget_service"]:
                   binary = binary_dir / ('vision_simple-server' if target == 'server' else target)
                   if not binary.exists():
                       log.write('MISSING_ELF=' + str(binary) + '\n')
                       continue
-                  shutil.copy2(binary, diag / 'native-elf' / target)
+                  shutil.copy2(binary, diag / 'native-elf' / binary.name)
                   log.write('ELF_SHA256=' + hashlib.sha256(binary.read_bytes()).hexdigest() + ' ' + str(binary) + '\n')
                   log.flush()
                   for command in [['file', str(binary)], ['readelf', '-h', '-l', '-d', '-n', str(binary)], ['ldd', str(binary)]]:
                       subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
-                  if target == 'test_image_codec':
-                      subprocess.run(['nm', '-a', str(binary)], stdout=log, stderr=subprocess.STDOUT, check=False)
-              package_root_file = diag / 'package-path.txt'
-              if package_root_file.exists():
-                  package_root = Path(package_root_file.read_text().strip())
-                  for binary in package_root.glob('t/turbobase64/**/*.a'):
-                      log.write('TURBOBASE64_ARCHIVE_SHA256=' + hashlib.sha256(binary.read_bytes()).hexdigest() + ' ' + str(binary) + '\n')
-                      log.flush()
-                      with (diag / ('turbobase64-' + hashlib.sha256(str(binary).encode()).hexdigest()[:12] + '-disassembly.log')).open('w') as disassembly:
-                          subprocess.run(['objdump', '-d', str(binary)], stdout=disassembly, stderr=subprocess.STDOUT, check=False)
-                      shutil.copy2(binary, diag / ('turbobase64-' + hashlib.sha256(str(binary).encode()).hexdigest()[:12] + '.a'))
           for conf in (root / '.xmake').rglob('xmake.conf'):
               destination = diag / 'xmake-configuration' / conf.relative_to(root)
               destination.parent.mkdir(parents=True, exist_ok=True)
               shutil.copy2(conf, destination)
           PY
 
-      - name: Run all seventeen native targets once under GDB with original ASLR
+      - name: Audit selected fixed package scalar ISA and sanitizer imports
+        id: audit
+        if: success() && steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python3 - <<'PY' 2>&1 | tee asan-diagnostic/package-audit.log
+          import hashlib, json, os, re, shutil, subprocess
+          from pathlib import Path
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          diag = root / 'asan-diagnostic'
+          selected = Path((diag / 'selected-package-path.txt').read_text().strip())
+          print('SELECTED_TURBOBASE64_INSTALL=' + str(selected), flush=True)
+          assert '2022.02.21-vs.1' in selected.parts, 'codec must select fixed recipe version, never old cached 2022.02.21'
+          archives = sorted(selected.rglob('*.a'))
+          assert len(archives) == 1, 'expected one selected static TurboBase64 archive: ' + repr(archives)
+          archive = archives[0]
+          sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+          print('SELECTED_TURBOBASE64_ARCHIVE_SHA256=' + sha + ' ' + str(archive), flush=True)
+          assert sha != 'feab3dc438424222123820cccdaa5144fe5e1e35e4e5f891ad623285627d4552', 'confirmed failing cached archive reused'
+          old = json.loads((diag / 'restored-old-packages.json').read_text())
+          for item in old:
+              print('RESTORED_OLD_ARCHIVE=' + json.dumps(item), flush=True)
+              assert str(selected) != item['install_dir'], 'old cached installation reused'
+          shutil.copy2(archive, diag / 'fixed-turbobase64.a')
+          for filename in ['manifest.txt', 'logs/install.txt']:
+              candidate = selected / filename
+              if candidate.exists():
+                  shutil.copy2(candidate, diag / ('selected-' + filename.replace('/', '-')))
+          def run(command, output):
+              p = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+              (diag / output).write_text(p.stdout)
+              return p.stdout
+          members = run(['ar', 't', str(archive)], 'fixed-archive-members.txt').splitlines()
+          scalar_members = [member for member in members if re.search(r'turbob64[cd]\.c\.(?:o|obj)$', member)]
+          assert len(scalar_members) == 2, 'expected exactly two scalar archive objects: ' + repr(scalar_members)
+          audit = []
+          for member in scalar_members:
+              obj = diag / member
+              obj.write_bytes(subprocess.run(['ar', 'p', str(archive), member], stdout=subprocess.PIPE, check=True).stdout)
+              disassembly = run(['objdump', '-d', '-w', str(obj)], member + '-disassembly.txt')
+              symbols = run(['nm', '-u', str(obj)], member + '-imports.txt')
+              assert '__asan_' in symbols, 'ASan instrumentation absent in scalar object: ' + member
+              instructions = []
+              forbidden = []
+              for line in disassembly.splitlines():
+                  match = re.match(r'^\s*[0-9a-f]+:\s+((?:[0-9a-f]{2}\s+)+)\s*(.*)$', line, re.I)
+                  if match:
+                      raw = match.group(1).split()
+                      text = match.group(2)
+                      instructions.append(line)
+                      # Scalar -march=x86-64 permits neither AVX/AVX2 VEX nor AVX512 EVEX encodings.
+                      opcode = next((byte.lower() for byte in raw if byte.lower() not in ['26', '2e', '36', '3e', '64', '65', '66', '67', 'f0', 'f2', 'f3'] and not 0x40 <= int(byte, 16) <= 0x4f), '')
+                      if opcode in ['c4', 'c5', '62'] or re.search(r'\b[yz]mm[0-9]+\b|%k[0-7]\b', text):
+                          forbidden.append(line)
+              row = {'member': member, 'object_sha256': hashlib.sha256(obj.read_bytes()).hexdigest(), 'instructions_decoded': len(instructions), 'asan_imports': True, 'forbidden_baseline_isa': forbidden}
+              audit.append(row)
+              print('SCALAR_ISA_AUDIT=' + json.dumps(row), flush=True)
+              assert instructions and not forbidden, 'forbidden AVX/AVX2/AVX512 in scalar object: ' + member
+          flags = (diag / 'configure.log').read_text(errors='replace')
+          scalar_commands = [line for line in flags.splitlines() if re.search(r'turbob64[cd]\.c(?:\s|$)', line) and '-march=x86-64' in line]
+          print('FIXED_SCALAR_COMPILE_COMMANDS=' + json.dumps(scalar_commands), flush=True)
+          assert any('turbob64c.c' in line for line in scalar_commands) and any('turbob64d.c' in line for line in scalar_commands), 'actual fixed scalar compile commands missing from configure -vD log'
+          codec = root / 'build/linux/x86_64/release/test_image_codec'
+          dynamic = run(['readelf', '-d', str(codec)], 'codec-dynamic.txt')
+          assert 'libasan.so' in dynamic and 'libubsan.so' in dynamic, 'codec sanitizer runtime dependencies absent'
+          cpuinfo = Path('/proc/cpuinfo').read_text()
+          flags_lines = [line.split(':', 1)[1].split() for line in cpuinfo.splitlines() if line.startswith('flags')]
+          avx2_only = bool(flags_lines) and all('avx2' in values and not any(flag.startswith('avx512') for flag in values) for values in flags_lines)
+          model = next((line.split(':', 1)[1].strip() for line in cpuinfo.splitlines() if line.startswith('model name')), 'unknown')
+          coverage = 'AVX2-only runtime host: natural native results exercise this CPU without AVX512.' if avx2_only else 'LIMITATION: runner is not proven AVX2-only; scalar static audit is available, AVX2-only runtime coverage requires separate full CI evidence.'
+          print('CPU_MODEL=' + model, flush=True)
+          print('CPU_COVERAGE=' + coverage, flush=True)
+          (diag / 'package-audit.json').write_text(json.dumps({'selected_install': str(selected), 'selected_archive_sha256': sha, 'restored_old': old, 'scalar_objects': audit, 'scalar_compile_commands': scalar_commands, 'cpu_model': model, 'avx2_only_host': avx2_only, 'cpu_coverage': coverage}, indent=2) + '\n')
+          PY
+
+      - name: Run original seventeen native targets once naturally through xmake
         id: native
         if: success() && steps.build.outcome == 'success'
         continue-on-error: true
-        run: python3 asan-diagnostic/run-native.py 2>&1 | tee asan-diagnostic/native-controller.log
+        run: |
+          failed=0
+          : > asan-diagnostic/native-status.tsv
+          for target in test_vision_helper test_cvt test_common test_trace_id test_yolo_postprocess test_ocr_decode test_config_load test_tracker test_subtitle_timeline test_image_codec test_infer_inputs test_pipeline test_yolo_tasks test_ocr_batch test_ocr_morphology test_ocr_morphology_dataset test_image_budget_service; do
+            args=()
+            case "$target" in
+              test_infer_inputs|test_pipeline|test_yolo_tasks|test_ocr_batch|test_ocr_morphology|test_ocr_morphology_dataset|test_image_budget_service)
+                args=(--project-root "$GITHUB_WORKSPACE") ;;
+            esac
+            printf 'NATIVE_COMMAND:'
+            printf ' %q' xmake run "$target" "${args[@]}"
+            printf '\n'
+            if xmake run "$target" "${args[@]}" > "asan-diagnostic/$target.stdout" 2> "asan-diagnostic/$target.stderr"; then
+              status=0
+            else
+              status=$?
+              failed=1
+            fi
+            printf '%s\t%s\n' "$target" "$status" >> asan-diagnostic/native-status.tsv
+            printf 'NATIVE_STATUS: %s %s\n' "$target" "$status"
+            cat "asan-diagnostic/$target.stdout"
+            cat "asan-diagnostic/$target.stderr" >&2
+           done
+          exit "$failed"
 
-      - name: Upload diagnostic logs, commands, native ELF and configuration
+      - name: Upload native results, fixed archive/scalar objects, ELF and configuration
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: asan-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          name: asan-fixed-scalar-${{ github.run_id }}-${{ github.run_attempt }}
           path: asan-diagnostic/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
-      - name: Enforce diagnostic failures (never green when an inferior failed)
+      - name: Require real native success, fixed package audit and complete builds
         if: always()
         env:
+          CONFIGURE_OUTCOME: ${{ steps.configure.outcome }}
+          FIXTURES_OUTCOME: ${{ steps.fixtures.outcome }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
+          AUDIT_OUTCOME: ${{ steps.audit.outcome }}
           NATIVE_OUTCOME: ${{ steps.native.outcome }}
         run: |
+          test "$CONFIGURE_OUTCOME" = success
+          test "$FIXTURES_OUTCOME" = success
           test "$BUILD_OUTCOME" = success
+          test "$AUDIT_OUTCOME" = success
           test "$NATIVE_OUTCOME" = success
           python3 - <<'PY'
           import json
           from pathlib import Path
-          summary = json.loads(Path('asan-diagnostic/summary.json').read_text())
-          assert len(summary['targets']) == 17 and all(row['passed'] for row in summary['targets']), summary
-          print(summary['interpretation'])
+          expected = ["test_vision_helper","test_cvt","test_common","test_trace_id","test_yolo_postprocess","test_ocr_decode","test_config_load","test_tracker","test_subtitle_timeline","test_image_codec","test_infer_inputs","test_pipeline","test_yolo_tasks","test_ocr_batch","test_ocr_morphology","test_ocr_morphology_dataset","test_image_budget_service"]
+          rows = [line.split('\t') for line in Path('asan-diagnostic/native-status.tsv').read_text().splitlines()]
+          assert [row[0] for row in rows] == expected and all(row[1] == '0' for row in rows), rows
+          audit = json.loads(Path('asan-diagnostic/package-audit.json').read_text())
+          print('17/17 original native targets exited naturally with status0; fixed package scalar audit passed.')
+          print(audit['cpu_coverage'])
           PY
