@@ -247,7 +247,9 @@ jobs:
             uname -a
             cat /proc/cpuinfo
             lscpu
-            sysctl vm.mmap_rnd_bits vm.mmap_rnd_compat_bits kernel.randomize_va_space kernel.core_pattern
+            if ! sudo sysctl vm.mmap_rnd_bits vm.mmap_rnd_compat_bits kernel.randomize_va_space kernel.core_pattern; then
+              printf 'DIAGNOSTIC_METADATA_UNAVAILABLE: read-only sysctl failed; retain error and continue native evidence capture\n' >&2
+            fi
             ulimit -a
             gcc-14 --version
             g++-14 --version
