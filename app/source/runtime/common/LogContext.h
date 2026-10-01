@@ -18,7 +18,7 @@ class LogContext {
     static thread_local std::mt19937 gen{std::random_device{}()};
     static thread_local std::uniform_int_distribution<uint32_t> dist4{0, 0xFFFFU};
     static thread_local std::uniform_int_distribution<uint32_t> dist8{0, 0xFFFFFFFFU};
-    char buf[37]{};
+    char buf[36];
     char* p = buf;
     auto hex8 = [&](uint32_t v) {
       for (int i = 7; i >= 0; --i) *p++ = "0123456789abcdef"[(v >> (i * 4)) & 0xF];
@@ -30,14 +30,13 @@ class LogContext {
     *p++ = '-';
     hex4(dist4(gen));
     *p++ = '-';
-    *p++ = '4';
-    hex4(dist4(gen) & 0x0FFFU | 0x4000U);
+    hex4((dist4(gen) & 0x0FFFU) | 0x4000U);
     *p++ = '-';
-    *p++ = '8' | static_cast<char>(dist4(gen) & 0x03U);
-    hex4(dist4(gen) & 0x3FFFU | 0x8000U);
+    hex4((dist4(gen) & 0x3FFFU) | 0x8000U);
     *p++ = '-';
     hex8(dist8(gen));
-    return std::string{buf, 36};
+    hex4(dist4(gen));
+    return std::string{buf, sizeof(buf)};
   }
 
   static void SetTraceId(std::string_view id) noexcept {

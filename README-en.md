@@ -765,13 +765,15 @@ Run these commands from the repository root. If you just launched the server as 
 
 **CI coverage layers:** execution gates and cross-build artifact checks are distinct. These definitions do not claim that a particular hosted run passed.
 
-- Five native `build_tests` rows (Linux GCC Release, Clang/libc++ Release, GCC ASan+UBSan, Windows MSVC CPU and Windows MSVC DirectML) explicitly build and run **14 C++ executables**. Deterministic regressions cover common/conversion/vision helpers, YOLO postprocessing, OCR decoding, configuration, tracking, subtitle timelines and image codecs. A separate CPU fixture-backed step runs inference inputs, pipelines, YOLO tasks, OCR batches and shared-service image budgets using real ONNX sessions, including deliberate failure/invalid models.
-- Only the two CPU `run_http` rows (Linux GCC Release and Windows MSVC CPU Release) also run `test_subtitle_service`, making **15 C++ executables per CPU row**, plus **nine real-server HTTP drivers**: generic HTTP/startup, management security, bounded dispatch, subtitle media, protocol, model registry, tracking with a real detector and image, YOLO tasks and image budgets. Both rows also run a separate documentation-example driver for full OpenAPI/schema/image validation, exact YOLO/OCR requests, and MCP initialization/tool discovery, making **10 script drivers in total**; that test step uses Python 3.12 and test-only dependencies, adding no server runtime dependency. Subtitle media requires FFmpeg and a usable font; Windows MP4 decoding uses Media Foundation. Missing prerequisites fail, not skip.
+- Five native `build_tests` rows (Linux GCC Release, Clang/libc++ Release, GCC ASan+UBSan, Windows MSVC CPU and Windows MSVC DirectML) explicitly build and run **17 C++ executables**. Deterministic regressions cover common/conversion/vision helpers, trace-ID format, YOLO postprocessing, OCR decoding, configuration, tracking, subtitle timelines and image codecs. A separate CPU fixture-backed step runs inference inputs, pipelines, YOLO tasks, OCR batches, OCR morphology and its synthetic geometry study, and shared-service image budgets using real ONNX sessions, including deliberate failure/invalid models.
+- Only the two CPU `run_http` rows (Linux GCC Release and Windows MSVC CPU Release) also run `test_subtitle_service`, making **18 C++ executables per CPU row**, plus **nine real-server HTTP drivers**: generic HTTP/startup, management security, bounded dispatch, subtitle media, protocol, model registry, tracking with a real detector and image, YOLO tasks and image budgets. Both rows also run a separate documentation-example driver for full OpenAPI/schema/image validation, exact YOLO/OCR requests, and MCP initialization/tool discovery, making **10 script drivers in total**; that test step uses Python 3.12 and test-only dependencies, adding no server runtime dependency. Subtitle media requires FFmpeg and a usable font; Windows MP4 decoding uses Media Foundation. Missing prerequisites fail, not skip.
 - Documentation validation also includes separate static boundary unit tests for invalid schemas and rejected examples. These are not HTTP/real-server integration drivers and do not increase the HTTP driver count.
 - ARM64 CPU/RKNPU, ARMv7 and RISC-V64 cross rows retain artifact architecture checks; they do not execute those binaries. The DirectML row does not establish GPU/DirectML inference coverage; these CPU tests do not verify real CUDA, TensorRT or RKNPU hardware inference either.
 - Existing release-policy gates remain separate: **2 artifact tests + 11 Docker release tests**. The Docker workflow remains independent; its native CPU container smoke is not proof for every Dockerfile or hardware execution provider.
 
 Image-codec regressions exercise actual PFM preflight for finite nonzero scales (including representable subnormals), signed zero, nonfinite values and malformed numeric syntax; parsing does not depend on floating-point `std::from_chars` support in libc++. Real YOLO metadata regressions cover successful creation and invalid-model rejection; the ASan+UBSan row also checks borrowed ONNX Runtime allocator lifetimes on these paths.
+
+The public `LogContext::GenerateTraceId()` helper returns UUIDv4 format: 36 ASCII characters, lowercase hexadecimal in `8-4-4-4-12` groups, version `4`, variant `8/9/a/b`, and no NUL. Production code currently does not call it, and it does not automatically integrate with logging. It uses a noncryptographic PRNG and is not suitable for security tokens; `test_trace_id` checks scalar, batch and concurrent call formats, not uniqueness proven by finite samples.
 
 Before model-backed runs, fetch Git LFS resources and run the fixture preflight below. Every required fixture must be a regular, nonempty file containing actual bytes, not an LFS pointer. This includes intentionally invalid ONNX metadata and runtime-failure fixtures: negative tests still require their inputs. Missing resources fail rather than become successful omissions.
 
@@ -801,6 +803,7 @@ This used a temporary cache-dependency/current-source recipe, GCC 16.2.0, Xmake 
 # Build CPU regression targets individually
 xmake build server
 xmake build test_common
+xmake build test_trace_id
 xmake build test_cvt
 xmake build test_vision_helper
 xmake build test_yolo_postprocess
@@ -817,6 +820,7 @@ xmake build test_image_budget_service
 xmake build test_subtitle_service
 
 xmake run test_common
+xmake run test_trace_id
 xmake run test_cvt
 xmake run test_vision_helper
 xmake run test_yolo_postprocess

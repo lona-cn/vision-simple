@@ -771,13 +771,15 @@ xmake build server
 
 **CI 覆盖分层**：实际执行门控与交叉编译产物检查彼此独立；下列描述是覆盖范围，不代表某次托管运行已经通过。
 
-- 五个原生 `build_tests` 行（Linux GCC Release、Clang/libc++ Release、GCC ASan+UBSan、Windows MSVC CPU 和 Windows MSVC DirectML）显式构建并运行 **14 个 C++ 可执行文件**。确定性回归覆盖 common/conversion/vision helper、YOLO 后处理、OCR 解码、配置、跟踪、字幕时间线与图像 codec；独立的 CPU fixture-backed 步骤使用真实 ONNX session 运行推理输入、pipeline、YOLO 多任务、OCR batch 与共享服务图像预算，包含刻意构造的故障/无效模型。
-- 仅两个 CPU `run_http` 行（Linux GCC Release 与 Windows MSVC CPU Release）额外运行 `test_subtitle_service`，即**每个 CPU 行 15 个 C++ 可执行文件**，并运行 **9 个真实服务 HTTP driver**：通用 HTTP/启动、管理安全、有界调度、字幕媒体、协议、模型注册、真实检测器和图像驱动的跟踪、YOLO 多任务与图像预算。两行还运行独立的文档示例 driver，校验完整 OpenAPI/schema/图片、原样 YOLO/OCR 请求与 MCP 初始化/工具发现，合计 **10 个脚本 driver**；该测试步骤使用 Python 3.12 和仅测试用依赖，不新增服务运行依赖。字幕媒体需要 FFmpeg 和可用字体；Windows MP4 解码使用 Media Foundation。缺少前置条件即失败，不跳过。
+- 五个原生 `build_tests` 行（Linux GCC Release、Clang/libc++ Release、GCC ASan+UBSan、Windows MSVC CPU 和 Windows MSVC DirectML）显式构建并运行 **17 个 C++ 可执行文件**。确定性回归覆盖 common/conversion/vision helper、trace ID 格式、YOLO 后处理、OCR 解码、配置、跟踪、字幕时间线与图像 codec；独立的 CPU fixture-backed 步骤使用真实 ONNX session 运行推理输入、pipeline、YOLO 多任务、OCR batch、OCR 形态学及其合成几何研究与共享服务图像预算，包含刻意构造的故障/无效模型。
+- 仅两个 CPU `run_http` 行（Linux GCC Release 与 Windows MSVC CPU Release）额外运行 `test_subtitle_service`，即**每个 CPU 行 18 个 C++ 可执行文件**，并运行 **9 个真实服务 HTTP driver**：通用 HTTP/启动、管理安全、有界调度、字幕媒体、协议、模型注册、真实检测器和图像驱动的跟踪、YOLO 多任务与图像预算。两行还运行独立的文档示例 driver，校验完整 OpenAPI/schema/图片、原样 YOLO/OCR 请求与 MCP 初始化/工具发现，合计 **10 个脚本 driver**；该测试步骤使用 Python 3.12 和仅测试用依赖，不新增服务运行依赖。字幕媒体需要 FFmpeg 和可用字体；Windows MP4 解码使用 Media Foundation。缺少前置条件即失败，不跳过。
 - 文档校验还包含独立的静态边界单元测试，用于检查无效 schema 与示例拒绝路径；它不属于上述 HTTP/真实服务集成 driver，不增加 HTTP driver 数量。
 - ARM64 CPU/RKNPU、ARMv7 与 RISC-V64 交叉编译行保留产物架构检查，不执行目标二进制。DirectML 行不证明 GPU/DirectML 推理覆盖；这些 CPU 测试也不证明 CUDA、TensorRT 或 RKNPU 真实硬件推理。
 - 既有发布策略门控独立保留：**2 个产物测试 + 11 个 Docker 发布测试**。Docker 工作流保持独立；其原生 CPU 容器 smoke 不代表全部 Dockerfile 或硬件执行提供程序已经验证。
 
 图像 codec 回归通过实际 PFM 预检覆盖有限非零 scale（包括可表示的 subnormal）、有符号零、非有限值及非法数字格式；解析不依赖 libc++ 的浮点 `std::from_chars`。真实 YOLO 元数据回归覆盖成功创建与拒绝无效模型；ASan+UBSan 行同时检查这些路径上的 ONNX Runtime 分配器借用生命周期。
+
+公开的 `LogContext::GenerateTraceId()` helper 返回 UUIDv4 格式：36 个 ASCII 字符、小写十六进制、`8-4-4-4-12` 分组、version 为 `4`、variant 为 `8/9/a/b`，不含 NUL。当前生产代码未调用它，也不会自动接入日志。它使用非加密 PRNG，不适用于安全令牌；`test_trace_id` 检查单次、批量与并发调用的格式，不以有限样本证明唯一性。
 
 运行模型回归前，先拉取 Git LFS 资源，再执行下方 fixture 预检。每个必需 fixture 都必须是包含实际字节的普通非空文件，不能是 LFS pointer。刻意无效的 ONNX 元数据及运行时故障 fixture 也必须存在，负向测试不能省略输入。缺失资源导致失败，不算成功跳过。
 
@@ -807,6 +809,7 @@ python scripts/check_ci_fixtures.py --project-root . --layer http
 # 构建 CPU 回归目标（逐个构建）
 xmake build server
 xmake build test_common
+xmake build test_trace_id
 xmake build test_cvt
 xmake build test_vision_helper
 xmake build test_yolo_postprocess
@@ -823,6 +826,7 @@ xmake build test_image_budget_service
 xmake build test_subtitle_service
 
 xmake run test_common
+xmake run test_trace_id
 xmake run test_cvt
 xmake run test_vision_helper
 xmake run test_yolo_postprocess
