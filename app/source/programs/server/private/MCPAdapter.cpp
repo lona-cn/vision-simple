@@ -20,6 +20,7 @@
 #include "InferenceProtocol.h"
 #include "InferenceRequestOptions.h"
 #include "HTTPAuthority.h"
+#include "HTTPExpectation.h"
 
 namespace vision_simple {
 namespace {
@@ -244,9 +245,9 @@ struct MCPAdapter::State : std::enable_shared_from_this<MCPAdapter::State> {
                        std::string_view message) {
     ctx->response->status_code = static_cast<http_status>(status);
     ctx->response->body = message;
-    // A normal header rejection must consume/discard the request body before
-    // libhv sends the response. Closing here resets split header/body uploads.
-    if (status == 413 || Lower(ctx->header("Expect")) == "100-continue") {
+    // Body-limit and nonempty Expect rejections must finish without waiting for
+    // the body. Other rejections keep libhv's consume/discard flow for split uploads.
+    if (status == 413 || !ctx->header("Expect").empty()) {
       ctx->response->SetHeader("Connection", "close");
       ctx->writer->End();
     }
@@ -720,7 +721,12 @@ struct MCPAdapter::State : std::enable_shared_from_this<MCPAdapter::State> {
           return HttpError(ctx, 404,
                            "Unknown MCP session; connect to /mcp/sse first");
       }
-      if (Lower(ctx->header("Expect")) == "100-continue")
+      const auto& expectation = ctx->header("Expect");
+      const auto parsed_expectation = ParseHTTPExpectation(expectation);
+      if (!expectation.empty() &&
+          parsed_expectation != HTTPExpectation::kContinue)
+        return HttpError(ctx, 417, "Unsupported expectation");
+      if (parsed_expectation == HTTPExpectation::kContinue)
         ctx->writer->write("HTTP/1.1 100 Continue\r\n\r\n");
     } else if (phase == HP_BODY) {
       if (size > kBodyLimit - ctx->request->body.size())

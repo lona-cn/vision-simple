@@ -57,6 +57,133 @@ def oversized_headers(server, route):
 
 
 
+def expect_post(server, route, expectations, body, *, expected=202, headers=None,
+                headers_only=False, abort=False):
+    """Use a single 2s deadline for the TCP handshake, final response and EOF."""
+    fields = {'Host': f'127.0.0.1:{server.port}', 'Content-Type': 'application/json',
+              'Content-Length': str(len(body)), 'Connection': 'keep-alive', **(headers or {})}
+    request = f'POST {route} HTTP/1.1\r\n'
+    request += ''.join(f'{key}: {value}\r\n' for key, value in fields.items())
+    request += ''.join(f'Expect: {value}\r\n' for value in expectations) + '\r\n'
+    deadline = time.monotonic() + 2
+    buffered = bytearray()
+    with socket.create_connection(('127.0.0.1', server.port), timeout=2) as sock:
+        def receive():
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, 'Expect exchange exceeded the 2s deadline')
+            sock.settimeout(remaining)
+            try:
+                chunk = sock.recv(4096)
+            except TimeoutError as error:
+                raise AssertionError('Expect exchange exceeded the 2s deadline') from error
+            require(len(buffered) + len(chunk) <= 65536, 'Unbounded Expect response')
+            buffered.extend(chunk)
+            return chunk
+
+        def response():
+            while b'\r\n\r\n' not in buffered:
+                require(receive(), 'Expect connection closed before response headers')
+            raw, rest = bytes(buffered).split(b'\r\n\r\n', 1)
+            buffered[:] = rest
+            lines = raw.decode('iso-8859-1').split('\r\n')
+            status = int(lines[0].split()[1])
+            response_headers = dict(line.lower().split(':', 1) for line in lines[1:])
+            if status == 100:
+                return status, response_headers
+            require('content-length' in response_headers, 'Expect final response must be length-framed')
+            size = int(response_headers['content-length'].strip())
+            require(0 <= size <= 65536, 'Unbounded Expect response body')
+            while len(buffered) < size:
+                require(receive(), 'Expect connection closed before response body')
+            del buffered[:size]
+            return status, response_headers
+
+        def send(data):
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, 'Expect exchange exceeded the 2s deadline')
+            sock.settimeout(remaining)
+            sock.sendall(data)
+
+        send(request.encode('ascii'))
+        if not headers_only:
+            send(body)
+        status, response_headers = response()
+        if expected == 100:
+            require(status == 100, f'Expect handshake returned {status}, expected 100')
+            if abort:
+                require(time.monotonic() < deadline, 'Expect exchange exceeded the 2s deadline')
+                return
+            send(body)
+            status, response_headers = response()
+            require(status == 202, f'Continued MCP POST returned {status}, expected 202')
+        else:
+            require(status == expected, f'Expect POST returned {status}, expected {expected}; no interim allowed')
+        if status != 202:
+            require(response_headers.get('connection', '').strip() == 'close',
+                    'Early Expect rejection did not declare connection close')
+            while receive():
+                pass
+        require(not buffered, 'Expect exchange returned extra response bytes')
+        require(time.monotonic() < deadline, 'Expect exchange exceeded the 2s deadline')
+
+
+def mcp_expect_matrix(server, session):
+    def check(case, route, values, body, **options):
+        try:
+            expect_post(server, route, values, body, **options)
+        except (AssertionError, RuntimeError, OSError) as error:
+            raise AssertionError(f'Expect case {case}: {error}') from error
+
+    def recover(case):
+        require(session.call('ping').get('result') == {},
+                f'Expect case {case}: initialized SSE recovery failed')
+        require(not session.pending, f'Expect case {case}: extra SSE RPC result')
+
+    # The length-2 unknown request must be rejected without sending any body.
+    rejected = (('unknown-headers-only', ('nonsense',)),
+                ('mixed-comma', ('100-continue, nonsense',)),
+                ('repeated-comma', ('100-continue, 100-continue',)))
+    for case, values in rejected:
+        check(case, session.endpoint, values, b'{}', expected=417, headers_only=True)
+        recover(case)
+    check('unknown-with-body', session.endpoint, ('nonsense',), b'{}', expected=417)
+    recover('unknown-with-body')
+
+    # Whitespace-only wire input follows absent/empty flow with this libhv transport.
+    accepted = (('absent', (), False), ('empty', ('',), False),
+                ('whitespace-only', (' \t ',), False),
+                ('continue', ('100-continue',), True),
+                ('normalized-continue', (' \t100-CoNtInUe\t ',), True))
+    for case, values, handshake in accepted:
+        session.counter += 1
+        request_id = f'expect-{session.counter}'
+        body = json.dumps({'jsonrpc': '2.0', 'method': 'ping', 'id': request_id}).encode()
+        check(case, session.endpoint, values, body,
+              expected=100 if handshake else 202, headers_only=handshake)
+        require(session.receive(request_id).get('result') == {}, f'Expect case {case}: missing SSE RPC result')
+
+    for case, value in (('abort-continue', '100-continue'),
+                        ('abort-normalized', ' \t100-CoNtInUe\t ')):
+        check(case, session.endpoint, (value,), b'{}', expected=100, headers_only=True, abort=True)
+        recover(case)
+
+    # Existing header admission retains precedence over Expect parsing.
+    for mode, value in (('unknown', 'nonsense'), ('continue', '100-continue')):
+        for guard, headers, expected in (('host', {'Host': 'evil.invalid'}, 403),
+                                         ('origin', {'Origin': 'http://evil.invalid'}, 403),
+                                         ('media', {'Content-Type': 'text/plain'}, 415),
+                                         ('charset', {'Content-Type': 'application/json; charset=latin1'}, 415),
+                                         ('length', {'Content-Length': str(64 * 1024 * 1024 + 1)}, 413)):
+            case = f'{mode}-{guard}-priority'
+            check(case, session.endpoint, (value,), b'{}', expected=expected,
+                  headers=headers, headers_only=True)
+            recover(case)
+        case = f'{mode}-session-priority'
+        check(case, '/mcp/messages?session_id=invalid', (value,), b'{}', expected=404, headers_only=True)
+        recover(case)
+    print('PASS initialized MCP TCP Expect matrix, 2s headers-only rejection/EOF and SSE recovery')
+
+
 class Session:
     def __init__(self, server):
         self.server = server
@@ -307,6 +434,7 @@ def mcp_matrix(server, images, baselines):
         premature = session.call('tools/list')
         require('error' in premature, f'Uninitialized tools request accepted: {premature}')
         session.initialize()
+        mcp_expect_matrix(server, session)
         tools = session.call('tools/list')['result']['tools']
         require({'list_models', 'infer_yolo', 'infer_ocr'} <= {tool['name'] for tool in tools},
                 f'Legacy tool capabilities disappeared: {tools}')

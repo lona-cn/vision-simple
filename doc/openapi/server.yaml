@@ -804,6 +804,12 @@ paths:
         执行失败（包括 unknown_model）isError:true，error 包含 code/message/image_index；协议错误使用 JSON-RPC error。
         notification 不产生应答。取消 ID 仅作用于本会话，原生阶段合作式退出。
         待发送消息/写缓冲上限8MiB，超限或持续积压约30秒时关闭会话。
+        headers阶段先检查Host/Origin403、media/charset415、声明长度413、停止503、会话404，再检查Expect；前置错误优先级不变。
+        使用共享Expect解析：仅单个100-continue（大小写不敏感、两端SP/HTAB可省略）在检查通过后发送100 Continue。
+        HTTP parser交付的其他非空Expect值（含逗号列表/重复token）立即417，不发送100 Continue、不等待正文。
+        当前libhv HTTP/1 parser丢弃前导SP/HTAB；线上仅空格/tab的Expect变为空值，与缺失/空值一样不发送100 Continue、沿用普通正文接收流程。
+        parser交付非空Expect时的HTTP错误及所有413带Connection: close并结束POST连接；其他拒绝保留正文consume/discard流程.
+        HTTP错误正文为字符串而非原生JSON或JSON-RPC；POST关闭不关闭独立SSE会话，会话/队列/正文/图像限额不变。
       security: []
       parameters:
         - name: session_id
@@ -823,6 +829,16 @@ paths:
         '404': {description: 会话不存在或已关闭；需重新建立 SSE}
         '413': {description: 正文超过64MiB}
         '415': {description: 要求 application/json，字符集仅支持 UTF-8}
+        '417':
+          description: 不支持的非空Expect；headers阶段拒绝，不发送100 Continue，关闭POST连接，SSE会话保留。
+          headers:
+            Connection:
+              description: 此拒绝结束当前POST连接。
+              schema: {type: string, enum: [close]}
+          content:
+            text/plain:
+              schema: {type: string, enum: [Unsupported expectation]}
+              example: Unsupported expectation
         '503': {description: 服务正在停止}
   /v1/subtitle/jobs:
     description: >-
