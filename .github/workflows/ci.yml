@@ -47,12 +47,12 @@ jobs:
           cat > asan-diagnostic/selected-package.lua <<'LUA'
           import("core.project.config")
           import("core.project.project")
-          function main()
+          function main(outputfilepath)
               config.load()
               project.load_targets()
               local target = assert(project.target("test_image_codec"), "missing codec target")
               local pkg = assert(target:pkg("turbobase64"), "codec lacks turbobase64 package")
-              io.write(assert(pkg:installdir(), "missing selected package installdir"))
+              io.writefile(assert(outputfilepath, "missing output filepath"), assert(pkg:installdir(), "missing selected package installdir") .. "\n")
           end
           LUA
 
@@ -137,7 +137,7 @@ jobs:
         id: configure
         run: |
           xmake f -vD ${{ matrix.configure }} --policies=${{ matrix.policy }} -y 2>&1 | tee asan-diagnostic/configure.log
-          xmake lua asan-diagnostic/selected-package.lua > asan-diagnostic/selected-package-path.txt
+          xmake lua asan-diagnostic/selected-package.lua "$GITHUB_WORKSPACE/asan-diagnostic/selected-package-path.txt" 2>&1 | tee asan-diagnostic/selected-package-query.log
           printf 'SELECTED_TURBOBASE64_INSTALL=%s\n' "$(cat asan-diagnostic/selected-package-path.txt)"
 
       - name: Preflight actual native CPU fixtures
@@ -194,10 +194,12 @@ jobs:
           diag = root / 'asan-diagnostic'
           selected = Path((diag / 'selected-package-path.txt').read_text().strip())
           print('SELECTED_TURBOBASE64_INSTALL=' + str(selected), flush=True)
-          assert '2022.02.21-vs.1' in selected.parts, 'codec must select fixed recipe version, never old cached 2022.02.21'
           archives = sorted(selected.rglob('*.a'))
+          for index, candidate in enumerate(archives):
+              shutil.copy2(candidate, diag / ('fixed-turbobase64.a' if len(archives) == 1 else 'fixed-turbobase64-' + str(index) + '.a'))
           assert len(archives) == 1, 'expected one selected static TurboBase64 archive: ' + repr(archives)
           archive = archives[0]
+          assert '2022.02.21-vs.1' in selected.parts, 'codec must select fixed recipe version, never old cached 2022.02.21'
           sha = hashlib.sha256(archive.read_bytes()).hexdigest()
           print('SELECTED_TURBOBASE64_ARCHIVE_SHA256=' + sha + ' ' + str(archive), flush=True)
           assert sha != 'feab3dc438424222123820cccdaa5144fe5e1e35e4e5f891ad623285627d4552', 'confirmed failing cached archive reused'
@@ -205,7 +207,6 @@ jobs:
           for item in old:
               print('RESTORED_OLD_ARCHIVE=' + json.dumps(item), flush=True)
               assert str(selected) != item['install_dir'], 'old cached installation reused'
-          shutil.copy2(archive, diag / 'fixed-turbobase64.a')
           for filename in ['manifest.txt', 'logs/install.txt']:
               candidate = selected / filename
               if candidate.exists():
