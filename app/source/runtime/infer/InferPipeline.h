@@ -38,7 +38,24 @@ struct PipelineFailure {
 
 template <typename T>
 using PipelineResult = std::expected<std::vector<T>, PipelineFailure>;
+struct PipelineStageTiming {
+  uint64_t execution_ns = 0, queue_ns = 0, calls = 0, completed_calls = 0;
+};
 
+// Native execution includes gates, binding and output work, not just kernels.
+// Overlapping stage/frame sums do not equal batch wall time.
+struct PipelineTiming {
+  uint64_t wall_ns = 0, capacity_wait_ns = 0, setup_ns = 0;
+  PipelineStageTiming preprocess, inference, postprocess;
+  size_t input_frames = 0, completed_frames = 0;
+  bool complete = false;
+};
+
+template <typename T>
+struct MeasuredPipelineResult {
+  PipelineResult<T> result;
+  PipelineTiming timing;
+};
 // Owns bounded stage queues and workers. Input pixels and models must remain
 // alive and immutable until Run returns. Cancellation/deadlines are
 // cooperative: Run drains executing native stages before releasing their
@@ -60,6 +77,16 @@ class VISION_SIMPLE_API InferPipeline {
                                      float confidence_threshold,
                                      PipelineControl control = {}) noexcept;
   PipelineResult<YOLOTaskFrameResult> Run(
+      InferYOLOTask& model, std::span<const cv::Mat> images,
+      YOLOInferenceOptions options, PipelineControl control = {}) noexcept;
+
+  MeasuredPipelineResult<YOLOFrameResult> RunMeasured(
+      InferYOLO& model, std::span<const cv::Mat> images,
+      YOLOInferenceOptions options, PipelineControl control = {}) noexcept;
+  MeasuredPipelineResult<OCRFrameResult> RunMeasured(
+      InferOCR& model, std::span<const cv::Mat> images,
+      float confidence_threshold, PipelineControl control = {}) noexcept;
+  MeasuredPipelineResult<YOLOTaskFrameResult> RunMeasured(
       InferYOLOTask& model, std::span<const cv::Mat> images,
       YOLOInferenceOptions options, PipelineControl control = {}) noexcept;
 

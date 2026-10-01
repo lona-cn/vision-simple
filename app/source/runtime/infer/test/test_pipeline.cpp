@@ -47,12 +47,34 @@ int Ordered(InferPipeline& pipeline, Model& model) {
   // within that extent to exercise ordering and different recognition widths.
   for (int height : {32, 24, 16, 8, 30, 20, 28, 32})
     images.emplace_back(height, 32, CV_8UC3, cv::Scalar::all(0));
-  auto result = pipeline.Run(model, images, Confidence<Model>(.5f));
-  if (!result) std::cerr << "Pipeline failure: " << result.error().cause.message << '\n';
+  auto measured = pipeline.RunMeasured(model, images, Confidence<Model>(.5f));
+  auto& result = measured.result;
   TEST_ASSERT(result && result->size() == images.size(), "every input has a result");
+  const auto& timing = measured.timing;
+  TEST_ASSERT(timing.complete && timing.input_frames == images.size() &&
+                  timing.completed_frames == images.size(),
+              "concurrent batches own independent complete frame records");
+  TEST_ASSERT(timing.preprocess.calls == timing.preprocess.completed_calls &&
+                  timing.inference.calls == timing.inference.completed_calls &&
+                  timing.postprocess.calls == timing.postprocess.completed_calls,
+              "successful batches count every successful native stage");
+  if constexpr (std::is_same_v<Model, InferOCR>) {
+    TEST_ASSERT(timing.inference.calls > images.size() &&
+                    timing.preprocess.calls == timing.inference.calls &&
+                    timing.postprocess.calls == timing.inference.calls,
+                "OCR counts detection plus all recognition loops");
+  } else {
+    TEST_ASSERT(timing.preprocess.calls == images.size() &&
+                    timing.inference.calls == images.size() &&
+                    timing.postprocess.calls == images.size(),
+                "YOLO advances each lane once per frame");
+  }
+  const auto ordinary = pipeline.Run(model, images, Confidence<Model>(.5f));
+  TEST_ASSERT(ordinary && ordinary->size() == images.size(), "normal run succeeds");
   for (size_t i = 0; i < images.size(); ++i) {
     const auto direct = model.Run(images[i], Confidence<Model>(.5f));
-    TEST_ASSERT(direct && Same(*direct, (*result)[i]),
+    TEST_ASSERT(direct && Same(*direct, (*result)[i]) &&
+                    Same((*ordinary)[i], (*result)[i]),
                 "pipeline preserves input ordering and native output");
   }
   return 0;
@@ -67,12 +89,12 @@ int Interrupted(InferYOLO& model, bool close) {
   const std::array<cv::Mat, 1> probe{black};
   std::stop_source stop;
   std::atomic<bool> done{false};
-  std::optional<PipelineResult<YOLOFrameResult>> result;
+  std::optional<MeasuredPipelineResult<YOLOFrameResult>> result;
   std::jthread caller([&] {
     // A competing probe can win admission; retry that controlled rejection.
     do {
-      result.emplace(pipeline.Run(model, images, YOLOInferenceOptions{.5f}, {stop.get_token()}));
-    } while (!*result && result->error().kind == PipelineFailureKind::kBusy);
+      result.emplace(pipeline.RunMeasured(model, images, YOLOInferenceOptions{.5f}, {stop.get_token()}));
+    } while (!result->result && result->result.error().kind == PipelineFailureKind::kBusy);
     done.store(true, std::memory_order_release);
   });
   bool observed_busy = false;
@@ -88,9 +110,16 @@ int Interrupted(InferYOLO& model, bool close) {
   }
   caller.join();
   TEST_ASSERT(observed_busy, "active batch rejects competing admission immediately");
-  TEST_ASSERT(result && !*result && result->error().kind ==
+  TEST_ASSERT(result && !result->result && result->result.error().kind ==
                   (close ? PipelineFailureKind::kClosed : PipelineFailureKind::kCancelled),
               "admitted backpressured batch drains on cancellation or close");
+  const auto drained = result->timing;
+  TEST_ASSERT(!drained.complete && drained.input_frames == images.size() &&
+                  drained.completed_frames <= drained.postprocess.completed_calls &&
+                  drained.preprocess.calls == drained.preprocess.completed_calls &&
+                  drained.inference.calls == drained.inference.completed_calls &&
+                  drained.postprocess.calls == drained.postprocess.completed_calls,
+              "interrupted records include successfully drained native stages");
   if (!close) {
     const auto recovery = pipeline.Run(model, probe, YOLOInferenceOptions{.5f});
     TEST_ASSERT(recovery && recovery->size() == 1 &&
@@ -216,6 +245,71 @@ int main(int argc, char** argv) {
                     failed.error().image_index == 1 &&
                     failed.error().cause.code == VisionSimpleErrorCode::kRuntimeError,
                 "earlier native error wins over later preprocessing failure");
+    const std::array<cv::Mat, 1> native_failure{white};
+    auto measured_failure = (*pipeline)->RunMeasured(**yolo, native_failure, YOLOInferenceOptions{.5f});
+    TEST_ASSERT(!measured_failure.result &&
+                    measured_failure.result.error().image_index == 0 &&
+                    !measured_failure.timing.complete &&
+                    measured_failure.timing.completed_frames == 0 &&
+                    measured_failure.timing.preprocess.calls == 1 &&
+                    measured_failure.timing.preprocess.completed_calls == 1 &&
+                    measured_failure.timing.inference.calls == 1 &&
+                    measured_failure.timing.inference.completed_calls == 0 &&
+                    measured_failure.timing.postprocess.calls == 0,
+                "failed native inference remains an attempted not completed stage");
+    const std::array<cv::Mat, 1> invalid_frame{cv::Mat{}};
+    auto invalid_profile = (*pipeline)->RunMeasured(**yolo, invalid_frame, YOLOInferenceOptions{.5f});
+    TEST_ASSERT(!invalid_profile.result && !invalid_profile.timing.complete &&
+                    invalid_profile.result.error().image_index == 0 &&
+                    invalid_profile.result.error().cause.code == VisionSimpleErrorCode::kParameterError &&
+                    invalid_profile.timing.input_frames == 1 &&
+                    invalid_profile.timing.completed_frames == 0 &&
+                    invalid_profile.timing.preprocess.calls == 1 &&
+                    invalid_profile.timing.preprocess.completed_calls == 0 &&
+                    invalid_profile.timing.inference.calls == 0 &&
+                    invalid_profile.timing.postprocess.calls == 0,
+                "invalid frame records failed preprocessing without inventing later stages");
+    auto invalid_ocr = (*pipeline)->RunMeasured(**ocr, invalid_frame, .5f);
+    TEST_ASSERT(!invalid_ocr.result && !invalid_ocr.timing.complete &&
+                    invalid_ocr.result.error().image_index == 0 &&
+                    invalid_ocr.result.error().cause.code == VisionSimpleErrorCode::kParameterError &&
+                    invalid_ocr.timing.input_frames == 1 &&
+                    invalid_ocr.timing.completed_frames == 0 &&
+                    invalid_ocr.timing.preprocess.calls == 0 &&
+                    invalid_ocr.timing.inference.calls == 0 &&
+                    invalid_ocr.timing.postprocess.calls == 0,
+                "rejected OCR task setup does not invent native stage attempts");
+    auto empty_profile = (*pipeline)->RunMeasured(**yolo, {}, YOLOInferenceOptions{.5f});
+    TEST_ASSERT(empty_profile.result && empty_profile.result->empty() &&
+                    empty_profile.timing.complete && empty_profile.timing.input_frames == 0 &&
+                    empty_profile.timing.completed_frames == 0 &&
+                    empty_profile.timing.preprocess.calls == 0 &&
+                    empty_profile.timing.inference.calls == 0 &&
+                    empty_profile.timing.postprocess.calls == 0,
+                "empty successful batches do not invent stage work");
+    auto multi_det = ReadAll((assets / "ocr_det_batch.onnx").string());
+    auto multi_rec = ReadAll((assets / "ocr_rec_batch.onnx").string());
+    TEST_ASSERT(multi_det && multi_rec, "load real multi-crop OCR fixtures");
+    auto multi_ocr = InferOCR::Create(**context, {{0, "A"}, {1, "B"}, {2, "C"}, {3, "D"}},
+        multi_det->span(), multi_rec->span(), OCRModelType::kPPOCRv4);
+    TEST_ASSERT(multi_ocr, "create single-crop recognition sessions");
+    cv::Mat multi_image(256, 384, CV_8UC3);
+    for (int row = 0; row < multi_image.rows; ++row)
+      multi_image.row(row).setTo(cv::Scalar::all(32 + 64 * (row / 64)));
+    const std::array<cv::Mat, 1> multi_images{multi_image};
+    auto multi = (*pipeline)->RunMeasured(**multi_ocr, multi_images, .5f);
+    const auto multi_reference = (*multi_ocr)->Run(multi_image, .5f);
+    TEST_ASSERT(multi.result && multi_reference &&
+                    multi_reference->results.size() == 4 &&
+                    Same((*multi.result)[0], *multi_reference) &&
+                    multi.timing.complete && multi.timing.completed_frames == 1 &&
+                    multi.timing.preprocess.calls == 5 &&
+                    multi.timing.preprocess.completed_calls == 5 &&
+                    multi.timing.inference.calls == 5 &&
+                    multi.timing.inference.completed_calls == 5 &&
+                    multi.timing.postprocess.calls == 5 &&
+                    multi.timing.postprocess.completed_calls == 5,
+                "one detection and four recognition loops are all measured");
     const std::vector<cv::Mat> excessive(129, black);
     auto oversized = (*pipeline)->Run(**yolo, excessive, YOLOInferenceOptions{.5f});
     TEST_ASSERT(!oversized && oversized.error().kind == PipelineFailureKind::kInvalidRequest,
@@ -224,23 +318,34 @@ int main(int argc, char** argv) {
     TEST_ASSERT(empty && empty->empty(), "empty input produces empty output");
     std::stop_source stop;
     stop.request_stop();
-    auto stopped = (*pipeline)->Run(**yolo, {}, YOLOInferenceOptions{.5f},
+    auto stopped = (*pipeline)->RunMeasured(**yolo, {}, YOLOInferenceOptions{.5f},
         {stop.get_token(), std::chrono::steady_clock::now()});
-    TEST_ASSERT(!stopped && stopped.error().kind == PipelineFailureKind::kCancelled,
-                "cancellation precedes deadline even for empty input");
-    auto expired = (*pipeline)->Run(**yolo, failing, YOLOInferenceOptions{.5f},
+    TEST_ASSERT(!stopped.result && stopped.result.error().kind == PipelineFailureKind::kCancelled &&
+                    !stopped.timing.complete && stopped.timing.completed_frames == 0 &&
+                    stopped.timing.preprocess.calls == 0 &&
+                    stopped.timing.inference.calls == 0 && stopped.timing.postprocess.calls == 0,
+                "cancellation precedes deadline without reporting work for empty input");
+    auto expired = (*pipeline)->RunMeasured(**yolo, failing, YOLOInferenceOptions{.5f},
         {{}, std::chrono::steady_clock::now()});
-    TEST_ASSERT(!expired && expired.error().kind == PipelineFailureKind::kTimedOut,
-                "deadline precedes native inference errors");
+    TEST_ASSERT(!expired.result && expired.result.error().kind == PipelineFailureKind::kTimedOut &&
+                    !expired.timing.complete && expired.timing.input_frames == failing.size() &&
+                    expired.timing.completed_frames == 0 && expired.timing.preprocess.calls == 0 &&
+                    expired.timing.inference.calls == 0 && expired.timing.postprocess.calls == 0,
+                "expired admission reports inputs but no native execution");
   }
   auto timed_pipeline = InferPipeline::Create({1, 1, 4096});
   TEST_ASSERT(timed_pipeline, "create deadline pipeline");
   const std::vector<cv::Mat> long_batch(
       4096, cv::Mat(32, 32, CV_8UC3, cv::Scalar::all(0)));
-  const auto timed = (*timed_pipeline)->Run(**yolo, long_batch, YOLOInferenceOptions{.5f},
+  const auto timed = (*timed_pipeline)->RunMeasured(**yolo, long_batch, YOLOInferenceOptions{.5f},
       {{}, std::chrono::steady_clock::now() + std::chrono::milliseconds(1)});
-  TEST_ASSERT(!timed && timed.error().kind == PipelineFailureKind::kTimedOut,
-              "deadline wakes capacity waits and drains admitted stages");
+  TEST_ASSERT(!timed.result && timed.result.error().kind == PipelineFailureKind::kTimedOut &&
+                  !timed.timing.complete && timed.timing.input_frames == long_batch.size() &&
+                  timed.timing.completed_frames <= timed.timing.postprocess.completed_calls &&
+                  timed.timing.preprocess.calls == timed.timing.preprocess.completed_calls &&
+                  timed.timing.inference.calls == timed.timing.inference.completed_calls &&
+                  timed.timing.postprocess.calls == timed.timing.postprocess.completed_calls,
+              "deadline drains native attempts into a partial profile before returning");
   const std::span<const cv::Mat> single(long_batch.data(), 1);
   const auto after_timeout = (*timed_pipeline)->Run(**yolo, single, YOLOInferenceOptions{.5f});
   TEST_ASSERT(after_timeout && (*after_timeout)[0].results.size() == 1,

@@ -159,6 +159,35 @@ HTTP 推理 deadline 从完整正文提交调度时开始，包含 queue 等待�
 真实 PP-OCR 回归：`python scripts/test_http_dispatch.py --server <executable> --project-root .`。输出 idle/load 原始 RTT 与 P50/P95/P99，逐次观察四个图像接纳，再检查 transport overload、排队 timeout、control 请求、MCP 共享预算、慢客户端及关闭。不设置 RSS 或机器相关毫秒阈值；健康期限采用实际 Docker 消费者的两秒上限。
 
 
+### 显式模型预检、预热与计时
+
+部署前检查选定模型时，可使用服务可执行文件的本地诊断模式。从与 HTTP 服务相同的工作目录运行，准备好 `config/server.yaml`、`config/models.yaml` 及配置的模型文件；不支持任意配置路径选项。默认目录包含 `yolo:hd2-fp32`、`yolo:hd2-fp16`、`ocr:ppocr-v4`，但“已配置”不代表文件存在或可推理。将下方 `fixture.jpg` 替换为自己的代表性图片。
+
+```sh
+./vision_simple-server --help
+./vision_simple-server --diagnose preflight --model yolo:hd2-fp32 --model ocr:ppocr-v4
+./vision_simple-server --diagnose warmup --model yolo:hd2-fp32 --image fixture.jpg --timeout-ms 60000
+```
+
+Windows 使用 `vision_simple-server.exe`。无参数保持原有 HTTP 启动及按需加载；`--help` 在配置、日志及 listener 初始化之前成功退出。诊断不启动 listener，不要求 HTTP 管理密钥或日志配置。非空的未知/错误参数退出 2，不会意外启动服务。此功能仅为 CLI：HTTP routes、OpenAPI、base 配置与 health 语义不变，健康检查不会自动加载全目录。
+
+- 用 `--model task:name` 显式选择 1–16 个不同条目，task 支持 `yolo`、`ocr`、`seg`、`pose`、`obb`。拒绝重复选择；默认不会加载所有模型。
+- `preflight` 不接受图片，每个加载尝试调用一次空批次 measured service：检查必需文件角色并真实初始化会话，但不执行图片推理。`warmup` 要求重复传入 1–`min(infer_max_batch_images,128)` 个 `--image`，每个选定模型使用同一有序批次。原始夹具总量上限为 48 MiB（50,331,648 字节），base64 总量为 64 MiB（67,108,864 字节）。仍通过既有服务执行像素、解码字节、请求 credit、流水线预算、调度及租约规则，不绕过资源接纳。
+- warmup 先在新服务缓存中执行完整 cold 批次，**不做空批次预加载**，成功后在同一服务执行一次完整 warm 批次。cold 响应持有模型租约直到 warm 调用结束，即使 idle timeout 极小也不会在两次之间卸载。两份响应标记成功并释放后才显式 unload；按选择顺序串行处理，因此缓存上限为 1 仍可使用。cold 失败不会伪造 warm pass；已加载模型在下一选择前卸载，卸载失败不能报告成功。
+- 每次调用独立使用 `--timeout-ms`（1–300000），省略时使用配置的推理 timeout。超时是合作式的，原生调用必须 drain，实际返回可能超过 deadline。preflight 每选择花费一次会话加载；成功 warmup 花费一次加载和两次完整夹具批次，包括 OCR 所有检测/recognition 循环。没有后台保温或持久缓存承诺。重复命令是新进程/新服务缓存；cold 不表示 OS 文件缓存、runtime/device 缓存或物理硬件处于冷态。
+
+JSON 使用 `schema_version: 1`、`validity: "this_invocation_only"`、`http_readiness: "not_assessed"`，模型按选择顺序输出。`configured` 仅表示目录成员；未尝试加载时 `loadable` 为 null，之后依据真实加载完成/cache reuse；`smoke_tested` 要求夹具推理成功。状态明确区分 `not_configured`、`missing_files`、`load_failed`、`loadable`、`smoke_failed`、`smoke_tested`：文件存在但损坏属于加载失败，加载成功后的输入相关失败属于 smoke 失败。缺失文件只输出角色名（`model`，或 OCR 的 `det`/`rec`/`dictionary`）。pass 输出归一化错误 code、可选图片索引、cache_hit、batch_size、每帧目标/文本行数量，不输出检测内容、mask、OCR 文字、像素或 base64。报告和诊断错误不回显物理路径、密钥、环境/配置 options map 或原生异常消息。
+
+退出 0 表示所有选择均达到要求状态（preflight 为 `loadable`，warmup 为 `smoke_tested`）、各次尝试及清理成功，且报告成功写入并 flush 到 stdout。若 preflight 在成功加载会话后超时，仍可报告 state 为 `loadable`、`loadable: true`，但 pass 失败、错误为 timeout、退出 1；可加载不等于操作成功。配置/context/夹具、模型、smoke、资源、timeout、unload 或报告 write/flush 失败退出 1；配置前参数误用退出 2。`--help` 同样仅在输出成功写入并 flush 后退出 0。输出失败使用静态 stderr 诊断，不回显原生错误或传入值。成功退出不证明 HTTP ready、未选模型有效或其他输入可推理。顶层致命错误使用静态消息及 `configuration_failed`、`context_failed`、`fixture_failed`、`diagnostic_failed`、`invalid_arguments` code。
+
+**能力分层解读。** 报告包含 framework/runtime version、实际编译的 EP append 支持、runtime available-provider 列表、请求的 EP/device ID、context 创建及 `cpu_fallback_allowed`。公开 C++ `InferContext::Capabilities()` 不加载模型即可查询 runtime 事实。context 接纳、编译支持、runtime provider 可用与所选模型 smoke 成功是不同结论。允许 CPU fallback；请求某 provider 或 smoke 成功不证明每个算子实际在该 GPU/device 执行，不声称硬件 placement。
+
+**计时是 elapsed wall，不是 kernel benchmark。** cold/warm pass 包含请求 `wall_ns`；服务 `model_acquire`、`model_load`、`input_prepare`（base64/header 准备）、真实图片 `decode`；流水线 `wall_ns`、驻留 `capacity_wait_ns`、任务 `setup_ns` 及 `preprocess`、`inference`、`postprocess`。图像处理的五类耗时为 decode、preprocess、queue、inference、postprocess；各流水线阶段分开记录 `queue_ns`（入队至 Advance 开始）和 `execution_ns`。阶段含 `calls`/`completed_calls`，流水线含 `input_frames`/`completed_frames`/`complete`；服务阶段使用 `elapsed_ns`。四个服务阶段在 `calls` 为零时是 null；整个流水线仅在未进入时为 null。进入后，各流水线阶段始终保留四字段记录（`execution_ns`、`queue_ns`、`calls`、`completed_calls`），即使未执行。阶段 `calls: 0` 表示 execution 未到达，不是测得瞬时 inference；`queue_ns` 仍可能含被跳过任务的部分排队等待。失败在原生 drain 后保留部分工作/等待计数，真实 elapsed 为零可能只是时钟分辨率。OCR 包含全部阶段访问及 crop-recognition 循环。多帧、多 worker 的阶段耗时会重叠，求和**不等于** batch wall。inference 含会话 gate 等待、binding 与 output 工作，不是纯 ORT/GPU kernel 时间。请求 wall 包含结果打包，但没有单独 packing 阶段。
+
+**显式测量 API 决策。** 比较了向 controls 加 output-profile 指针、observer callback、拥有结果的 measured 返回值三种设计。`InferPipeline::RunMeasured` 和私有 service `RunMeasured` 采用第三种：按值拥有普通结果及固定计时记录，避免改变 `PipelineControl`/`ServiceControl` 布局及 output 指针所有权、observer 生命周期/callback 问题。普通 `Run` 行为不变；关闭测量时除 nullable-profile 分支外不增加时钟读取、堆分配或结果复制。新 API 使用者须重新构建/链接更新库；没有被替换的旧 API 需要兼容 shim。observer 本身有成本，解释细小差异前应对代表性夹具比较 measured/unmeasured 原始样本与中位数；不承诺通用开销百分比或跨机器速度阈值。
+
+**实测 observer 成本。** Linux x86_64 CPU 容器运行于 WSL2 kernel 6.6.87.2，使用 GCC 16.2.0（`O3`、fast-math）、ONNX Runtime 1.22.0、ONNXRUNTIME/CPU device 0，模型为 384 字节的 `yolo26_detect_threshold_raw.onnx` kV26 raw detection 夹具（FP32 输入 `[1,3,64,64]`）。批次为一张 32×32 全黑 `CV_8UC3` BGR 图片，confidence 0.5/NMS IoU 0.3；service 复用一次生成的 PNG/base64。保持同一存活 context/model/cache，持有首次成功响应租约，idle timeout 为零。setup、加载及 4 对 warmup 不计时。之后每个 API 执行 40 对调用，偶数对普通模式先执行，奇数对 measured 先执行；外部 steady-clock 只计调用本身，不含结果对比、`Succeed`、析构。中位数为排序后第 20、21 个样本均值向下取整。普通/measured 中位数：pipeline 为 204.208/180.008 µs（204,208/180,008 ns，差 −24.200 µs），service 为 176.263/216.701 µs（176,263/216,701 ns，差 +40.438 µs）。全部 80 对 class、confidence 位、bbox 及 service class names 精确一致，service measured 调用报告 warm cache hit 和 complete timing。pipeline 负差值是调度噪声，不是加速结论。这些特定夹具观察不是通用开销估计、硬件 placement 证明或性能保证；三个 worker 的阶段时间求和仍不等于 batch wall。
+
 ### 有界推理流水线
 
 HTTP v0 在全部图片解码成功后，使用前处理、ORT、后处理三个独立 worker；OCR 按检测及文本框 recognition minibatch 的依赖关系轮转阶段。图片结果按输入索引聚合；不同图片即使乱序完成，仍只返回最低失败索引，整批不返回部分结果。

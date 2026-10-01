@@ -45,6 +45,36 @@ std::shared_ptr<Ort::Env> SharedEnvironment() {
 }
 }  // namespace
 
+vision_simple::VSResult<vision_simple::InferRuntimeCapabilities>
+vision_simple::InferContext::Capabilities(InferFramework framework) noexcept {
+  if (framework != InferFramework::kONNXRUNTIME)
+    return MK_VSERROR(VisionSimpleErrorCode::kParameterError,
+                      "Unsupported capability framework");
+  try {
+    InferRuntimeCapabilities facts;
+    facts.framework = framework;
+    facts.runtime_version = Ort::GetVersionString();
+    facts.compiled_execution_providers.push_back(InferEP::kCPU);
+#ifdef VISION_SIMPLE_WITH_DML
+    facts.compiled_execution_providers.push_back(InferEP::kDML);
+#endif
+#ifdef VISION_SIMPLE_WITH_CUDA
+    facts.compiled_execution_providers.push_back(InferEP::kCUDA);
+#endif
+#ifdef VISION_SIMPLE_WITH_TENSORRT
+    facts.compiled_execution_providers.push_back(InferEP::kTensorRT);
+#endif
+#ifdef VISION_SIMPLE_WITH_RKNPU
+    facts.compiled_execution_providers.push_back(InferEP::kRKNPU);
+#endif
+    facts.available_execution_providers = Ort::GetAvailableProviders();
+    return facts;
+  } catch (...) {
+    return MK_VSERROR(VisionSimpleErrorCode::kRuntimeError,
+                      "Runtime capability query failed");
+  }
+}
+
 vision_simple::InferContextORT::InferContextORT(const InferEP ep,
                                                 InferArgs args)
     : InferContext(InferFramework::kONNXRUNTIME, ep, std::move(args)),

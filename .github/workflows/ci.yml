@@ -329,6 +329,11 @@ jobs:
           xmake build test_subtitle_service
           xmake run test_subtitle_service --project-root "$GITHUB_WORKSPACE"
 
+      - name: Run real-child selected-model diagnostic regression
+        if: matrix.run_http
+        run: |
+          server="$(xmake lua -q -c "import('core.project.config'); config.load(); import('core.project.project'); io.write(path.absolute(project.target('server'):targetfile()))")"
+          python scripts/test_diagnostics.py --server "$server" --project-root "$GITHUB_WORKSPACE"
       - name: Run real-server HTTP and startup regression
         if: matrix.run_http
         run: |

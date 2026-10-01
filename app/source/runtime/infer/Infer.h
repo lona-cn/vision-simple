@@ -39,6 +39,14 @@ enum class InferEP : uint8_t {
 
 using InferArgs = std::unordered_map<std::string, std::string>;
 
+// Append support and runtime-reported providers do not prove device placement.
+struct InferRuntimeCapabilities {
+  InferFramework framework;
+  std::string runtime_version;
+  std::vector<InferEP> compiled_execution_providers;
+  std::vector<std::string> available_execution_providers;
+  bool cpu_fallback_allowed = true;
+};
 class VISION_SIMPLE_API InferContext {
  protected:
   InferFramework framework_;
@@ -60,6 +68,8 @@ class VISION_SIMPLE_API InferContext {
   virtual const InferArgs& args() const noexcept;
   static CreateResult Create(InferFramework framework, InferEP ep,
                              InferArgs args = InferArgs{}) noexcept;
+  static VSResult<InferRuntimeCapabilities> Capabilities(
+      InferFramework framework = InferFramework::kONNXRUNTIME) noexcept;
 };
 
 //--------YOLO--------

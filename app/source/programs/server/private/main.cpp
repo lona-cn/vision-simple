@@ -12,6 +12,7 @@
 #endif
 
 #include "HTTPServer.h"
+#include "Diagnostics.h"
 #include "IOUtil.h"
 #include "Logger.h"
 
@@ -113,6 +114,7 @@ int WaitForShutdown() {
 }  // namespace
 
 int main(int argc, char* argv[]) try {
+  if (argc > 1) return vision_simple::RunDiagnosticsCLI(argc, argv);
   RegisterSignals();
 #if defined(_WIN32)
   SetConsoleOutputCP(CP_UTF8);

@@ -17,11 +17,27 @@ PipelineFailure Failure(PipelineFailureKind kind, const char* message) {
                                 : VisionSimpleErrorCode::kRuntimeError,
                             message}};
 }
+using Clock = std::chrono::steady_clock;
+uint64_t Nanoseconds(Clock::duration duration) noexcept {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+}
+struct WallTiming {
+  PipelineTiming* timing;
+  Clock::time_point start;
+  explicit WallTiming(PipelineTiming* value) noexcept : timing(value) {
+    if (timing) start = Clock::now();
+  }
+  ~WallTiming() {
+    if (timing) timing->wall_ns = Nanoseconds(Clock::now() - start);
+  }
+};
 }  // namespace
 
 struct InferPipeline::Impl {
   struct Batch {
     PipelineControl control;
+    PipelineTiming* timing = nullptr;
     std::vector<detail::FrameResult> results;
     std::optional<PipelineFailure> failure;
     std::optional<PipelineFailureKind> interrupted;
@@ -31,6 +47,7 @@ struct InferPipeline::Impl {
     Batch* batch = nullptr;
     size_t index = 0;
     std::unique_ptr<detail::FrameTask> task;
+    Clock::time_point queued;
   };
   // Every queue can hold every resident slot. Transitions never need another
   // credit or allocation, including OCR's postprocess -> preprocess loop.
@@ -120,17 +137,31 @@ struct InferPipeline::Impl {
         Release(slot);
         continue;
       }
+      auto* timing = batch.timing;
+      Clock::time_point started;
       lock.unlock();
+      if (timing) started = Clock::now();
       auto next = entry.task->Advance();
+      const auto elapsed = timing ? Nanoseconds(Clock::now() - started) : 0;
       lock.lock();
+      if (timing) {
+        auto& stage = lane == 0 ? timing->preprocess
+                               : lane == 1 ? timing->inference : timing->postprocess;
+        stage.execution_ns += elapsed;
+        stage.queue_ns += Nanoseconds(started - entry.queued);
+        ++stage.calls;
+        if (next) ++stage.completed_calls;
+      }
       if (!next) Record(batch, entry.index, std::move(next.error()));
       if (Skip(batch, entry.index) || !next) {
         Release(slot);
       } else if (*next) {
+        if (timing) entry.queued = Clock::now();
         queues[static_cast<size_t>(**next)].Push(slot);
         changed.notify_all();
       } else {
         batch.results[entry.index] = entry.task->TakeResult();
+        if (timing) ++timing->completed_frames;
         Release(slot);
       }
     }
@@ -139,9 +170,13 @@ struct InferPipeline::Impl {
   template <typename Result, typename Model, typename Options>
   PipelineResult<Result> Run(Model& model, std::span<const cv::Mat> images,
                              Options inference_options,
-                             PipelineControl control) noexcept {
+                             PipelineControl control,
+                             PipelineTiming* timing = nullptr) noexcept {
+    WallTiming wall(timing);
+    if (timing) timing->input_frames = images.size();
     Batch batch;
     batch.control = control;
+    batch.timing = timing;
     std::unique_lock lock(mutex);
     Observe(batch);
     if (batch.interrupted)
@@ -154,7 +189,10 @@ struct InferPipeline::Impl {
         return std::unexpected(Failure(PipelineFailureKind::kInvalidRequest,
                                        "Invalid detector controls"));
     }
-    if (images.empty()) return std::vector<Result>{};
+    if (images.empty()) {
+      if (timing) timing->complete = true;
+      return std::vector<Result>{};
+    }
     if (batches == options.max_batches)
       return std::unexpected(
           Failure(PipelineFailureKind::kBusy, "Pipeline busy"));
@@ -163,11 +201,16 @@ struct InferPipeline::Impl {
     try {
       batch.results.resize(images.size());
       for (size_t index = 0; index < images.size(); ++index) {
+        Clock::time_point waiting;
+        const bool capacity_wait = timing && resident == options.capacity;
+        if (capacity_wait) waiting = Clock::now();
         while (resident == options.capacity && !Skip(batch, index)) {
           changed.wait_until(lock, control.stop, control.deadline, [&] {
             return resident < options.capacity || Skip(batch, index);
           });
         }
+        if (capacity_wait)
+          timing->capacity_wait_ns += Nanoseconds(Clock::now() - waiting);
         if (Skip(batch, index)) break;
         size_t slot = 0;
         while (slots[slot].batch) ++slot;
@@ -176,9 +219,13 @@ struct InferPipeline::Impl {
         entry.index = index;
         ++resident;
         ++batch.active;
+        Clock::time_point setup;
         lock.unlock();
+        if (timing) setup = Clock::now();
         auto task = detail::MakeFrameTask(model, images[index], inference_options);
+        const auto setup_ns = timing ? Nanoseconds(Clock::now() - setup) : 0;
         lock.lock();
+        if (timing) timing->setup_ns += setup_ns;
         if (!task) {
           Record(batch, index, std::move(task.error()));
           Release(slot);
@@ -189,6 +236,7 @@ struct InferPipeline::Impl {
           Release(slot);
           break;
         }
+        if (timing) entry.queued = Clock::now();
         queues[0].Push(slot);
         changed.notify_all();
       }
@@ -224,6 +272,7 @@ struct InferPipeline::Impl {
       Observe(batch);
       if (batch.interrupted)
         return std::unexpected(Failure(*batch.interrupted, "Interrupted"));
+      if (timing) timing->complete = true;
       return results;
     } catch (...) {
       return std::unexpected(
@@ -268,5 +317,26 @@ PipelineResult<YOLOTaskFrameResult> InferPipeline::Run(
     InferYOLOTask& model, std::span<const cv::Mat> images, YOLOInferenceOptions options,
     PipelineControl control) noexcept {
   return impl_->Run<YOLOTaskFrameResult>(model, images, options, control);
+}
+MeasuredPipelineResult<YOLOFrameResult> InferPipeline::RunMeasured(
+    InferYOLO& model, std::span<const cv::Mat> images, YOLOInferenceOptions options,
+    PipelineControl control) noexcept {
+  PipelineTiming timing;
+  auto result = impl_->Run<YOLOFrameResult>(model, images, options, control, &timing);
+  return {std::move(result), timing};
+}
+MeasuredPipelineResult<OCRFrameResult> InferPipeline::RunMeasured(
+    InferOCR& model, std::span<const cv::Mat> images, float threshold,
+    PipelineControl control) noexcept {
+  PipelineTiming timing;
+  auto result = impl_->Run<OCRFrameResult>(model, images, threshold, control, &timing);
+  return {std::move(result), timing};
+}
+MeasuredPipelineResult<YOLOTaskFrameResult> InferPipeline::RunMeasured(
+    InferYOLOTask& model, std::span<const cv::Mat> images, YOLOInferenceOptions options,
+    PipelineControl control) noexcept {
+  PipelineTiming timing;
+  auto result = impl_->Run<YOLOTaskFrameResult>(model, images, options, control, &timing);
+  return {std::move(result), timing};
 }
 }  // namespace vision_simple

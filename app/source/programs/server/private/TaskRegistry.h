@@ -20,6 +20,7 @@ struct TaskDescriptor {
   std::string_view description;
   VSResult<RegisteredModel> (*load)(InferContext&, const ModelDefinition&,
                                     size_t device);
+  std::span<const std::string_view> required_files;
 };
 
 std::span<const TaskDescriptor> RegisteredTasks() noexcept;
@@ -28,5 +29,5 @@ const TaskDescriptor* FindTask(std::string_view id) noexcept;
 ServiceResult<InferencePayload> RunRegisteredTask(
     RegisteredModel& model, InferPipeline& pipeline,
     std::span<const cv::Mat> images, YOLOInferenceOptions options,
-    PipelineControl control) noexcept;
+    PipelineControl control, PipelineTiming* timing = nullptr) noexcept;
 }  // namespace vision_simple

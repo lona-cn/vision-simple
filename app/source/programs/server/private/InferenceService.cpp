@@ -21,6 +21,29 @@
 namespace vision_simple {
 namespace {
 using Clock = std::chrono::steady_clock;
+// A disabled observer never reads the clock. Successful calls are marked only
+// after the operation and its existing validation have completed.
+class StageMeasurement {
+  ServiceStageTiming* timing_;
+  Clock::time_point started_{};
+
+ public:
+  explicit StageMeasurement(ServiceStageTiming* timing) noexcept
+      : timing_(timing) {
+    if (timing_) {
+      ++timing_->calls;
+      started_ = Clock::now();
+    }
+  }
+  ~StageMeasurement() {
+    if (timing_)
+      timing_->elapsed_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 Clock::now() - started_).count();
+  }
+  void Complete() noexcept {
+    if (timing_) ++timing_->completed_calls;
+  }
+};
 void LogFailure(std::string_view detail) noexcept {
   LogFacade::Error("inference", detail);
 }
@@ -182,21 +205,35 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
 
   VSResult<std::shared_ptr<ModelLease>> GetModel(const TaskDescriptor& task,
                                                  const std::string& name,
-                                                 const ModelConfig& config) {
+                                                 const ModelConfig& config,
+                                                 RequestTiming* timing) {
+    StageMeasurement acquire{timing ? &timing->model_acquire : nullptr};
     const std::lock_guard lock{cache_mutex_};
     const auto cached = models_cache_.find(ModelKeyView{task.id, name});
-    if (cached != models_cache_.end())
-      return std::make_shared<ModelLease>(shared_from_this(), cached->second);
+    if (cached != models_cache_.end()) {
+      if (timing) timing->cache_hit = true;
+      auto lease = std::make_shared<ModelLease>(shared_from_this(), cached->second);
+      acquire.Complete();
+      return lease;
+    }
     const auto definition =
         std::ranges::find_if(config.models, [&](const auto& value) {
           return value.task == task.id && value.name == name;
         });
     if (definition == config.models.end()) return std::shared_ptr<ModelLease>{};
-    auto model = task.load(*infer_context_, *definition, device_id_);
+    auto model = [&] {
+      if (!timing) return task.load(*infer_context_, *definition, device_id_);
+      StageMeasurement load{&timing->model_load};
+      auto result = task.load(*infer_context_, *definition, device_id_);
+      if (result) load.Complete();
+      return result;
+    }();
     if (!model) return std::unexpected(std::move(model.error()));
     auto [loaded, inserted] = models_cache_.try_emplace(
         ModelKey{std::string(task.id), name}, ModelEntry{std::move(*model)});
-    return std::make_shared<ModelLease>(shared_from_this(), loaded->second);
+    auto lease = std::make_shared<ModelLease>(shared_from_this(), loaded->second);
+    acquire.Complete();
+    return lease;
   }
 
   template <typename Image>
@@ -204,7 +241,8 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
                                        const std::string& model,
                                        std::span<const Image> input,
                                        YOLOInferenceOptions inference_options,
-                                       ServiceControl control) noexcept {
+                                       ServiceControl control,
+                                       RequestTiming* timing = nullptr) noexcept {
     ServiceError stage{ServiceFailure::kInvalidRequest, {}};
     try {
       const auto* task = FindTask(kind);
@@ -229,7 +267,7 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
       const PipelineControl pipeline_control{.stop = control.stop,
                                              .deadline = deadline};
       stage.kind = ServiceFailure::kModelLoad;
-      auto loaded = GetModel(*task, model, config->get());
+      auto loaded = GetModel(*task, model, config->get(), timing);
       if (!loaded) {
         LogFailure(loaded.error().message);
         return std::unexpected(stage);
@@ -239,9 +277,10 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
       auto lease = std::move(*loaded);
       if (input.empty()) {
         stage = {ServiceFailure::kInference, {}};
+        if (timing) timing->pipeline_entered = true;
         auto batch = RunRegisteredTask(lease->get(), *pipeline_,
                                       std::span<const cv::Mat>{}, inference_options,
-                                      pipeline_control);
+                                      pipeline_control, timing ? &timing->pipeline : nullptr);
         if (!batch) return std::unexpected(std::move(batch.error()));
         return InferenceResponse{std::move(*batch), std::move(lease)};
       }
@@ -261,7 +300,13 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
         for (size_t i = 0; i < input.size(); ++i) {
           if (auto error = CheckControl(pipeline_control)) return std::unexpected(*error);
           stage.image_index = i;
-          auto image = PrepareEncodedImage(input[i]);
+          auto image = [&] {
+            if (!timing) return PrepareEncodedImage(input[i]);
+            StageMeasurement prepare{&timing->input_prepare};
+            auto result = PrepareEncodedImage(input[i]);
+            if (result) prepare.Complete();
+            return result;
+          }();
           if (!image) return std::unexpected(stage);
           if (!AddImageBytes(image->pixels, bytes, credit, stage))
             return std::unexpected(stage);
@@ -293,7 +338,13 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
           if (auto error = CheckControl(pipeline_control)) return std::unexpected(*error);
           stage.image_index = i;
           credit.BeginDecode();
-          auto image = DecodeImageBytes(prepared[i].bytes);
+          auto image = [&] {
+            if (!timing) return DecodeImageBytes(prepared[i].bytes);
+            StageMeasurement decode{&timing->decode};
+            auto result = DecodeImageBytes(prepared[i].bytes);
+            if (result) decode.Complete();
+            return result;
+          }();
           if (!image || image->dims != 2 || image->type() != CV_8UC3 ||
               image->total() != prepared[i].pixels)
             return std::unexpected(stage);
@@ -302,8 +353,10 @@ struct InferenceService::Impl : std::enable_shared_from_this<Impl> {
         images = decoded;
       }
       stage = {ServiceFailure::kInference, {}};
+      if (timing) timing->pipeline_entered = true;
       auto batch = RunRegisteredTask(lease->get(), *pipeline_, images,
-                                     inference_options, pipeline_control);
+                                     inference_options, pipeline_control,
+                                     timing ? &timing->pipeline : nullptr);
       if (!batch) return std::unexpected(std::move(batch.error()));
       stage.kind = ServiceFailure::kInternal;
       return InferenceResponse{std::move(*batch), std::move(lease)};
@@ -411,6 +464,19 @@ ServiceResult<InferenceResponse> InferenceService::Run(
     std::span<const std::string> encoded, YOLOInferenceOptions options,
     ServiceControl control) noexcept {
   return impl_->Run(kind, model, encoded, options, control);
+}
+MeasuredInferenceResult InferenceService::RunMeasured(
+    InferenceKind kind, const std::string& model,
+    std::span<const std::string> encoded, YOLOInferenceOptions options,
+    ServiceControl control) noexcept {
+  const auto started = Clock::now();
+  RequestTiming timing;
+  timing.input_frames = encoded.size();
+  auto result = impl_->Run(kind, model, encoded, options, control, &timing);
+  timing.complete = result.has_value();
+  timing.wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       Clock::now() - started).count();
+  return {std::move(result), timing};
 }
 ServiceResult<InferenceResponse> InferenceService::RunFrames(
     InferenceKind kind, const std::string& model,

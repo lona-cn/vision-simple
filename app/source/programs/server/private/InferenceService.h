@@ -155,6 +155,24 @@ struct ServiceControl {
   std::chrono::steady_clock::time_point started =
       std::chrono::steady_clock::now();
 };
+struct ServiceStageTiming {
+  uint64_t elapsed_ns = 0;
+  uint64_t calls = 0;
+  uint64_t completed_calls = 0;
+};
+struct RequestTiming {
+  uint64_t wall_ns = 0;
+  size_t input_frames = 0;
+  ServiceStageTiming model_acquire, model_load, input_prepare, decode;
+  PipelineTiming pipeline;
+  bool pipeline_entered = false;
+  bool cache_hit = false;
+  bool complete = false;
+};
+struct MeasuredInferenceResult {
+  ServiceResult<InferenceResponse> result;
+  RequestTiming timing;
+};
 
 // Protocol-independent owner of loading, decoding, scheduling and lifecycle.
 // All methods support concurrent callers. Transport owners must join callers
@@ -171,6 +189,10 @@ class InferenceService {
                                        std::span<const std::string> images,
                                        YOLOInferenceOptions options = {},
                                        ServiceControl control = {}) noexcept;
+  MeasuredInferenceResult RunMeasured(
+      InferenceKind kind, const std::string& model,
+      std::span<const std::string> images, YOLOInferenceOptions options = {},
+      ServiceControl control = {}) noexcept;
   // Borrows BGR frames (including noncontiguous ROIs) until synchronous return.
   // Call Succeed() on the returned response after consuming its payload.
   ServiceResult<InferenceResponse> RunFrames(

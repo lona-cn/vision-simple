@@ -103,34 +103,36 @@ VSResult<RegisteredModel> LoadYOLOTask(InferContext& context,
   return RegisteredModel{std::move(*loaded)};
 }
 
+constexpr std::array<std::string_view, 1> kModelFiles{"model"};
+constexpr std::array<std::string_view, 3> kOCRFiles{"det", "rec", "dictionary"};
 constexpr std::array kTasks{
     TaskDescriptor{
         InferenceKind::kYOLO, kYOLOTaskId,
         "Detect objects in base64 images. Returns class_names and "
         "per-image class_id, confidence and bbox [x,y,width,height].",
-        LoadYOLO},
+        LoadYOLO, kModelFiles},
     TaskDescriptor{
         InferenceKind::kOCR, kOCRTaskId,
         "Recognize text in base64 images. Returns per-image text "
         "lines, confidence and bbox [x,y,width,height]; no free-form "
         "language generation.",
-        LoadOCR},
+        LoadOCR, kOCRFiles},
     TaskDescriptor{InferenceKind::kSegmentation, "seg",
                    "Segment objects in base64 images. Returns class_names and "
                    "per-image class_id, confidence, bbox [x,y,width,height], "
                    "and mask_png_base64: a binary PNG cropped to bbox.",
-                   LoadYOLOTask<YOLOTask::kSegmentation>},
+                   LoadYOLOTask<YOLOTask::kSegmentation>, kModelFiles},
     TaskDescriptor{InferenceKind::kPose, "pose",
                    "Estimate poses in base64 images. Returns class_names and "
                    "per-image class_id, confidence, bbox [x,y,width,height], "
                    "and keypoints with original-pixel x, y and confidence.",
-                   LoadYOLOTask<YOLOTask::kPose>},
+                   LoadYOLOTask<YOLOTask::kPose>, kModelFiles},
     TaskDescriptor{
         InferenceKind::kOBB, "obb",
         "Detect oriented objects in base64 images. Returns "
         "class_names and per-image class_id, confidence, four ordered "
         "original-pixel corners and first-edge angle in radians.",
-        LoadYOLOTask<YOLOTask::kOBB>}};
+        LoadYOLOTask<YOLOTask::kOBB>, kModelFiles}};
 
 ServiceError PipelineError(const PipelineFailure& failure) noexcept {
   LogFacade::Error("inference", failure.cause.message);
@@ -277,7 +279,7 @@ const TaskDescriptor* FindTask(std::string_view id) noexcept {
 ServiceResult<InferencePayload> RunRegisteredTask(
     RegisteredModel& model, InferPipeline& pipeline,
     std::span<const cv::Mat> images, YOLOInferenceOptions options,
-    PipelineControl control) noexcept {
+    PipelineControl control, PipelineTiming* timing) noexcept {
   try {
     return std::visit(
         [&](auto& typed_model) -> ServiceResult<InferencePayload> {
@@ -286,6 +288,19 @@ ServiceResult<InferencePayload> RunRegisteredTask(
             return std::unexpected(ServiceError{ServiceFailure::kInternal, {}});
           }
           auto batch = [&] {
+            if (timing) {
+              auto measured = [&] {
+                if constexpr (std::is_same_v<
+                                  std::remove_reference_t<decltype(*typed_model)>,
+                                  InferOCR>) {
+                  return pipeline.RunMeasured(*typed_model, images, 0.125f, control);
+                } else {
+                  return pipeline.RunMeasured(*typed_model, images, options, control);
+                }
+              }();
+              *timing = measured.timing;
+              return std::move(measured.result);
+            }
             if constexpr (std::is_same_v<
                               std::remove_reference_t<decltype(*typed_model)>,
                               InferOCR>) {
